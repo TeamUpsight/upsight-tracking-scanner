@@ -1677,6 +1677,7 @@ export async function runStorefrontAudit(
           evidence.runtime.product_consent_snapshot.succeeded = false;
           evidence.runtime.product_consent_snapshot.failure_code = 'PRODUCT_CONSENT_STATE_CAPTURE_FAILED';
           evidence.runtime.product_consent_snapshot.elapsed_ms = Date.now() - productConsentSnapshotStarted;
+          evidence.runtime.failed_phase ||= 'product_consent_state_capture';
           addTrace('product_consent_state_capture_failed', {
             reason_code: 'PRODUCT_CONSENT_STATE_CAPTURE_FAILED',
             error_family: runtimeErrorFamily(error)
@@ -1739,6 +1740,7 @@ export async function runStorefrontAudit(
       await configureBrowserGeo(context!, pdpPage, currentProxyCountry);
       await attachAuthorizedAccessHeader(context!, pdpPage, effectiveDomain);
       let selectedPdp = false;
+      let pdpNavigationCommitted = false;
       for (const [candidateIndex, pdpUrl] of pdpCandidates.slice(0, PDP_NAVIGATION_ATTEMPT_LIMIT).entries()) {
         currentPhase = 'product_pdp_load';
         const viewItemStart = evidence.product.ga4_view_item_hits.length;
@@ -1757,6 +1759,7 @@ export async function runStorefrontAudit(
             status: pdpResponse?.status() ?? null,
             candidate_attempt: candidateIndex + 1
           });
+          pdpNavigationCommitted = true;
           pdpOperation = 'pdp_domcontentloaded';
           await waitForDomContentSoft(pdpPage, 'product_pdp_load', 12_000);
           check();
@@ -1775,21 +1778,44 @@ export async function runStorefrontAudit(
           pdpOperation = 'pdp_settlement_wait';
           await wait(750, pdpPage);
           pdpOperation = 'pdp_candidate_assessment';
-          let assessment = await inspectPdpCandidate(pdpPage);
+          let assessmentUnavailable = false;
+          let assessment: Awaited<ReturnType<typeof inspectPdpCandidate>>;
+          try {
+            assessment = await inspectPdpCandidate(pdpPage);
+          } catch (error) {
+            assessmentUnavailable = true;
+            evidence.runtime.failed_phase ||= 'product_pdp_assessment';
+            assessment = {
+              signals: {
+                json_ld_product: false, og_product: false, product_form: false, visible_product_heading: false,
+                visible_price: false, enabled_add_to_cart: false, structured_in_stock: false,
+                structured_out_of_stock: false, unavailable_message: false, disabled_sold_out_control: false
+              },
+              is_product: false,
+              out_of_stock: false
+            };
+            addTrace('pdp_candidate_assessment_failed', {
+              pdp_url: safeUrl(pdpUrl),
+              candidate_attempt: candidateIndex + 1,
+              error_family: runtimeErrorFamily(error)
+            });
+          }
           check();
-          addTrace('pdp_candidate_assessed', {
-            pdp_url: safeUrl(pdpUrl),
-            is_product: assessment.is_product,
-            out_of_stock: assessment.out_of_stock,
-            signals: assessment.signals
-          });
+          if (!assessmentUnavailable) {
+            addTrace('pdp_candidate_assessed', {
+              pdp_url: safeUrl(pdpUrl),
+              is_product: assessment.is_product,
+              out_of_stock: assessment.out_of_stock,
+              signals: assessment.signals
+            });
+          }
           const candidateNetworkViewItemHits = () => evidence.product.ga4_view_item_hits.slice(viewItemStart)
             .filter((hit) => isViewItemForPdp(hit, pdpUrl));
           const candidateDataLayerViewItemHits = () => (evidence.product.data_layer_view_item_hits || []).slice(dataLayerViewItemStart)
             .filter((hit) => isViewItemForPdp(hit, pdpUrl));
           const candidateViewItemHits = () => [...candidateNetworkViewItemHits(), ...candidateDataLayerViewItemHits()];
           let candidateHits = candidateViewItemHits();
-          const needsTrackingEvidence = assessment.out_of_stock || !assessment.is_product && isStrongProductPath(pdpUrl);
+          const needsTrackingEvidence = assessmentUnavailable || assessment.out_of_stock || !assessment.is_product && isStrongProductPath(pdpUrl);
           if (needsTrackingEvidence && !candidateHits.some((hit) => hit.has_product)) {
             pdpOperation = 'pdp_candidate_tracking_observation';
             addTrace('pdp_candidate_tracking_observation_started', {
@@ -1807,8 +1833,20 @@ export async function runStorefrontAudit(
               addTrace('ga4_data_layer_view_item_captured', { phase: 'product_pdp_load', count: candidateDataLayerCaptured });
               candidateHits = candidateViewItemHits();
             }
-            if (!candidateHits.some((hit) => hit.has_product)) {
-              assessment = await inspectPdpCandidate(pdpPage);
+            if (!candidateHits.some((hit) => hit.has_product) && !assessmentUnavailable) {
+              try {
+                assessment = await inspectPdpCandidate(pdpPage);
+              } catch (error) {
+                assessmentUnavailable = true;
+                evidence.runtime.failed_phase ||= 'product_pdp_assessment';
+                addTrace('pdp_candidate_assessment_failed', {
+                  pdp_url: safeUrl(pdpUrl),
+                  candidate_attempt: candidateIndex + 1,
+                  error_family: runtimeErrorFamily(error)
+                });
+              }
+            }
+            if (!candidateHits.some((hit) => hit.has_product) && !assessmentUnavailable) {
               addTrace('pdp_candidate_reassessed_after_observation', {
                 pdp_url: safeUrl(pdpUrl),
                 is_product: assessment.is_product,
@@ -1818,7 +1856,9 @@ export async function runStorefrontAudit(
             }
           }
           const hasValidCandidateViewItem = candidateHits.some((hit) => hit.has_product);
-          const rejectionReason = pdpCandidateRejectionReason(assessment, hasValidCandidateViewItem);
+          const rejectionReason = assessmentUnavailable && !hasValidCandidateViewItem
+            ? 'PDP_ASSESSMENT_UNAVAILABLE'
+            : pdpCandidateRejectionReason(assessment, hasValidCandidateViewItem);
           if (rejectionReason) {
             addTrace('pdp_candidate_rejected', { pdp_url: safeUrl(pdpUrl), reason_code: rejectionReason });
             continue;
@@ -1954,7 +1994,7 @@ export async function runStorefrontAudit(
         }
       }
       if (!selectedPdp) {
-        evidence.product.navigation_succeeded = false;
+        evidence.product.navigation_succeeded = pdpNavigationCommitted;
         evidence.product.ga4_view_item_hits = [];
         evidence.product.data_layer_view_item_hits = [];
         addTrace('pdp_navigation_failed', {
