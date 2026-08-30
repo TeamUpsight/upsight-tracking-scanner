@@ -1,0 +1,19 @@
+{
+  "0": "event",
+  "1": "view_item",
+  "2": {
+    "items": [
+      {
+        "item_id": "listen-lively-OTC_M2_SparklingSilver",
+        "item_name": "Enhance Select M2 (rechargeable)",
+        "item_category": "hearing_aid",
+        "item_variant": "Sparkling Silver",
+        "price": 1695,
+        "quantity": 1,
+        "index": "",
+        "item_brand": ""
+      }
+    ],
+    "send_to": "default"
+  }
+}

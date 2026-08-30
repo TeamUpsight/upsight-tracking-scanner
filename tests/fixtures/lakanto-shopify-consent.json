@@ -1,0 +1,26 @@
+{
+  "case": "Shopify Privacy banner with explicit accept and decline controls",
+  "source_domain": "lakanto.com",
+  "controls": {
+    "accept": ".shopify-pc__banner__btn-accept",
+    "reject": ".shopify-pc__banner__btn-decline"
+  },
+  "before": {
+    "cookie_values": {},
+    "banner_visible": true,
+    "provider_state": {
+      "shopify_marketing_denied": null,
+      "shopify_analytics_denied": null,
+      "shopify_preferences_denied": null
+    }
+  },
+  "after": {
+    "cookie_values": {},
+    "banner_visible": false,
+    "provider_state": {
+      "shopify_marketing_denied": true,
+      "shopify_analytics_denied": true,
+      "shopify_preferences_denied": true
+    }
+  }
+}

@@ -1,0 +1,96 @@
+[
+  {
+    "name": "MeUndies — HTTP 429",
+    "page": { "valid": false, "status_code": 429, "access_category": "rate_limited" },
+    "expected": { "scan_status": "failed", "consent_status": "inconclusive", "product_payload_status": "not_tested", "server_side_status": "not_tested" }
+  },
+  {
+    "name": "Lakanto — Shopify/product tracking",
+    "consent": { "executed": true, "dom_selectors": ["#shopify-pc__banner"], "window_globals": ["Shopify.trackingConsent"] },
+    "product": { "executed": true, "discovery_executed": true, "pdp_url": "https://lakanto.com/products/example", "pdp_candidates": ["https://lakanto.com/products/example"], "navigation_succeeded": true },
+    "server_side": { "executed": true },
+    "requests": [
+      { "vendor": "ga4", "kind": "collection", "collector": "third_party", "host": "www.google-analytics.com", "path": "/g/collect", "method": "GET", "phase": "product_pdp_load", "timestamp": 1000, "event": "page_view", "measurement_id": "G-LAKANTO", "page_url": "https://lakanto.com/products/example" }
+    ],
+    "expected": { "cmp_provider": "Shopify Privacy", "product_payload_status": "missing_view_item", "ss_collection_type": "third_party" }
+  },
+  {
+    "name": "MATW — strong first-party/server-side collector",
+    "server_side": { "executed": true, "collector_cookie_names": ["FPID"], "collector_cookie_persisted": true },
+    "requests": [
+      { "vendor": "ga4", "kind": "collection", "collector": "first_party", "host": "data.matw.com", "path": "/g/collect", "method": "POST", "phase": "consent_initial_load", "timestamp": 1000, "event": "page_view", "measurement_id": "G-MATW", "page_url": "https://matw.com/" }
+    ],
+    "expected": { "server_side_status": "strong_server_side_evidence", "ss_collection_type": "first_party" }
+  },
+  {
+    "name": "OneTrust",
+    "consent": { "executed": true, "dom_selectors": ["#onetrust-banner-sdk"], "script_hosts": ["cdn.cookielaw.org"], "cookie_names": ["OptanonConsent"], "banner_visible": true },
+    "expected": { "cmp_provider": "OneTrust" }
+  },
+  {
+    "name": "Shopify Privacy",
+    "consent": { "executed": true, "dom_selectors": ["#shopify-pc__banner"], "window_globals": ["Shopify.trackingConsent"], "banner_visible": true },
+    "expected": { "cmp_provider": "Shopify Privacy" }
+  },
+  {
+    "name": "third-party-only GA4",
+    "server_side": { "executed": true },
+    "requests": [
+      { "vendor": "ga4", "kind": "collection", "collector": "third_party", "host": "analytics.google.com", "path": "/g/collect", "method": "GET", "phase": "consent_initial_load", "timestamp": 1000, "event": "page_view", "measurement_id": "G-THIRD", "page_url": "https://example.com/" }
+    ],
+    "expected": { "server_side_status": "not_detected", "ss_collection_type": "third_party" }
+  },
+  {
+    "name": "mixed collection",
+    "server_side": { "executed": true },
+    "requests": [
+      { "vendor": "ga4", "kind": "collection", "collector": "third_party", "host": "analytics.google.com", "path": "/g/collect", "method": "GET", "phase": "consent_initial_load", "timestamp": 1000, "event": "page_view", "measurement_id": "G-MIXED", "page_url": "https://example.com/" },
+      { "vendor": "ga4", "kind": "collection", "collector": "first_party", "host": "data.example.com", "path": "/g/collect", "method": "POST", "phase": "product_pdp_load", "timestamp": 5000, "event": "view_item", "measurement_id": "G-MIXED", "page_url": "https://example.com/products/one" }
+    ],
+    "expected": { "server_side_status": "first_party_collection_detected", "ss_collection_type": "mixed" }
+  },
+  {
+    "name": "strict duplicate collection",
+    "server_side": { "executed": true },
+    "requests": [
+      { "vendor": "ga4", "kind": "collection", "collector": "third_party", "host": "analytics.google.com", "path": "/g/collect", "method": "GET", "phase": "product_pdp_load", "timestamp": 1000, "event": "view_item", "measurement_id": "G-DUP", "client_id": "123.456", "session_id": "789", "page_url": "https://example.com/products/one" },
+      { "vendor": "ga4", "kind": "collection", "collector": "first_party", "host": "data.example.com", "path": "/g/collect", "method": "POST", "phase": "product_pdp_load", "timestamp": 1120, "event": "view_item", "measurement_id": "G-DUP", "client_id": "123.456", "session_id": "789", "page_url": "https://example.com/products/one" }
+    ],
+    "expected": { "server_side_status": "partial_or_misconfigured", "ss_collection_type": "mixed" }
+  },
+  {
+    "name": "proxy tunnel failure",
+    "page": { "valid": false, "access_category": "proxy_error" },
+    "expected": { "scan_status": "failed", "error_category": "proxy_error", "product_payload_status": "not_tested" }
+  },
+  {
+    "name": "bot protection",
+    "page": { "valid": false, "status_code": 403, "access_category": "bot_protection" },
+    "expected": { "scan_status": "failed", "error_category": "bot_protection", "consent_status": "inconclusive" }
+  },
+  {
+    "name": "PDP timeout",
+    "product": { "executed": true, "discovery_executed": true, "pdp_url": "https://example.com/products/one", "pdp_candidates": ["https://example.com/products/one"], "navigation_succeeded": false },
+    "expected": { "product_payload_status": "inconclusive" }
+  },
+  {
+    "name": "PDP not found",
+    "product": { "executed": true, "discovery_executed": true, "pdp_url": null, "pdp_candidates": [], "navigation_succeeded": false },
+    "expected": { "product_payload_status": "pdp_not_found" }
+  },
+  {
+    "name": "scan timeout",
+    "page": { "valid": true, "status_code": 200, "access_category": "scan_timeout" },
+    "expected": { "scan_status": "failed", "error_category": "scan_timeout", "overall_status": "inconclusive" }
+  },
+  {
+    "name": "manual cancellation",
+    "page": { "valid": true, "status_code": 200, "access_category": "cancelled" },
+    "expected": { "scan_status": "cancelled", "error_category": "cancelled", "overall_status": "inconclusive" }
+  },
+  {
+    "name": "server module budget skip",
+    "server_side": { "executed": false },
+    "expected": { "server_side_status": "not_tested", "ss_collection_type": "not_tested" }
+  }
+]

@@ -1,0 +1,109 @@
+{
+  "audit_id": "laird-superfood-regression",
+  "scanner_version": "2.0.0",
+  "rule_pack_version": "2026.08.27.1",
+  "domain": "lairdsuperfood.com",
+  "geo": "USA",
+  "mode": "diagnostic",
+  "page": {
+    "homepage_attempted": true,
+    "valid": true,
+    "status_code": 200,
+    "final_url": "https://lairdsuperfood.com/",
+    "access_category": "none",
+    "cms_signals": ["shopify"]
+  },
+  "network": {
+    "total_requests": 1,
+    "relevant_requests": [
+      {
+        "vendor": "ga4",
+        "kind": "collection",
+        "collector": "third_party",
+        "host": "analytics.google.com",
+        "path": "/g/collect",
+        "method": "GET",
+        "phase": "product_pdp_load",
+        "timestamp": 1000,
+        "event": "view_item",
+        "measurement_id": "G-EQKQBN73B3",
+        "page_url": "https://lairdsuperfood.com/products/protein-matcha",
+        "has_product": true,
+        "product_id": "shopify_US_7239461077027_42668183912483",
+        "product_name": "Original - Protein Matcha",
+        "brand": "Laird Superfood",
+        "category": "Protein Coffee",
+        "value": 18
+      }
+    ],
+    "relevant_requests_truncated": false,
+    "response_statuses": [],
+    "novel_endpoints": []
+  },
+  "consent": {
+    "executed": true,
+    "dom_selectors": [],
+    "script_hosts": [],
+    "network_signals": [],
+    "cookie_names": [],
+    "window_globals": [],
+    "iframe_hosts": [],
+    "provider_evidence": [],
+    "banner_visible": false,
+    "interaction_attempted": false,
+    "rejection_verified": false,
+    "post_reject_observation_completed": false
+  },
+  "product": {
+    "executed": true,
+    "discovery_executed": true,
+    "pdp_candidates": ["https://lairdsuperfood.com/products/protein-matcha"],
+    "pdp_url": "https://lairdsuperfood.com/products/protein-matcha",
+    "navigation_succeeded": true,
+    "observation_ms": 8000,
+    "ga4_view_item_hits": [
+      {
+        "vendor": "ga4",
+        "kind": "collection",
+        "collector": "third_party",
+        "host": "analytics.google.com",
+        "path": "/g/collect",
+        "method": "GET",
+        "phase": "product_pdp_load",
+        "timestamp": 1000,
+        "event": "view_item",
+        "measurement_id": "G-EQKQBN73B3",
+        "page_url": "https://lairdsuperfood.com/products/protein-matcha",
+        "has_product": true,
+        "product_id": "shopify_US_7239461077027_42668183912483",
+        "product_name": "Original - Protein Matcha",
+        "brand": "Laird Superfood",
+        "category": "Protein Coffee",
+        "value": 18
+      }
+    ],
+    "meta_view_content_hits": []
+  },
+  "server_side": {
+    "executed": true,
+    "first_party_collection_count": 0,
+    "same_origin_collection_count": 0,
+    "third_party_collection_count": 1,
+    "collector_cookie_names": [],
+    "collector_cookie_persistence_checked": false,
+    "collector_cookie_persisted": false,
+    "strict_duplicate_count": 0
+  },
+  "runtime": {
+    "started_at": "2026-08-27T00:00:00.000Z",
+    "completed_at": "2026-08-27T00:01:00.000Z",
+    "total_duration_ms": 60000,
+    "browserless_connect_ms": 1000,
+    "browserless_session_ms": 59000,
+    "proxy_retry_count": 0,
+    "proxy_port": 10001,
+    "module_durations_ms": { "consent": 10000, "product": 15000, "server_side": 1000 },
+    "evidence_size_bytes": 0,
+    "screenshots": []
+  }
+}

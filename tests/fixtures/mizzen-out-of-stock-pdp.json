@@ -1,0 +1,15 @@
+{
+  "case": "Product page explicitly unavailable",
+  "source_domain": "www.mizzenandmain.com",
+  "page_message": "Copa Polo - Set Sail is Out of Stock",
+  "signals": {
+    "json_ld_product": true,
+    "og_product": true,
+    "product_form": false,
+    "enabled_add_to_cart": false,
+    "structured_in_stock": false,
+    "structured_out_of_stock": true,
+    "unavailable_message": true,
+    "disabled_sold_out_control": true
+  }
+}

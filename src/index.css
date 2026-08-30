@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+
+  /* Upsight Digital Color Theme Map */
+  --color-primary: #00AD84;
+  --color-primary-hover: #00c798;
+  --color-bg-dark: #0F1219;
+  --color-bg-card: #161922;
+  --color-bg-card-hover: #1E222D;
+  --color-foreground: #F2F2F2;
+  
+  --color-destructive-accent: #FB2C36;
+  --color-warning-accent: #EDB200;
+  --color-secondary-accent: #FACC15;
+  
+  --color-neutral-border: #2D3139;
+  --color-neutral-border-muted: #1E222B;
+}
+
+html {
+  color-scheme: dark;
+  background: #0f1219;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+  background:
+    radial-gradient(circle at 12% -10%, rgba(0, 173, 132, 0.08), transparent 34rem),
+    #0f1219;
+}
+
+button:not(:disabled),
+summary,
+select,
+label[for],
+[role="button"]:not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+button,
+input,
+select,
+textarea,
+summary {
+  outline: none;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+a:focus-visible {
+  box-shadow: 0 0 0 2px #0f1219, 0 0 0 4px rgba(0, 173, 132, 0.8);
+}
+
+::selection {
+  background: rgba(0, 173, 132, 0.35);
+  color: #fff;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #374151 transparent;
+}
+
+summary::-webkit-details-marker {
+  display: none;
+}
+
+.action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border-width: 1px;
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.action-button:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+@keyframes button-glow {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(0, 173, 132, 0.4), 0 0 2px rgba(0, 173, 132, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 16px rgba(0, 173, 132, 0.7), 0 0 6px rgba(0, 173, 132, 0.4);
+  }
+}
+
+.glow-btn {
+  animation: button-glow 3s infinite;
+}
+
+.glow-badge {
+  box-shadow: 0 0 8px rgba(0, 173, 132, 0.2);
+}
+
+.glow-destructive-badge {
+  box-shadow: 0 0 8px rgba(251, 44, 54, 0.2);
+}
