@@ -96,6 +96,31 @@ describe('audit module selection', () => {
     expect(evidence).toEqual(before);
   });
 
+  it('preserves recorded access observations and flags conflicting access facts during replay', () => {
+    const evidence = baseEvidence('access-replay.example');
+    evidence.selected_modules = ['tracking'];
+    evidence.page.valid = false;
+    evidence.page.status_code = 403;
+    evidence.page.final_url = 'https://access-replay.example/challenge';
+    evidence.page.access_category = 'bot_protection';
+    evidence.access.valid_storefront = true;
+    evidence.access.http_status = 200;
+    evidence.access.final_url = 'https://access-replay.example/';
+    const result = replayEvidence(evidence);
+    expect(result.evidence_bundle).toMatchObject({
+      selected_modules: ['tracking'],
+      page: { valid: false, status_code: 403 },
+      access: { valid_storefront: true, http_status: 200 }
+    });
+    expect(result.consistency_violations).toEqual(expect.arrayContaining([
+      'ACCESS_VALIDITY_CONTRADICTION', 'ACCESS_HTTP_STATUS_CONTRADICTION', 'ACCESS_FINAL_URL_CONTRADICTION', 'ACCESS_SUCCESS_CATEGORY_CONTRADICTION'
+    ]));
+    expect(qaPrioritySignals(result, evidence, result.consistency_violations || []).map((signal) => signal.code)).toContain('ACCESS_STATE_CONTRADICTION');
+    const review = reviewAudit({ audit: result, trace: [{ step: 'scan_finalized' }], evidence: result.evidence_bundle! });
+    expect(review.violations).toContainEqual(expect.objectContaining({ code: 'ACCESS_VALIDITY_CONTRADICTION' }));
+    expect(review.patch_plan.join(' ')).toMatch(/Do not auto-fix runtime state/);
+  });
+
   it('preserves tracking without a Consent audit and server-side without PDP discovery', () => {
     const tracking = baseEvidence('tracking-alone.example');
     tracking.selected_modules = ['tracking'];
@@ -818,6 +843,59 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     expect(metrics.operational).toMatchObject({ total_audits: 1, unique_websites: 1 });
   });
 
+  it('reports access reliability rates from bounded access evidence', () => {
+    const makeAudit = (id: string, geo: 'USA' | 'EU' | 'UK', overrides: Partial<EvidenceBundle['access']>, error: StorefrontAudit['error_category'] = 'none') => {
+      const evidence = baseEvidence(`${id}.example`);
+      evidence.geo = geo;
+      evidence.page.valid = overrides.valid_storefront ?? false;
+      evidence.page.status_code = overrides.http_status ?? null;
+      evidence.page.access_category = error;
+      evidence.access = { ...evidence.access, ...overrides, proxy_attempts: overrides.proxy_attempts || [] };
+      return {
+        audit_id: id, domain: `${id}.example`, group_label: null, scan_started_at: '2026-08-27T00:00:00.000Z', scan_completed_at: null,
+        scan_status: evidence.access.valid_storefront ? 'completed' : 'failed', error_category: error, tested_geos: geo,
+        cms_platform_detected: 'Unknown', overall_status: evidence.access.valid_storefront ? 'pass' : 'inconclusive', overall_confidence: evidence.access.valid_storefront ? 'high' : 'low',
+        consent_status: 'not_tested', cmp_provider: null, product_payload_status: 'not_tested', pdp_url_tested: null, server_side_status: 'not_tested', ss_collection_type: 'not_tested', trace_steps: '[]', evidence_bundle: evidence
+      } satisfies StorefrontAudit;
+    };
+    const audits = [
+      makeAudit('first', 'USA', { valid_storefront: true, http_status: 200, time_to_valid_storefront_ms: 100, proxy_attempts: [{ provider: 'decodo', geo: 'USA', port: 10001, attempt: 1, connect_duration_ms: 50, egress_result: 'reachable', neutral_https_result: 'reachable', target_result: 'valid_storefront', failure_classification: null }] }),
+      makeAudit('retry', 'EU', { valid_storefront: false, http_status: null, proxy_attempts: [
+        { provider: 'decodo', geo: 'EU', port: 10002, attempt: 1, connect_duration_ms: null, egress_result: 'reachable', neutral_https_result: 'reachable', target_result: 'failed', failure_classification: 'PROXY_TARGET_TUNNEL_FAILED' },
+        { provider: 'decodo', geo: 'EU', port: 10002, attempt: 2, connect_duration_ms: null, egress_result: 'reachable', neutral_https_result: 'reachable', target_result: 'failed', failure_classification: 'PROXY_TARGET_TUNNEL_FAILED' }
+      ] }, 'proxy_error'),
+      makeAudit('fallback', 'UK', { valid_storefront: true, http_status: 200, time_to_valid_storefront_ms: 200, final_provider: 'browserless_residential', proxy_fallback_used: true, proxy_fallback_recovered: true, challenge_detected: true, challenge_type: 'cloudflare', challenge_solver_used: true, challenge_solver_result: 'succeeded', proxy_attempts: [
+        { provider: 'decodo', geo: 'UK', port: 10003, attempt: 1, connect_duration_ms: 80, egress_result: 'reachable', neutral_https_result: 'reachable', target_result: 'failed', failure_classification: 'PROXY_EXTERNAL_TUNNEL_FAILED' },
+        { provider: 'browserless_residential', geo: 'UK', port: null, attempt: 2, connect_duration_ms: 90, egress_result: 'not_tested', neutral_https_result: 'not_tested', target_result: 'valid_storefront', failure_classification: null }
+      ] }),
+      makeAudit('waf', 'USA', { valid_storefront: false, http_status: 403, challenge_detected: true, challenge_type: 'unknown_challenge', challenge_solver_used: true, challenge_solver_result: 'failed' }, 'bot_protection'),
+      makeAudit('limit', 'EU', { valid_storefront: false, http_status: 429 }, 'rate_limited')
+    ];
+    const metrics = buildQualityMetrics(audits, []).operational;
+    expect(metrics).toMatchObject({
+      valid_storefront_rate: 0.4,
+      first_attempt_decodo_success_rate: 1 / 3,
+      decodo_retry_recovery_rate: 0,
+      browserless_residential_fallback_recovery_rate: 1,
+      challenge_detection_rate: 0.4,
+      challenge_solver_recovery_rate: 0.5,
+      proxy_failure_rate: 0.2,
+      http_403_rate: 0.2,
+      http_429_rate: 0.2,
+      bot_waf_failure_rate: 0.2,
+      median_access_time_ms: 100,
+      p95_access_time_ms: 200,
+      access_success_by_provider: {
+        decodo: { attempts: 4, successes: 1, success_rate: 0.25 },
+        browserless_residential: { attempts: 1, successes: 1, success_rate: 1 }
+      },
+      decodo_error_rate_by_port: {
+        10002: { attempts: 2, errors: 2, error_rate: 1 }
+      }
+    });
+    expect(metrics.access_success_by_geo).toMatchObject({ USA: { attempts: 2, successes: 1 }, EU: { attempts: 2, successes: 0 }, UK: { attempts: 1, successes: 1 } });
+  });
+
   it('scores human ground truth across positive and negative accuracy outcomes', () => {
     const evidence = baseEvidence('ground-truth.example');
     evidence.page.valid = true;
@@ -985,7 +1063,7 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     });
     expect(Object.keys(files)).toEqual(expect.arrayContaining([
       'audit-result.json', 'trace.jsonl', 'evidence.json', 'network-summary.json', 'cmp-evidence.json',
-      'product-evidence.json', 'normalized-evidence.json', 'quality-summary.json', 'proxy-attempt-summary.json',
+      'product-evidence.json', 'normalized-evidence.json', 'quality-summary.json', 'access-summary.json', 'proxy-attempt-summary.json',
       'build-metadata.json', 'screenshots/home_page.jpg'
     ]));
     expect(JSON.parse(String(files['quality-summary.json']))).toMatchObject({
@@ -993,6 +1071,7 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
       candidate_pdp_url: null,
       final_pdp_url: null
     });
+    expect(JSON.parse(String(files['access-summary.json']))).toMatchObject({ page: { valid: null, access_category: 'none' } });
   });
 });
 
@@ -1197,6 +1276,35 @@ describe('status resolver and consistency', () => {
     expect(replayEvidence(timeoutEvidence).failure_fingerprints).toContain('SCAN_GLOBAL_TIMEOUT');
   });
 
+  it('clusters access failure fingerprints and review signals without calling them compliance defects', () => {
+    const evidence = baseEvidence('access-fingerprints.example');
+    evidence.page.valid = false;
+    evidence.page.access_category = 'bot_protection';
+    evidence.access = {
+      ...evidence.access,
+      valid_storefront: false,
+      challenge_detected: true,
+      challenge_type: 'unknown_challenge',
+      challenge_solver_used: true,
+      challenge_solver_result: 'failed',
+      proxy_fallback_used: true,
+      proxy_fallback_recovered: false,
+      proxy_attempts: [
+        { provider: 'decodo', geo: 'USA', port: 10001, attempt: 1, connect_duration_ms: null, egress_result: 'unreachable', neutral_https_result: 'unreachable', target_result: 'failed', failure_classification: 'PROXY_PROVIDER_UNREACHABLE' },
+        { provider: 'decodo', geo: 'USA', port: 10002, attempt: 2, connect_duration_ms: null, egress_result: 'reachable', neutral_https_result: 'reachable', target_result: 'failed', failure_classification: 'PROXY_TARGET_TUNNEL_FAILED' },
+        { provider: 'decodo', geo: 'USA', port: 10003, attempt: 3, connect_duration_ms: null, egress_result: 'reachable', neutral_https_result: 'reachable', target_result: 'failed', failure_classification: 'PROXY_TARGET_TUNNEL_FAILED' }
+      ]
+    };
+    const replayed = replayEvidence(evidence);
+    expect(replayed.failure_fingerprints).toEqual(expect.arrayContaining([
+      'PROXY_PROVIDER_UNREACHABLE', 'PROXY_TARGET_TUNNEL_FAILED', 'PROXY_RETRY_EXHAUSTED', 'BROWSERLESS_FALLBACK_FAILED',
+      'GENERIC_WAF_UNRESOLVED', 'VALID_STOREFRONT_NOT_REACHED'
+    ]));
+    const signals = qaPrioritySignals(replayed, evidence, replayed.consistency_violations || []).map((signal) => signal.code);
+    expect(signals).toEqual(expect.arrayContaining(['UNKNOWN_CHALLENGE_TYPE', 'REPEATED_TARGET_TUNNEL_FAILURE', 'BROWSERLESS_FALLBACK_REQUIRED', 'CHALLENGE_SOLVER_FAILED']));
+    expect(signals).not.toContain('SCAN_EXECUTION_FAILED');
+  });
+
   it('surfaces missing finalization as a lifecycle fingerprint only when an audit is terminal', () => {
     const evidence = baseEvidence('missing-finalization.example');
     const audit = replayEvidence(evidence);
@@ -1229,6 +1337,7 @@ describe('offline replay regression corpus', () => {
       const evidence = baseEvidence('example.com');
       evidence.page = { ...evidence.page, valid: true, status_code: 200, access_category: 'none', ...fixture.page };
       evidence.selected_modules = fixture.selected_modules ?? evidence.selected_modules;
+      evidence.access = { ...evidence.access, ...fixture.access, proxy_attempts: fixture.access?.proxy_attempts || evidence.access.proxy_attempts };
       evidence.consent = { ...evidence.consent, ...fixture.consent };
       evidence.product = { ...evidence.product, ...fixture.product };
       evidence.server_side = { ...evidence.server_side, ...fixture.server_side };

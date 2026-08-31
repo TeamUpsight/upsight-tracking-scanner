@@ -74,6 +74,11 @@ function traceViolations(trace: Record<string, unknown>[]) {
   return violations;
 }
 
+function reviewExplanation(code: string) {
+  if (code.startsWith('ACCESS_')) return 'Recorded access facts disagree; preserve the observations and verify finalization rather than auto-correcting access state.';
+  return 'Cross-module evidence and final result disagree.';
+}
+
 export function reviewAudit(input: {
   audit: Partial<StorefrontAudit>;
   trace: unknown;
@@ -84,7 +89,7 @@ export function reviewAudit(input: {
   const consistency = enforceConsistency(input.audit, input.evidence);
   for (const code of consistency.violations) {
     if (!violations.some((violation) => violation.code === code)) {
-      violations.push({ code, severity: 'high', explanation: 'Cross-module evidence and final result disagree.' });
+      violations.push({ code, severity: 'high', explanation: reviewExplanation(code) });
     }
   }
   const fingerprints = generateFailureFingerprints(input.audit, input.evidence, consistency.violations);
@@ -94,11 +99,14 @@ export function reviewAudit(input: {
       ? `Operational scan failure: ${input.audit.error_category}.`
       : 'No deterministic scanner guardrail violation detected.');
 
+  const accessOnly = violations.length > 0 && violations.every((violation) => violation.code.startsWith('ACCESS_'));
   return {
     classification,
     violations,
     likely_root_cause: likelyRootCause,
-    patch_plan: violations.length
+    patch_plan: accessOnly
+      ? ['Inspect the recorded access facts and finalization order.', 'Do not auto-fix runtime state or infer a compliance finding from the failed access.']
+      : violations.length
       ? ['Inspect the cited evidence and resolver input.', 'Change the shared detector or resolver, not a domain-specific branch.', 'Replay the affected fixture before a live validation scan.']
       : ['No source patch suggested.'],
     regression_tests: violations.map((violation) => `Add or update a fixture covering ${violation.code}.`)

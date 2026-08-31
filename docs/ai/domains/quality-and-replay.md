@@ -19,7 +19,7 @@ Turns stored evidence and human feedback into reproducible rule evaluation, cons
 
 ## Flow and dependencies
 
-Live finalization calls the same replay/consistency/fingerprint functions used offline. API replay loads stored evidence and compares previous/current results without mutation. QA feedback persists separately and metrics classify verified outcomes only when an expected value permits scoring. Review candidates are recalculated from the current rule pack, use one latest audit per normalized website, attach feedback only from that audit, and omit rows marked correct.
+Live finalization calls the same replay/consistency/fingerprint functions used offline. API replay loads stored evidence and compares previous/current results without mutation. Access-quality metrics consume bounded `evidence.access` facts (provider attempts, challenge outcome, geo, port, and time-to-valid-storefront); they never trigger browser actions or reinterpret access observations as tracking findings. QA feedback persists separately and metrics classify verified outcomes only when an expected value permits scoring. Review candidates are recalculated from the current rule pack, use one latest audit per normalized website, attach feedback only from that audit, and omit rows marked correct.
 
 The reviewer consumes an audit, evidence, and parsed trace, then returns violations, likely root cause, patch guidance, and regression suggestions. The sanitized chronological trace remains a separate UI concept from derived reviewer output.
 

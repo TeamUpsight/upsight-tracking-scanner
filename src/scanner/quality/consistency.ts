@@ -1,6 +1,35 @@
 import type { EvidenceBundle, StorefrontAudit } from '../../types';
 import { includesAuditModule } from '../../audit-modules';
 
+function normalizedUrl(value: string | null) {
+  try {
+    if (!value) return null;
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, '') || '/'}`;
+  } catch {
+    return value;
+  }
+}
+
+/** Access observations are facts, not replay corrections. */
+export function accessEvidenceViolations(evidence: EvidenceBundle): string[] {
+  const access = evidence.access;
+  const violations: string[] = [];
+  if (access.valid_storefront !== null && evidence.page.valid !== null && access.valid_storefront !== evidence.page.valid) {
+    violations.push('ACCESS_VALIDITY_CONTRADICTION');
+  }
+  if (access.http_status !== null && evidence.page.status_code !== null && access.http_status !== evidence.page.status_code) {
+    violations.push('ACCESS_HTTP_STATUS_CONTRADICTION');
+  }
+  if (access.final_url && evidence.page.final_url && normalizedUrl(access.final_url) !== normalizedUrl(evidence.page.final_url)) {
+    violations.push('ACCESS_FINAL_URL_CONTRADICTION');
+  }
+  if (access.valid_storefront === true && evidence.page.access_category !== 'none') {
+    violations.push('ACCESS_SUCCESS_CATEGORY_CONTRADICTION');
+  }
+  return violations;
+}
+
 export interface ConsistencyResult {
   audit: Partial<StorefrontAudit>;
   violations: string[];
@@ -9,7 +38,7 @@ export interface ConsistencyResult {
 
 export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: EvidenceBundle): ConsistencyResult {
   const corrected = { ...audit };
-  const violations: string[] = [];
+  const violations: string[] = accessEvidenceViolations(evidence);
   let priority = 0;
 
   if (includesAuditModule(evidence.selected_modules, 'tracking') && corrected.site_ga4_detected === true && corrected.product_payload_status === 'ga4_not_detected') {

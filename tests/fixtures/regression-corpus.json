@@ -64,6 +64,15 @@
     "expected": { "scan_status": "failed", "error_category": "proxy_error", "product_payload_status": "not_tested" }
   },
   {
+    "name": "Confirmed regression — target tunnel retries remain an access failure",
+    "page": { "valid": false, "access_category": "proxy_error" },
+    "access": { "valid_storefront": false, "proxy_attempts": [
+      { "provider": "decodo", "geo": "USA", "port": 10001, "attempt": 1, "connect_duration_ms": null, "egress_result": "reachable", "neutral_https_result": "reachable", "target_result": "failed", "failure_classification": "PROXY_TARGET_TUNNEL_FAILED" },
+      { "provider": "decodo", "geo": "USA", "port": 10002, "attempt": 2, "connect_duration_ms": null, "egress_result": "reachable", "neutral_https_result": "reachable", "target_result": "failed", "failure_classification": "PROXY_TARGET_TUNNEL_FAILED" }
+    ] },
+    "expected": { "failure_fingerprints": ["PROXY_RETRY_EXHAUSTED", "PROXY_TARGET_TUNNEL_FAILED", "PROXY_TUNNEL_FAILED", "VALID_STOREFRONT_NOT_REACHED"] }
+  },
+  {
     "name": "bot protection",
     "page": { "valid": false, "status_code": 403, "access_category": "bot_protection" },
     "expected": { "scan_status": "failed", "error_category": "bot_protection", "consent_status": "inconclusive" }

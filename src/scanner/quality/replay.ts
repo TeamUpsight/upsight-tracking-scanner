@@ -2,7 +2,7 @@ import type { CmpProvider, CmsPlatform, EvidenceBundle, StorefrontAudit } from '
 import { detectCMP } from '../consent/detect-cmp';
 import { classifyCollection } from '../server-side/classify-collection';
 import { resolveConsentStatus, resolveOverallStatus, resolveProductPayloadStatus } from '../resolver/status-resolver';
-import { enforceConsistency } from './consistency';
+import { accessEvidenceViolations, enforceConsistency } from './consistency';
 import { calculateQaPriority, generateFailureFingerprints } from './fingerprints';
 import { selectedAuditModules } from '../../audit-modules';
 
@@ -71,9 +71,14 @@ export function normalizeReplayEvidence(source: EvidenceBundle): EvidenceBundle 
 
 export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit> {
   const evidence = normalizeReplayEvidence(source);
-  if (evidence.access.valid_storefront !== null) evidence.page.valid = evidence.access.valid_storefront;
-  if (evidence.access.final_url) evidence.page.final_url = evidence.access.final_url;
-  if (evidence.access.http_status !== null) evidence.page.status_code = evidence.access.http_status;
+  // Older bundles did not have the access section.  Their normalized fallback
+  // mirrors the recorded page fields.  New bundles retain both fact sets so
+  // replay can flag contradictions instead of replacing browser observations.
+  if (!source.access) {
+    if (evidence.access.valid_storefront !== null) evidence.page.valid = evidence.access.valid_storefront;
+    if (evidence.access.final_url) evidence.page.final_url = evidence.access.final_url;
+    if (evidence.access.http_status !== null) evidence.page.status_code = evidence.access.http_status;
+  }
   const selected_modules = selectedAuditModules(evidence.selected_modules);
   const consentSelected = selected_modules.includes('consent');
   const trackingSelected = selected_modules.includes('tracking');
@@ -201,11 +206,13 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
   });
   base.overall_status = overall.status;
   base.overall_confidence = overall.confidence;
+  const accessViolations = accessEvidenceViolations(evidence);
   const consistency = enforceConsistency(base, evidence);
   const corrected = { ...base, ...consistency.audit };
-  corrected.consistency_violations = consistency.violations;
-  corrected.failure_fingerprints = generateFailureFingerprints(corrected, evidence, consistency.violations);
-  corrected.qa_priority = calculateQaPriority(corrected, evidence, consistency.violations);
+  const violations = [...new Set([...accessViolations, ...consistency.violations])];
+  corrected.consistency_violations = violations;
+  corrected.failure_fingerprints = generateFailureFingerprints(corrected, evidence, violations);
+  corrected.qa_priority = calculateQaPriority(corrected, evidence, violations);
   corrected.evidence_bundle = evidence;
   corrected.runtime_metrics = evidence.runtime;
   return corrected;

@@ -42,6 +42,31 @@ function rate(numerator: number, denominator: number) {
   return denominator ? numerator / denominator : null;
 }
 
+function percentile(values: number[], quantile: number) {
+  if (!values.length) return null;
+  return values[Math.min(values.length - 1, Math.ceil(values.length * quantile) - 1)];
+}
+
+function accessFor(audit: StorefrontAudit) {
+  return audit.evidence_bundle?.access || null;
+}
+
+function accessSucceeded(audit: StorefrontAudit) {
+  const access = accessFor(audit);
+  return access ? access.valid_storefront === true : audit.evidence_bundle?.page.valid === true;
+}
+
+function groupAccessOutcomes(items: Array<{ key: string; success: boolean }>) {
+  const groups: Record<string, { attempts: number; successes: number; success_rate: number | null }> = {};
+  for (const item of items) {
+    const group = groups[item.key] ||= { attempts: 0, successes: 0, success_rate: null };
+    group.attempts += 1;
+    if (item.success) group.successes += 1;
+  }
+  for (const group of Object.values(groups)) group.success_rate = rate(group.successes, group.attempts);
+  return groups;
+}
+
 function countBy<T>(items: T[], value: (item: T) => unknown) {
   const counts: Record<string, number> = {};
   for (const item of items) {
@@ -87,6 +112,35 @@ export function buildQualityMetrics(audits: StorefrontAudit[], feedback: QaFeedb
   const ga4 = categories.GA4 || { true_positive: 0, false_positive: 0, true_negative: 0, false_negative: 0 };
   const durations = latestAudits.map((audit) => audit.runtime_metrics?.total_duration_ms ?? audit.evidence_bundle?.runtime.total_duration_ms)
     .filter((value): value is number => typeof value === 'number').sort((a, b) => a - b);
+  const accessTimes = latestAudits.map((audit) => accessFor(audit)?.time_to_valid_storefront_ms)
+    .filter((value): value is number => typeof value === 'number').sort((a, b) => a - b);
+  const firstDecodoAttempts = latestAudits.flatMap((audit) => (accessFor(audit)?.proxy_attempts || [])
+    .filter((attempt) => attempt.provider === 'decodo' && attempt.attempt === 1));
+  const decodoRetryAudits = latestAudits.filter((audit) => (accessFor(audit)?.proxy_attempts || [])
+    .filter((attempt) => attempt.provider === 'decodo').some((attempt) => attempt.attempt > 1));
+  const fallbackAudits = latestAudits.filter((audit) => accessFor(audit)?.proxy_fallback_used);
+  const detectedChallenges = latestAudits.filter((audit) => accessFor(audit)?.challenge_detected);
+  const solverAttempts = latestAudits.filter((audit) => accessFor(audit)?.challenge_solver_used);
+  const accessAttempts = latestAudits.flatMap((audit) => accessFor(audit)?.proxy_attempts || []);
+  const providerOutcomes = groupAccessOutcomes(accessAttempts.map((attempt) => ({
+    key: attempt.provider,
+    success: attempt.target_result === 'valid_storefront'
+  })));
+  const geoOutcomes = groupAccessOutcomes(latestAudits.map((audit) => ({
+    key: audit.evidence_bundle?.geo || String(audit.tested_geos || 'unknown'),
+    success: accessSucceeded(audit)
+  })));
+  const decodoPortAttempts = accessAttempts.filter((attempt) => attempt.provider === 'decodo' && attempt.port !== null);
+  const decodoErrorRateByPort = Object.entries(decodoPortAttempts.reduce<Record<string, { attempts: number; errors: number }>>((ports, attempt) => {
+    const port = String(attempt.port);
+    const current = ports[port] ||= { attempts: 0, errors: 0 };
+    current.attempts += 1;
+    if (attempt.failure_classification || attempt.egress_result === 'unreachable' || attempt.neutral_https_result === 'unreachable') current.errors += 1;
+    return ports;
+  }, {})).reduce<Record<string, { attempts: number; errors: number; error_rate: number | null }>>((ports, [port, values]) => {
+    ports[port] = { ...values, error_rate: rate(values.errors, values.attempts) };
+    return ports;
+  }, {});
   const retries = latestAudits.map((audit) => audit.runtime_metrics?.proxy_retry_count ?? audit.evidence_bundle?.runtime.proxy_retry_count ?? 0);
   const retryAttempts = latestAudits.filter((_audit, index) => retries[index] > 0);
   const fingerprintClusters: Record<string, number> = {};
@@ -173,18 +227,31 @@ export function buildQualityMetrics(audits: StorefrontAudit[], feedback: QaFeedb
       rate_limit_rate: rate(latestAudits.filter((audit) => audit.error_category === 'rate_limited').length, latestAudits.length),
       bot_rate: rate(latestAudits.filter((audit) => audit.error_category === 'bot_protection').length, latestAudits.length),
       access_block_rate: rate(latestAudits.filter((audit) => audit.error_category === 'access_blocked').length, latestAudits.length),
-      valid_storefront_rate: rate(latestAudits.filter((audit) => audit.evidence_bundle?.page.valid === true).length, latestAudits.length),
-      challenge_clear_rate: rate(
-        latestAudits.filter((audit) => audit.evidence_bundle?.page.challenge_cleared).length,
-        latestAudits.filter((audit) => audit.evidence_bundle?.page.bot_provider !== null && audit.evidence_bundle?.page.bot_provider !== undefined).length
-      ),
+      valid_storefront_rate: rate(latestAudits.filter(accessSucceeded).length, latestAudits.length),
+      first_attempt_decodo_success_rate: rate(firstDecodoAttempts.filter((attempt) => attempt.target_result === 'valid_storefront').length, firstDecodoAttempts.length),
+      decodo_retry_recovery_rate: rate(decodoRetryAudits.filter((audit) => {
+        const access = accessFor(audit);
+        return access?.valid_storefront === true && access.final_provider === 'decodo';
+      }).length, decodoRetryAudits.length),
+      browserless_residential_fallback_recovery_rate: rate(fallbackAudits.filter((audit) => accessFor(audit)?.proxy_fallback_recovered).length, fallbackAudits.length),
+      challenge_detection_rate: rate(detectedChallenges.length, latestAudits.length),
+      challenge_solver_recovery_rate: rate(solverAttempts.filter((audit) => accessFor(audit)?.challenge_solver_result === 'succeeded').length, solverAttempts.length),
+      challenge_clear_rate: rate(latestAudits.filter((audit) => audit.evidence_bundle?.page.challenge_cleared).length, detectedChallenges.length),
+      http_403_rate: rate(latestAudits.filter((audit) => (accessFor(audit)?.http_status ?? audit.evidence_bundle?.page.status_code) === 403).length, latestAudits.length),
+      http_429_rate: rate(latestAudits.filter((audit) => (accessFor(audit)?.http_status ?? audit.evidence_bundle?.page.status_code) === 429).length, latestAudits.length),
+      bot_waf_failure_rate: rate(latestAudits.filter((audit) => audit.error_category === 'bot_protection').length, latestAudits.length),
       external_redirect_acceptance_rate: rate(
         latestAudits.filter((audit) => audit.evidence_bundle?.page.cross_domain_redirect_accepted).length,
         latestAudits.length
       ),
       inconclusive_rate: rate(latestAudits.filter((audit) => audit.overall_status === 'inconclusive').length, latestAudits.length),
       average_scan_time_ms: durations.length ? durations.reduce((sum, duration) => sum + duration, 0) / durations.length : null,
-      p95_scan_time_ms: durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null,
+      p95_scan_time_ms: percentile(durations, 0.95),
+      median_access_time_ms: percentile(accessTimes, 0.5),
+      p95_access_time_ms: percentile(accessTimes, 0.95),
+      access_success_by_provider: providerOutcomes,
+      access_success_by_geo: geoOutcomes,
+      decodo_error_rate_by_port: decodoErrorRateByPort,
       retry_rate: rate(retryAttempts.length, latestAudits.length),
       retry_recovery_rate: rate(
         retryAttempts.filter((audit) => audit.evidence_bundle?.runtime.proxy_retry_recovered).length,

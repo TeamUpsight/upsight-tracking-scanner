@@ -29,10 +29,42 @@ function pathsDiffer(candidate: string | null | undefined, final: string | null 
   }
 }
 
+function accessAttempts(evidence: EvidenceBundle) {
+  return evidence.access?.proxy_attempts || [];
+}
+
+function unresolvedChallengeCode(type: EvidenceBundle['access']['challenge_type']) {
+  return ({
+    cloudflare: 'CLOUDFLARE_CHALLENGE_UNRESOLVED',
+    datadome: 'DATADOME_CHALLENGE_UNRESOLVED',
+    akamai: 'AKAMAI_CHALLENGE_UNRESOLVED',
+    perimeterx: 'PERIMETERX_CHALLENGE_UNRESOLVED'
+  } satisfies Partial<Record<NonNullable<EvidenceBundle['access']['challenge_type']>, string>>)[type || ''] || 'GENERIC_WAF_UNRESOLVED';
+}
+
 export function generateFailureFingerprints(audit: Partial<StorefrontAudit>, evidence: EvidenceBundle, consistency: string[] = []) {
   const codes = new Set<string>();
   if (audit.error_category === 'rate_limited') codes.add('HTTP_RATE_LIMITED');
   if (audit.error_category === 'proxy_error') codes.add('PROXY_TUNNEL_FAILED');
+  const access = evidence.access;
+  const attempts = accessAttempts(evidence);
+  const accessFailures = attempts.map((attempt) => attempt.failure_classification);
+  if (accessFailures.includes('PROXY_PROVIDER_UNREACHABLE')) codes.add('PROXY_PROVIDER_UNREACHABLE');
+  if (accessFailures.includes('PROXY_EXTERNAL_TUNNEL_FAILED')) codes.add('PROXY_EXTERNAL_TUNNEL_FAILED');
+  if (accessFailures.includes('PROXY_TARGET_TUNNEL_FAILED')) codes.add('PROXY_TARGET_TUNNEL_FAILED');
+  const decodoAttempts = attempts.filter((attempt) => attempt.provider === 'decodo');
+  if (decodoAttempts.length > 1 && access.valid_storefront !== true && !decodoAttempts.some((attempt) => attempt.target_result === 'valid_storefront')) {
+    codes.add('PROXY_RETRY_EXHAUSTED');
+  }
+  if (access.proxy_fallback_used && !access.proxy_fallback_recovered && access.valid_storefront !== true) {
+    codes.add('BROWSERLESS_FALLBACK_FAILED');
+  }
+  if (access.challenge_detected && !evidence.page.challenge_cleared && access.valid_storefront !== true) {
+    codes.add(unresolvedChallengeCode(access.challenge_type));
+  }
+  if (access.valid_storefront === false && audit.scan_status && !['pending', 'scanning', 'cancelled'].includes(audit.scan_status)) {
+    codes.add('VALID_STOREFRONT_NOT_REACHED');
+  }
   const proxyFailures = (evidence.runtime.proxy_attempts || []).map((attempt) => attempt.failure_reason);
   if (proxyFailures.includes('PROXY_TARGET_TUNNEL_FAILED')) codes.add('PROXY_TARGET_TUNNEL_FAILED');
   if (proxyFailures.includes('PROXY_EXTERNAL_TUNNEL_FAILED')) codes.add('PROXY_EXTERNAL_TUNNEL_FAILED');
@@ -80,6 +112,22 @@ export function qaPrioritySignals(
   };
 
   if (consistency.length > 0) add('CROSS_MODULE_CONTRADICTION', 'Contradictory module findings', 40, 'critical');
+  if (consistency.some((code) => code.startsWith('ACCESS_'))) {
+    add('ACCESS_STATE_CONTRADICTION', 'Access facts disagree across recorded states', 35, 'high');
+  }
+
+  const access = evidence.access;
+  const attempts = accessAttempts(evidence);
+  const targetTunnelFailures = attempts.filter((attempt) => attempt.failure_classification === 'PROXY_TARGET_TUNNEL_FAILED').length;
+  if (access.challenge_type === 'unknown_challenge') add('UNKNOWN_CHALLENGE_TYPE', 'New challenge type needs access review', 25, 'high');
+  if (targetTunnelFailures >= 2) add('REPEATED_TARGET_TUNNEL_FAILURE', 'Repeated target-specific tunnel failures', 30, 'high');
+  if (access.proxy_fallback_used) add('BROWSERLESS_FALLBACK_REQUIRED', 'Residential fallback was required for access', 15, 'medium');
+  if (access.challenge_solver_used && ['failed', 'inconclusive'].includes(access.challenge_solver_result)) {
+    add('CHALLENGE_SOLVER_FAILED', 'Challenge solver did not restore access', 30, 'high');
+  }
+  if (access.http_status !== null && access.http_status >= 200 && access.http_status < 400 && access.valid_storefront === false) {
+    add('VALID_HTTP_INVALID_STOREFRONT', 'Valid HTTP response did not yield a storefront', 20, 'high');
+  }
 
   if (audit.scan_status === 'failed' && audit.error_category !== 'none') {
     const infrastructureFailure = ['rate_limited', 'bot_protection', 'proxy_error', 'access_blocked', 'dns_error', 'ssl_error', 'navigation_timeout', 'scan_timeout'].includes(String(audit.error_category));
