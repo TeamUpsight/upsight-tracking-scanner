@@ -568,20 +568,10 @@ export function twoLevelPdpCandidate(raw: string, domain: string) {
   }
 }
 
-export function randomizePdpCandidates(candidates: string[], random: () => number = Math.random) {
-  const shuffle = (items: string[]) => {
-    const result = [...items];
-    for (let index = result.length - 1; index > 0; index -= 1) {
-      const swap = Math.floor(Math.max(0, Math.min(0.999999, random())) * (index + 1));
-      [result[index], result[swap]] = [result[swap], result[index]];
-    }
-    return result;
-  };
-  return shuffle([...new Set(candidates)]);
-}
-
 export function prioritizePdpCandidatePool(productPatternCandidates: string[], twoLevelFallbackCandidates: string[]) {
-  return productPatternCandidates.length > 0 ? productPatternCandidates : twoLevelFallbackCandidates;
+  // Preserve discovery order: product-pattern URLs are stronger evidence, but a
+  // bad explicit URL must never prevent trying a valid two-level fallback.
+  return [...new Set([...productPatternCandidates, ...twoLevelFallbackCandidates])];
 }
 
 export interface PdpCandidateSignals {
@@ -625,17 +615,46 @@ export function isStrongProductPath(raw: string) {
   }
 }
 
-export function isViewItemForPdp(hit: TrackingRequestEvidence, pdpUrl: string) {
-  if (hit.vendor !== 'ga4' || hit.event !== 'view_item' || !hit.has_product) return false;
-  if (!hit.page_url) return true;
+function matchesPdpUrl(pageUrl: string | undefined, candidateUrl: string, finalPdpUrl = candidateUrl) {
+  if (!pageUrl) return true;
   try {
-    const hitUrl = new URL(hit.page_url);
-    const candidate = new URL(pdpUrl);
-    return isSafeCanonicalRedirect(candidate.hostname, hitUrl.hostname) &&
-      hitUrl.pathname.replace(/\/+$/, '') === candidate.pathname.replace(/\/+$/, '');
+    const hitUrl = new URL(pageUrl);
+    const targets = [finalPdpUrl, candidateUrl];
+    return targets.some((target) => {
+      const pdpUrl = new URL(target);
+      return isSafeCanonicalRedirect(pdpUrl.hostname, hitUrl.hostname) &&
+        hitUrl.pathname.replace(/\/+$/, '') === pdpUrl.pathname.replace(/\/+$/, '');
+    });
   } catch {
     return false;
   }
+}
+
+export function isViewItemForPdp(hit: TrackingRequestEvidence, candidateUrl: string, finalPdpUrl = candidateUrl) {
+  if (hit.vendor !== 'ga4' || hit.event !== 'view_item' || !hit.has_product) return false;
+  return matchesPdpUrl(hit.page_url, candidateUrl, finalPdpUrl);
+}
+
+export function isMetaViewContentForPdp(hit: TrackingRequestEvidence, candidateUrl: string, finalPdpUrl = candidateUrl) {
+  return hit.vendor === 'meta' && hit.event?.toLowerCase() === 'viewcontent' &&
+    matchesPdpUrl(hit.page_url, candidateUrl, finalPdpUrl);
+}
+
+export function pdpReadinessSatisfied(
+  assessment: { is_product: boolean } | null,
+  hasValidViewItem: boolean
+) {
+  return Boolean(assessment?.is_product || hasValidViewItem);
+}
+
+export function canKeepTimedOutPdp(input: {
+  navigationTimedOut: boolean;
+  finalPdpUrlValid: boolean;
+  assessment: { is_product: boolean } | null;
+  hasValidViewItem: boolean;
+}) {
+  return !input.navigationTimedOut || input.finalPdpUrlValid ||
+    pdpReadinessSatisfied(input.assessment, input.hasValidViewItem);
 }
 
 async function inspectPdpCandidate(page: Page) {
@@ -686,7 +705,7 @@ async function inspectPdpCandidate(page: Page) {
   return { signals, ...assessPdpCandidate(signals) };
 }
 
-async function discoverPdp(page: Page, domain: string, check: () => void) {
+async function discoverPdp(page: Page, domain: string, check: () => void, candidateLimit: number) {
   check();
   const links = await page.$$eval('a[href]', (elements) => elements.map((element) => (element as HTMLAnchorElement).href)).catch(() => []);
   check();
@@ -720,7 +739,7 @@ async function discoverPdp(page: Page, domain: string, check: () => void) {
   }
   const candidates = prioritizePdpCandidatePool(productCandidates, twoLevelFallbackCandidates);
   check();
-  return randomizePdpCandidates(candidates).slice(0, 20);
+  return candidates.slice(0, candidateLimit);
 }
 
 function cmsSignalsFromHtml(html: string) {
@@ -851,6 +870,12 @@ export async function runStorefrontAudit(
     DEFAULT_PRODUCT_CONSENT_BUDGET_MS,
     3_000,
     maxPhaseBudgetMs
+  );
+  const pdpCandidateAttemptLimit = boundedInteger(
+    process.env.PDP_NAVIGATION_ATTEMPT_LIMIT,
+    PDP_NAVIGATION_ATTEMPT_LIMIT,
+    1,
+    PDP_NAVIGATION_ATTEMPT_LIMIT
   );
   const normalizedDomain = normalizeAuditDomain(params.domain);
   const geo = params.tested_geos && ['USA', 'EU', 'UK'].includes(params.tested_geos)
@@ -1650,13 +1675,13 @@ export async function runStorefrontAudit(
     evidence.product.executed = true;
     evidence.product.discovery_executed = true;
     currentPhase = 'product_discovery';
-    addTrace('product_context_started', { max_pdp_urls_to_audit: 1, max_candidate_attempts: PDP_NAVIGATION_ATTEMPT_LIMIT });
+    addTrace('product_context_started', { max_pdp_urls_to_audit: 1, max_candidate_attempts: pdpCandidateAttemptLimit });
     let pdpCandidates: string[] = [];
     try {
       pdpCandidates = await withinPhaseBudget(
         'product_discovery',
         Math.max(1, Math.min(productDiscoveryBudgetMs, productBudgetRemaining())),
-        () => discoverPdp(homepage!, effectiveDomain, check)
+        () => discoverPdp(homepage!, effectiveDomain, check, pdpCandidateAttemptLimit)
       );
       check();
     } catch (error) {
@@ -1692,16 +1717,15 @@ export async function runStorefrontAudit(
             reason_code: 'PRODUCT_CONSENT_STATE_CAPTURE_FAILED',
             error_family: runtimeErrorFamily(error)
           });
+          evidence.consent.tracking_enablement = 'inconclusive';
         }
         if (beforeEnablement) {
         const alreadyEnabled = verifyConsentAcceptance(cmp.provider, beforeEnablement, beforeEnablement, false);
         if (alreadyEnabled.verified) {
-          evidence.consent.acceptance_attempted = false;
-          evidence.consent.acceptance_verified = true;
+          evidence.consent.tracking_enablement = 'already_enabled';
           addTrace('product_consent_already_enabled', { provider: cmp.provider, evidence: alreadyEnabled.evidence });
         } else {
           currentPhase = 'product_consent_enablement';
-          evidence.consent.acceptance_attempted = true;
           let accepted = false;
           try {
             accepted = await withinPhaseBudget(
@@ -1717,6 +1741,7 @@ export async function runStorefrontAudit(
               reason_code: isPhaseTimeout(error) ? 'PRODUCT_CONSENT_ENABLEMENT_TIMEOUT' : 'PRODUCT_CONSENT_ENABLEMENT_FAILED',
               error_family: runtimeErrorFamily(error)
             });
+            evidence.consent.tracking_enablement = 'inconclusive';
           }
           check();
           addTrace('product_consent_enablement', { attempted: true, action_taken: accepted, provider: cmp.provider });
@@ -1747,7 +1772,9 @@ export async function runStorefrontAudit(
             return beforeEnablement;
           });
           const acceptance = verifyConsentAcceptance(cmp.provider, beforeEnablement, afterEnablement, accepted);
-          evidence.consent.acceptance_verified = acceptance.verified;
+          evidence.consent.tracking_enablement = acceptance.verified
+            ? 'accepted'
+            : accepted ? 'inconclusive' : 'failed';
           addTrace(acceptance.verified ? 'product_consent_enablement_verified' : 'product_consent_enablement_not_verified', {
             provider: cmp.provider,
             evidence: acceptance.evidence
@@ -1762,7 +1789,7 @@ export async function runStorefrontAudit(
       await attachAuthorizedAccessHeader(context!, pdpPage, effectiveDomain);
       let selectedPdp = false;
       let pdpNavigationCommitted = false;
-      const maxPdpCandidates = Math.min(3, PDP_NAVIGATION_ATTEMPT_LIMIT, pdpCandidates.length);
+      const maxPdpCandidates = Math.min(pdpCandidateAttemptLimit, pdpCandidates.length);
       for (const [candidateIndex, pdpUrl] of pdpCandidates.slice(0, maxPdpCandidates).entries()) {
         try { checkProductBudget(); } catch (error) {
           if (!isPhaseTimeout(error)) throw error;
@@ -1782,23 +1809,36 @@ export async function runStorefrontAudit(
         let pdpOperation = 'pdp_navigation_commit';
         try {
           check();
-          const pdpResponse = await withinPhaseBudget(
-            'product_pdp_navigation',
-            Math.max(1, Math.min(12_000, productBudgetRemaining())),
-            () => pdpPage!.goto(pdpUrl, { waitUntil: 'commit', timeout: 12_000 })
-          );
-          addTrace('pdp_navigation_committed', {
-            pdp_url: safeUrl(pdpUrl),
-            status: pdpResponse?.status() ?? null,
-            candidate_attempt: candidateIndex + 1
-          });
-          pdpNavigationCommitted = true;
+          let pdpResponse: Response | null = null;
+          let navigationTimedOut = false;
+          try {
+            pdpResponse = await pdpPage!.goto(pdpUrl, {
+              waitUntil: 'commit',
+              timeout: Math.max(1, Math.min(12_000, productBudgetRemaining()))
+            });
+          } catch (error) {
+            if (!isNavigationTimeout(error)) throw error;
+            navigationTimedOut = true;
+            addTrace('pdp_navigation_timeout_observing_evidence', {
+              candidate_url: safeUrl(pdpUrl), current_url: safeUrl(pdpPage!.url()), candidate_attempt: candidateIndex + 1
+            });
+          }
+          const finalPdpUrl = safeUrl(pdpPage!.url()) || safeUrl(pdpUrl)!;
+          evidence.product.candidate_url = safeUrl(pdpUrl);
+          evidence.product.final_pdp_url = finalPdpUrl;
+          if (!navigationTimedOut) {
+            addTrace('pdp_navigation_committed', {
+              candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl,
+              status: pdpResponse?.status() ?? null, candidate_attempt: candidateIndex + 1
+            });
+            pdpNavigationCommitted = true;
+          }
           pdpOperation = 'pdp_domcontentloaded';
           await waitForDomContentSoft(pdpPage, 'product_pdp_load', 12_000);
           checkProductBudget();
           pdpOperation = 'pdp_access_inspection';
           const pdpAccess = await inspectPageAccess(pdpPage, pdpResponse);
-          if (!isValidStorefrontStatus(pdpResponse?.status() || null) || pdpAccess.category !== 'none') {
+          if ((!navigationTimedOut && !isValidStorefrontStatus(pdpResponse?.status() || null)) || pdpAccess.category !== 'none') {
             addTrace('pdp_access_invalid', {
               pdp_url: safeUrl(pdpUrl),
               status: pdpResponse?.status() || null,
@@ -1844,12 +1884,16 @@ export async function runStorefrontAudit(
             });
           }
           const candidateNetworkViewItemHits = () => evidence.product.ga4_view_item_hits.slice(viewItemStart)
-            .filter((hit) => isViewItemForPdp(hit, pdpUrl));
+            .filter((hit) => isViewItemForPdp(hit, pdpUrl, finalPdpUrl));
           const candidateDataLayerViewItemHits = () => (evidence.product.data_layer_view_item_hits || []).slice(dataLayerViewItemStart)
-            .filter((hit) => isViewItemForPdp(hit, pdpUrl));
+            .filter((hit) => isViewItemForPdp(hit, pdpUrl, finalPdpUrl));
           const candidateViewItemHits = () => [...candidateNetworkViewItemHits(), ...candidateDataLayerViewItemHits()];
           let candidateHits = candidateViewItemHits();
-          const needsTrackingEvidence = assessmentUnavailable || assessment.out_of_stock || !assessment.is_product && isStrongProductPath(pdpUrl);
+          const finalPdpUrlValid = Boolean(
+            productPatternPdpCandidate(finalPdpUrl, effectiveDomain) || twoLevelPdpCandidate(finalPdpUrl, effectiveDomain)
+          );
+          const needsTrackingEvidence = assessmentUnavailable || assessment.out_of_stock ||
+            !pdpReadinessSatisfied(assessment, candidateHits.some((hit) => hit.has_product));
           if (needsTrackingEvidence && !candidateHits.some((hit) => hit.has_product)) {
             pdpOperation = 'pdp_candidate_tracking_observation';
             addTrace('pdp_candidate_tracking_observation_started', {
@@ -1857,9 +1901,24 @@ export async function runStorefrontAudit(
               reason: assessment.out_of_stock ? 'Out-of-stock signal can be overridden by a valid view_item' : 'Strong product path lacks conventional DOM product signals'
             });
             const candidateObservationStart = Date.now();
+            let readinessPolls = 0;
             while (Date.now() - candidateObservationStart < PDP_POST_LOAD_OBSERVATION_MS) {
               candidateHits = candidateViewItemHits();
               if (candidateHits.some((hit) => hit.has_product)) break;
+              // JS storefronts frequently hydrate product DOM after commit. Poll
+              // boundedly so either DOM or a network view_item wins the race.
+              if (readinessPolls++ % 5 === 0 && !assessmentUnavailable) {
+                try {
+                  assessment = await inspectPdpCandidate(pdpPage);
+                  if (assessment.is_product && !assessment.out_of_stock) break;
+                } catch (error) {
+                  assessmentUnavailable = true;
+                  addTrace('pdp_candidate_assessment_failed', {
+                    pdp_url: finalPdpUrl, candidate_attempt: candidateIndex + 1,
+                    error_family: runtimeErrorFamily(error)
+                  });
+                }
+              }
               await wait(100, pdpPage);
               checkProductBudget();
             }
@@ -1891,6 +1950,10 @@ export async function runStorefrontAudit(
             }
           }
           const hasValidCandidateViewItem = candidateHits.some((hit) => hit.has_product);
+          if (!canKeepTimedOutPdp({ navigationTimedOut, finalPdpUrlValid, assessment, hasValidViewItem: hasValidCandidateViewItem })) {
+            addTrace('pdp_candidate_rejected', { candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl, reason_code: 'PDP_NAV_TIMEOUT' });
+            continue;
+          }
           const rejectionReason = assessmentUnavailable && !hasValidCandidateViewItem
             ? 'PDP_ASSESSMENT_UNAVAILABLE'
             : pdpCandidateRejectionReason(assessment, hasValidCandidateViewItem);
@@ -1906,9 +1969,13 @@ export async function runStorefrontAudit(
           }
 
           selectedPdp = true;
-          evidence.product.pdp_url = safeUrl(pdpUrl);
+          evidence.product.pdp_url = finalPdpUrl;
+          evidence.product.candidate_url = safeUrl(pdpUrl);
+          evidence.product.final_pdp_url = finalPdpUrl;
           evidence.product.navigation_succeeded = true;
-          addTrace('pdp_url_selected', { pdp_url: safeUrl(pdpUrl), candidate_attempt: candidateIndex + 1 });
+          evidence.product.meta_view_content_hits = evidence.product.meta_view_content_hits
+            .filter((hit) => isMetaViewContentForPdp(hit, pdpUrl, finalPdpUrl));
+          addTrace('pdp_url_selected', { candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl, candidate_attempt: candidateIndex + 1 });
           addTrace('pdp_navigation_completed', { status: pdpResponse?.status() });
           pdpOperation = 'pdp_hydration_engagement';
           await pdpPage.evaluate(() => {
@@ -1942,6 +2009,8 @@ export async function runStorefrontAudit(
           const finalViewItems = [...finalNetworkViewItems, ...finalDataLayerViewItems];
           evidence.product.ga4_view_item_hits = finalNetworkViewItems;
           evidence.product.data_layer_view_item_hits = finalDataLayerViewItems;
+          evidence.product.meta_view_content_hits = evidence.product.meta_view_content_hits
+            .filter((hit) => isMetaViewContentForPdp(hit, pdpUrl, finalPdpUrl));
           if (finalViewItems.some((hit) => hit.has_product)) {
             const hit = finalViewItems.find((item) => item.has_product)!;
             addTrace('ga4_item_payload_detected', {

@@ -168,12 +168,17 @@ export interface EvidenceBundle {
     rejection_verified: boolean;
     acceptance_attempted?: boolean;
     acceptance_verified?: boolean;
+    // This records the minimal CMP action used to enable Tracking. It is
+    // deliberately separate from the Consent module's reject audit.
+    tracking_enablement?: 'not_needed' | 'already_enabled' | 'accepted' | 'failed' | 'inconclusive';
     post_reject_observation_completed: boolean;
   };
   product: {
     executed: boolean;
     discovery_executed: boolean;
     pdp_candidates: string[];
+    candidate_url?: string | null;
+    final_pdp_url?: string | null;
     pdp_url: string | null;
     navigation_succeeded: boolean;
     observation_ms: number;

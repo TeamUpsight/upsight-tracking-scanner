@@ -21,8 +21,8 @@ import { parseGA4DataLayerEntry, parseGA4Request } from './tracking/ga4';
 import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } from './tracking/meta';
 import {
   assessPdpCandidate, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
-  isStrongProductPath, isViewItemForPdp, parseEgressCountry, pdpCandidateRejectionReason, prioritizePdpCandidatePool,
-  productPatternPdpCandidate, randomizePdpCandidates, trustArcPreferenceControls, twoLevelPdpCandidate
+  canKeepTimedOutPdp, isStrongProductPath, isViewItemForPdp, parseEgressCountry, pdpCandidateRejectionReason,
+  pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, trustArcPreferenceControls, twoLevelPdpCandidate
 } from './audit-runner';
 import { parseRetryAfterMs, resolveAccessDecision, resolveHostnameEvidence, resolveHostnameStatus } from './navigation';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
@@ -94,6 +94,41 @@ describe('audit module selection', () => {
     server.server_side.executed = true;
     expect(replayEvidence(server)).toMatchObject({ product_payload_status: 'not_tested', server_side_status: 'not_detected' });
   });
+
+  it('records Tracking-only CMP enablement without executing the Consent module', () => {
+    const evidence = baseEvidence('tracking-cmp.example');
+    evidence.selected_modules = ['tracking'];
+    evidence.page.valid = true;
+    evidence.consent.executed = false;
+    evidence.consent.tracking_enablement = 'accepted';
+    evidence.product.executed = true;
+    evidence.product.discovery_executed = true;
+    evidence.product.pdp_candidates = ['https://tracking-cmp.example/product/model'];
+    evidence.product.final_pdp_url = 'https://tracking-cmp.example/product/model';
+    evidence.product.navigation_succeeded = true;
+    const result = replayEvidence(evidence);
+    expect(result.consent_status).toBe('not_tested');
+    expect(result.reason_codes).not.toContain('CMP_NOT_TESTED');
+    expect(evidence.consent.executed).toBe(false);
+  });
+
+  it('keeps GA4 installation separate from collection and view_item semantics', () => {
+    const evidence = baseEvidence('ga4-script.example');
+    evidence.selected_modules = ['tracking'];
+    evidence.page.valid = true;
+    evidence.product.executed = true;
+    evidence.product.discovery_executed = true;
+    evidence.product.pdp_candidates = ['https://ga4-script.example/product/model'];
+    evidence.product.final_pdp_url = 'https://ga4-script.example/product/model';
+    evidence.product.navigation_succeeded = true;
+    evidence.network.relevant_requests = [{
+      vendor: 'ga4', kind: 'script', collector: 'third_party', host: 'www.googletagmanager.com', path: '/gtag/js',
+      method: 'GET', phase: 'consent_initial_load', timestamp: 1, measurement_id: 'G-TEST'
+    }];
+    const result = replayEvidence(evidence);
+    expect(result).toMatchObject({ site_ga4_detected: true, site_ga4_collection_hit_detected: false, product_payload_status: 'missing_view_item' });
+    expect(result.finding_confidence?.ga4.reason_code).toBe('GA4_SCRIPT_ONLY');
+  });
 });
 
 describe('centralized tracking parsers', () => {
@@ -111,6 +146,11 @@ describe('centralized tracking parsers', () => {
       value: 18
     });
     expect(parsed?.page_url).toContain('/products/protein-matcha');
+  });
+
+  it('keeps GA4 collection and ecommerce parameter parsing shared for delayed PDP evidence', () => {
+    const parsed = parseGA4Request('https://analytics.google.com/g/collect?v=2&tid=G-TEST123&en=view_item&dl=https%3A%2F%2Fexample.com%2Fproduct%2Fcanonical&pr1=idSKU-1~nmExample&pr2=idSKU-2~nmSecond&ep.ecomm_prodid=SKU-1&ep.ecomm_pagetype=product&epn.ecomm_totalvalue=42');
+    expect(parsed).toMatchObject({ kind: 'collection', event: 'view_item', has_product: true, product_id: 'SKU-1', value: 42 });
   });
 
   it('does not identify GTM or a generic collect URL as GA4', () => {
@@ -200,9 +240,9 @@ describe('PDP candidate selection', () => {
     expect(twoLevelPdpCandidate('https://example.com/blogs/news', 'example.com')).toBeNull();
   });
 
-  it('uses established product-path candidates before the generic two-level fallback', () => {
+  it('ranks established product-path candidates first but retains generic fallback candidates', () => {
     expect(productPatternPdpCandidate('https://example.com/store/products/item-one', 'example.com')).toBe('https://example.com/store/products/item-one');
-    expect(prioritizePdpCandidatePool(['product-one', 'product-two'], ['fallback-one'])).toEqual(['product-one', 'product-two']);
+    expect(prioritizePdpCandidatePool(['product-one', 'product-two'], ['fallback-one', 'product-one'])).toEqual(['product-one', 'product-two', 'fallback-one']);
     expect(prioritizePdpCandidatePool([], ['fallback-one'])).toEqual(['fallback-one']);
   });
 
@@ -213,9 +253,9 @@ describe('PDP candidate selection', () => {
     expect(productPatternPdpCandidate('https://example.com/product/model-a', 'example.com')).toBe('https://example.com/product/model-a');
   });
 
-  it('deduplicates and shuffles candidates before navigation', () => {
-    const shuffled = randomizePdpCandidates(['one', 'two', 'three', 'one'], () => 0);
-    expect(shuffled).toEqual(['two', 'three', 'one']);
+  it('keeps PDP candidate ordering deterministic so an explicit failure can reach fallback', () => {
+    const candidates = prioritizePdpCandidatePool(['https://example.com/product/unavailable'], ['https://example.com/catalog/working']);
+    expect(candidates).toEqual(['https://example.com/product/unavailable', 'https://example.com/catalog/working']);
   });
 
   it('rejects an out-of-stock product and accepts a product with a usable cart action', () => {
@@ -244,6 +284,11 @@ describe('PDP candidate selection', () => {
     } satisfies TrackingRequestEvidence;
     expect(isViewItemForPdp(hit, 'https://www.example.com/product/model-a')).toBe(true);
     expect(isViewItemForPdp(hit, 'https://example.com/product/model-b')).toBe(false);
+    expect(isViewItemForPdp({ ...hit, page_url: 'https://example.com/products/model-a' }, 'https://example.com/product/model-a', 'https://example.com/products/model-a')).toBe(true);
+    expect(pdpReadinessSatisfied(null, false)).toBe(false);
+    expect(pdpReadinessSatisfied({ is_product: true }, false)).toBe(true);
+    expect(canKeepTimedOutPdp({ navigationTimedOut: true, finalPdpUrlValid: false, assessment: null, hasValidViewItem: true })).toBe(true);
+    expect(canKeepTimedOutPdp({ navigationTimedOut: true, finalPdpUrlValid: false, assessment: null, hasValidViewItem: false })).toBe(false);
   });
 });
 

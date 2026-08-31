@@ -117,12 +117,15 @@ export class EvidenceCollector {
         rejection_verified: false,
         acceptance_attempted: false,
         acceptance_verified: false,
+        tracking_enablement: 'not_needed',
         post_reject_observation_completed: false
       },
       product: {
         executed: false,
         discovery_executed: false,
         pdp_candidates: [],
+        candidate_url: null,
+        final_pdp_url: null,
         pdp_url: null,
         navigation_succeeded: false,
         observation_ms: 0,

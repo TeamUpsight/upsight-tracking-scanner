@@ -26,21 +26,29 @@ export function replayEvidence(evidence: EvidenceBundle): Partial<StorefrontAudi
   const ga4 = requests.filter((request) => request.vendor === 'ga4');
   const ga4Collections = ga4.filter((request) => request.kind === 'collection');
   const dataLayerViewItems = evidence.product.data_layer_view_item_hits || [];
-  const ga4Installed = ga4.length > 0 || dataLayerViewItems.length > 0;
+  // Installation, collection, and product semantics intentionally remain
+  // separate: a script does not prove collection, and collection does not
+  // prove view_item.
+  const ga4Installed = ga4.some((request) => request.kind === 'script' || request.kind === 'collection') || dataLayerViewItems.length > 0;
   const meta = requests.filter((request) => request.vendor === 'meta');
   const metaCollections = meta.filter((request) => request.kind === 'collection');
   const metaInstallationSignals = (evidence.network.installation_signals || []).filter((signal) => signal.vendor === 'meta');
   const metaInstalled = meta.length > 0 || metaInstallationSignals.length > 0;
   const measurementIds = [...new Set([...ga4, ...dataLayerViewItems].map((hit) => hit.measurement_id).filter(Boolean))] as string[];
-  const pdpPath = (() => {
-    try { return evidence.product.pdp_url ? new URL(evidence.product.pdp_url).pathname.replace(/\/+$/, '') : null; } catch { return null; }
-  })();
+  const pdpPaths = [evidence.product.final_pdp_url, evidence.product.pdp_url, evidence.product.candidate_url]
+    .flatMap((url) => {
+      try { return url ? [new URL(url).pathname.replace(/\/+$/, '')] : []; } catch { return []; }
+    });
   const pdpGa4CollectionObserved = ga4Collections.some((request) => {
     if (!request.phase.includes('product_pdp')) return false;
-    if (!request.page_url || !pdpPath) return true;
-    try { return new URL(request.page_url).pathname.replace(/\/+$/, '') === pdpPath; } catch { return false; }
+    if (!request.page_url || !pdpPaths.length) return true;
+    try { return pdpPaths.includes(new URL(request.page_url).pathname.replace(/\/+$/, '')); } catch { return false; }
   });
-  const consentEnablementValid = !consentSelected || !evidence.consent.acceptance_attempted || evidence.consent.acceptance_verified === true || pdpGa4CollectionObserved;
+  const trackingEnablement = evidence.consent.tracking_enablement || 'not_needed';
+  const legacyEnablementInconclusive = evidence.consent.acceptance_attempted === true && evidence.consent.acceptance_verified !== true;
+  const trackingEnablementValid = (
+    !legacyEnablementInconclusive && ['not_needed', 'already_enabled', 'accepted'].includes(trackingEnablement)
+  ) || pdpGa4CollectionObserved;
 
   const cmp = consentSelected && evidence.consent.executed
     ? detectCMP({
@@ -72,8 +80,8 @@ export function replayEvidence(evidence: EvidenceBundle): Partial<StorefrontAudi
     page_valid: evidence.page.valid,
     pdp_found: evidence.product.pdp_candidates.length > 0 || Boolean(evidence.product.pdp_url),
     pdp_navigation_succeeded: evidence.product.navigation_succeeded,
-    consent_status: consentEnablementValid ? consent.status : 'inconclusive',
-    site_ga4_detected: ga4Installed ? true : consentEnablementValid ? false : null,
+    consent_status: trackingEnablementValid ? consent.status : 'inconclusive',
+    site_ga4_detected: ga4Installed ? true : trackingEnablementValid ? false : null,
     site_ga4_collection_hit_detected: ga4Collections.length > 0,
     view_item_hits: [...evidence.product.ga4_view_item_hits, ...dataLayerViewItems],
     runtime_failure: evidence.runtime.failed_phase?.startsWith('product_') === true
@@ -99,29 +107,29 @@ export function replayEvidence(evidence: EvidenceBundle): Partial<StorefrontAudi
     consent_status: consent.status,
     cmp_provider: consentSelected ? cmp.provider : null,
     product_payload_status: product.status,
-    pdp_url_tested: trackingSelected ? evidence.product.pdp_url : null,
+    pdp_url_tested: trackingSelected ? evidence.product.final_pdp_url || evidence.product.pdp_url : null,
     server_side_status: server.status,
     ss_collection_type: server.collection_type,
-    site_ga4_detected: trackingSelected && evidence.page.valid === true ? ga4Installed ? true : consentEnablementValid ? false : null : null,
+    site_ga4_detected: trackingSelected && evidence.page.valid === true ? ga4Installed ? true : trackingEnablementValid ? false : null : null,
     site_ga4_measurement_ids: trackingSelected ? measurementIds : [],
-    site_ga4_collection_hit_detected: trackingSelected && evidence.page.valid === true ? ga4Collections.length > 0 ? true : consentEnablementValid ? false : null : null,
-    site_meta_detected: trackingSelected && evidence.page.valid === true ? metaInstalled ? true : consentEnablementValid ? false : null : null,
-    site_meta_collection_hit_detected: trackingSelected && evidence.page.valid === true ? metaCollections.length > 0 ? true : consentEnablementValid ? false : null : null,
+    site_ga4_collection_hit_detected: trackingSelected && evidence.page.valid === true ? ga4Collections.length > 0 ? true : trackingEnablementValid ? false : null : null,
+    site_meta_detected: trackingSelected && evidence.page.valid === true ? metaInstalled ? true : trackingEnablementValid ? false : null : null,
+    site_meta_collection_hit_detected: trackingSelected && evidence.page.valid === true ? metaCollections.length > 0 ? true : trackingEnablementValid ? false : null : null,
     finding_confidence: {
       cmp: { detected: consentSelected && evidence.consent.executed ? cmp.provider !== 'Not Found' && cmp.provider !== null : null, confidence: cmp.confidence, evidence: cmp.evidence, reason_code: cmp.reason_code },
       consent: { status: consent.status, confidence: consent.confidence, evidence: consent.evidence, reason_code: consent.reason_code },
       ga4: {
-        detected: trackingSelected && evidence.page.valid === true ? ga4Installed ? true : consentEnablementValid ? false : null : null,
+        detected: trackingSelected && evidence.page.valid === true ? ga4Installed ? true : trackingEnablementValid ? false : null : null,
         confidence: ga4Collections.length > 0 || dataLayerViewItems.length > 0 ? 'high' : ga4.length > 0 ? 'medium' : 'low',
         evidence: ga4Collections.length > 0 ? ['network_hit'] : dataLayerViewItems.length > 0 ? ['data_layer'] : ga4.length > 0 ? ['script'] : [],
-        reason_code: evidence.page.valid !== true || !consentEnablementValid && !ga4Installed ? 'GA4_NOT_TESTED' : ga4Collections.length > 0 ? 'GA4_COLLECTION_DETECTED' : dataLayerViewItems.length > 0 ? 'GA4_DATALAYER_EVENT' : ga4.length > 0 ? 'GA4_SCRIPT_ONLY' : 'GA4_NOT_DETECTED'
+        reason_code: evidence.page.valid !== true || !trackingEnablementValid && !ga4Installed ? 'GA4_NOT_TESTED' : ga4Collections.length > 0 ? 'GA4_COLLECTION_DETECTED' : dataLayerViewItems.length > 0 ? 'GA4_DATALAYER_EVENT' : ga4.length > 0 ? 'GA4_SCRIPT_ONLY' : 'GA4_NOT_DETECTED'
       },
       product: { status: product.status, confidence: product.confidence, evidence: product.evidence, reason_code: product.reason_code },
       meta: {
-        detected: trackingSelected && evidence.page.valid === true ? metaInstalled ? true : consentEnablementValid ? false : null : null,
+        detected: trackingSelected && evidence.page.valid === true ? metaInstalled ? true : trackingEnablementValid ? false : null : null,
         confidence: metaCollections.length > 0 ? 'high' : metaInstalled ? 'medium' : 'low',
         evidence: metaCollections.length > 0 ? ['network_hit'] : meta.length > 0 ? ['script'] : metaInstallationSignals.map((signal) => signal.source),
-        reason_code: evidence.page.valid !== true || !consentEnablementValid && !metaInstalled ? 'META_NOT_TESTED' : metaCollections.length > 0 ? 'META_COLLECTION_DETECTED' : metaInstalled ? 'META_SCRIPT_ONLY' : 'META_NOT_DETECTED'
+        reason_code: evidence.page.valid !== true || !trackingEnablementValid && !metaInstalled ? 'META_NOT_TESTED' : metaCollections.length > 0 ? 'META_COLLECTION_DETECTED' : metaInstalled ? 'META_SCRIPT_ONLY' : 'META_NOT_DETECTED'
       },
       server_side: { status: server.status, confidence: server.status === 'strong_server_side_evidence' ? 'high' : server.status === 'inconclusive' ? 'low' : 'medium', evidence: [server.reason_code], reason_code: server.reason_code }
     },
