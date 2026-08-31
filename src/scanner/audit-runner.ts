@@ -18,6 +18,7 @@ import { buildMetadata } from '../build-metadata';
 import { browserGeoProfile, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
 import { createBrowserQlHandoff } from './browserless-bql';
 import { attachAuthorizedAccessHeader } from './authorized-access';
+import { decideAccessTransition, type AccessIdentity } from './access-state-machine';
 import { detectCMP, type CmpRawEvidence } from './consent/detect-cmp';
 import { verifyConsentAcceptance, verifyConsentRejection, type ConsentStateSnapshot } from './consent/consent-state';
 import { EvidenceCollector } from './evidence/evidence-collector';
@@ -40,7 +41,6 @@ import {
 import {
   buildProxyAttemptPlan,
   classifyConfirmedTunnelFailure,
-  shouldUseBrowserlessResidentialFallback,
   type ProxyProvider
 } from './proxy/provider';
 import { calculateQaPriority, generateFailureFingerprints } from './quality/fingerprints';
@@ -242,12 +242,17 @@ async function inspectPageAccess(page: Page, response: Response | null): Promise
   const content = await page.evaluate(() => {
     const selectors = [
       '.cf-turnstile', '.cf-challenge', 'iframe[src*="challenges.cloudflare.com"]', '#challenge-form',
-      'iframe[src*="captcha-delivery.com"]', '[class*="datadome"]', '#px-captcha', '[class*="captcha"]'
+      'iframe[src*="captcha-delivery.com"]', '[class*="datadome"]', '#px-captcha', '[class*="captcha"]',
+      '[class*="akamai"]', '[class*="perimeterx"]', '[class*="human-security"]', '[class*="waf"]'
     ];
+    const frameAndScriptMarkers = [
+      ...Array.from(document.querySelectorAll('iframe[src]')).map((element) => (element as HTMLIFrameElement).src),
+      ...Array.from(document.querySelectorAll('script[src]')).map((element) => (element as HTMLScriptElement).src)
+    ].filter((value) => /challenge|turnstile|captcha|datadome|akamai|perimeterx|human/i.test(value));
     return {
       title: document.title,
       bodyText: (document.body?.innerText || '').slice(0, 20_000),
-      domSignals: selectors.filter((selector) => document.querySelector(selector))
+      domSignals: [...selectors.filter((selector) => document.querySelector(selector)), ...frameAndScriptMarkers]
     };
   }).catch(() => ({ title: '', bodyText: '', domSignals: [] as string[] }));
   return resolveAccessDecision({
@@ -1193,8 +1198,9 @@ export async function runStorefrontAudit(
       ? (process.env.PROXY_NEUTRAL_PROBE_URL || 'https://example.com/')
       : (process.env.PROXY_EGRESS_PROBE_URL || 'https://ip.decodo.com/json');
     if (neutral) addTrace('proxy_neutral_probe_started', { provider: currentProxyProvider, attempt: proxyAttempt });
+    const probePage = await context.newPage();
     try {
-      const response = await homepage.goto(probeUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+      const response = await probePage.goto(probeUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
       if (!response || !response.ok()) throw new Error('Egress probe returned a non-success status');
       const payload = neutral ? {} : await response.json() as Record<string, unknown>;
       const actualCountry = parseEgressCountry(payload);
@@ -1204,7 +1210,7 @@ export async function runStorefrontAudit(
         currentProxyCountry = actualCountry;
         evidence.runtime.proxy_country = currentProxyCountry;
         evidence.runtime.proxy_country_verified = expectedCountries.includes(actualCountry);
-        const reapplied = await configureBrowserGeo(context, homepage, currentProxyCountry);
+        const reapplied = await configureBrowserGeo(context, probePage, currentProxyCountry);
         evidence.runtime.browser_locale = reapplied.profile.locale;
         evidence.runtime.browser_timezone = reapplied.profile.timezoneId;
       }
@@ -1227,6 +1233,8 @@ export async function runStorefrontAudit(
         addTrace('proxy_neutral_probe_completed', { reachable: false, provider: currentProxyProvider });
       }
       addTrace('proxy_egress_probe_inconclusive', { expected_geo: geo });
+    } finally {
+      await probePage.close().catch(() => {});
     }
   };
 
@@ -1275,6 +1283,18 @@ export async function runStorefrontAudit(
       cdpUrl = process.env[`ENV_CDP_URL${suffix}`] || process.env.ENV_CDP_URL || '';
     }
     addTrace('proxy_attempt_started', { provider: currentProxyProvider, attempt: attempt + 1, configured_port: lastProxyPort, geo });
+    const identity: AccessIdentity = {
+      provider: currentProxyProvider,
+      geo,
+      proxyPort: lastProxyPort,
+      proxySession: 'fresh',
+      browserSession: 'fresh',
+      context: currentProxyProvider === 'browserless_residential' ? 'browserless_default' : 'fresh',
+      locale: browserGeoProfile(currentProxyCountry).locale,
+      timezone: browserGeoProfile(currentProxyCountry).timezoneId,
+      attempt: attempt + 1
+    };
+    addTrace('access_identity_created', { ...identity });
     evidence.runtime.proxy_attempts?.push({ provider: currentProxyProvider, attempt: attempt + 1, configured_port: lastProxyPort });
     addTrace('browser_connecting', {
       attempt,
@@ -1419,7 +1439,13 @@ export async function runStorefrontAudit(
           }
           recordProxyError(geo, lastProxyPort);
           persistProxyMetric({ kind: 'error', geo, port: lastProxyPort });
-          if (proxyAttempt < maxProxyRetries) {
+          const proxyTransition = decideAccessTransition({
+            event: 'proxy_failure', isBulk: params.is_bulk, decodoAttempts: proxyAttempt,
+            maxDecodoRetries: maxProxyRetries,
+            fallbackEnabled: process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED !== 'false',
+            challengeSolvingEnabled: false
+          });
+          if (proxyTransition === 'retry_decodo') {
             const previousPort = lastProxyPort;
             proxyAttempt += 1;
             const retryProxy = getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset);
@@ -1438,10 +1464,7 @@ export async function runStorefrontAudit(
             });
             continue;
           }
-          if (shouldUseBrowserlessResidentialFallback({
-            isBulk: params.is_bulk,
-            enabled: process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED !== 'false'
-          })) {
+          if (proxyTransition === 'fallback_browserless_residential') {
             addTrace('proxy_retry_failed', { provider: 'decodo', attempt: proxyAttempt + 1, configured_port: lastProxyPort });
             proxyFallbackUsed = true;
             proxyModeOverride = 'browserless_residential';
@@ -1552,6 +1575,31 @@ export async function runStorefrontAudit(
           retry_after_ms: access.retryAfterMs,
           bot_provider: access.botProvider
         });
+        const accessTransition = decideAccessTransition({
+          event: access.category === 'rate_limited' ? 'rate_limited' : access.category === 'bot_protection' ? 'challenge' : 'unrecoverable',
+          isBulk: params.is_bulk,
+          decodoAttempts: proxyAttempt,
+          maxDecodoRetries: maxProxyRetries,
+          fallbackEnabled: process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED !== 'false',
+          challengeSolvingEnabled: Boolean(params.enable_captcha_solving && bqlEnabled)
+        });
+        if (currentProxyProvider === 'decodo' && accessTransition === 'retry_decodo') {
+          const previousPort = lastProxyPort;
+          proxyAttempt += 1;
+          const retryPort = parseProxyUrl(getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset)).port;
+          lastProxyRotated = retryPort !== previousPort;
+          recordProxyRetry(retryPort, lastProxyRotated);
+          persistProxyMetric({ kind: 'retry', geo, port: retryPort, rotated: lastProxyRotated });
+          addTrace('access_identity_retry_started', { reason_code: access.reasonCode, previous_port: previousPort, retry_port: retryPort });
+          continue;
+        }
+        if (currentProxyProvider === 'decodo' && accessTransition === 'fallback_browserless_residential') {
+          proxyFallbackUsed = true;
+          proxyModeOverride = 'browserless_residential';
+          proxyAttempt += 1;
+          addTrace('proxy_provider_fallback_started', { from: 'decodo', to: 'browserless_residential', reason_code: access.reasonCode });
+          continue;
+        }
         if (access.category === 'rate_limited') addTrace('http_rate_limit_confirmed', { status });
         throw new ScanTermination(access.category, 'failed', `Storefront access failed (${access.reasonCode})`);
       }

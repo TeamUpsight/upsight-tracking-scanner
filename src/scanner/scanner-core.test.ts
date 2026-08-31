@@ -14,6 +14,7 @@ import { buildLatestReviewQueue } from './quality/review-queue';
 import { calculateQaPriority, generateFailureFingerprints, qaPrioritySignals } from './quality/fingerprints';
 import { buildBrowserlessCdpUrl, buildRotatingFallbackProxy, getExternalProxyForGeo, rotateDecodoSessionUsername } from './proxy/decodo';
 import { buildProxyAttemptPlan, classifyConfirmedTunnelFailure, shouldUseBrowserlessResidentialFallback } from './proxy/provider';
+import { decideAccessTransition } from './access-state-machine';
 import { FinalizeOnce } from './resolver/lifecycle';
 import { resolveProductPayloadStatus } from './resolver/status-resolver';
 import { classifyCollection, findStrictDuplicates } from './server-side/classify-collection';
@@ -426,6 +427,16 @@ describe('CMP confidence rules', () => {
 });
 
 describe('lifecycle, proxy, and evidence guardrails', () => {
+  it('uses one adaptive access policy for retries, residential fallback, challenges, and bulk finalization', () => {
+    const common = { decodoAttempts: 0, maxDecodoRetries: 1, fallbackEnabled: true, challengeSolvingEnabled: false };
+    expect(decideAccessTransition({ ...common, event: 'proxy_failure' })).toBe('retry_decodo');
+    expect(decideAccessTransition({ ...common, event: 'proxy_failure', decodoAttempts: 1 })).toBe('fallback_browserless_residential');
+    expect(decideAccessTransition({ ...common, event: 'proxy_failure', decodoAttempts: 1, isBulk: true })).toBe('finalize');
+    expect(decideAccessTransition({ ...common, event: 'rate_limited' })).toBe('retry_decodo');
+    expect(decideAccessTransition({ ...common, event: 'challenge', challengeSolvingEnabled: true })).toBe('solve_challenge');
+    expect(decideAccessTransition({ ...common, event: 'challenge' })).toBe('fallback_browserless_residential');
+  });
+
   it('allows exactly one finalization action', async () => {
     const lifecycle = new FinalizeOnce();
     let finalizations = 0;
