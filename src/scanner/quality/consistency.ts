@@ -27,14 +27,14 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
   }
 
   if (includesAuditModule(evidence.selected_modules, 'server_side') && evidence.server_side.first_party_collection_count === 0 && evidence.server_side.collector_cookie_persistence_checked) {
-    evidence.server_side.collector_cookie_persistence_checked = false;
-    evidence.server_side.collector_cookie_persisted = false;
     violations.push('COLLECTOR_COOKIE_CHECK_WITHOUT_COLLECTOR');
     priority += 20;
   }
 
   if (evidence.page.valid !== true) {
+    let absenceConclusion = false;
     if (includesAuditModule(evidence.selected_modules, 'consent') && corrected.consent_status !== 'inconclusive') {
+      absenceConclusion ||= corrected.consent_status === 'not_detected' || corrected.cmp_provider === 'Not Found';
       corrected.consent_status = 'inconclusive';
       violations.push('INVALID_PAGE_CONSENT_CONCLUSION');
     }
@@ -47,6 +47,20 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
       corrected.ss_collection_type = 'not_tested';
       violations.push('INVALID_PAGE_SERVER_CONCLUSION');
     }
+    if (includesAuditModule(evidence.selected_modules, 'tracking')) {
+      const findingConfidence = { ...(corrected.finding_confidence || {}) };
+      for (const key of ['ga4', 'meta'] as const) {
+        const finding = findingConfidence[key];
+        if (corrected[key === 'ga4' ? 'site_ga4_detected' : 'site_meta_detected'] === false || finding?.detected === false) {
+          absenceConclusion = true;
+          if (key === 'ga4') corrected.site_ga4_detected = null;
+          else corrected.site_meta_detected = null;
+          if (finding) findingConfidence[key] = { ...finding, detected: null, confidence: 'low', reason_code: `${key.toUpperCase()}_NOT_TESTED` };
+        }
+      }
+      if (absenceConclusion) corrected.finding_confidence = findingConfidence;
+    }
+    if (absenceConclusion) violations.push('INVALID_PAGE_ABSENCE_CONCLUSION');
     corrected.overall_status = 'inconclusive';
     corrected.overall_confidence = 'low';
     priority += 30;

@@ -69,9 +69,15 @@
     "expected": { "scan_status": "failed", "error_category": "bot_protection", "consent_status": "inconclusive" }
   },
   {
-    "name": "PDP timeout",
+    "name": "Confirmed regression — PDP timeout remains inconclusive",
     "product": { "executed": true, "discovery_executed": true, "pdp_url": "https://example.com/products/one", "pdp_candidates": ["https://example.com/products/one"], "navigation_succeeded": false },
-    "expected": { "product_payload_status": "inconclusive" }
+    "expected": { "product_payload_status": "inconclusive", "finding_confidence": { "product": { "reason_code": "PDP_NAV_TIMEOUT" } } }
+  },
+  {
+    "name": "Confirmed regression — canonical PDP redirect retains final normalized URL",
+    "selected_modules": ["tracking"],
+    "product": { "executed": true, "discovery_executed": true, "pdp_url": "https://example.com/products/final", "candidate_url": "https://example.com/products/legacy", "final_pdp_url": "https://example.com/products/final", "pdp_candidates": ["https://example.com/products/legacy"], "navigation_succeeded": true },
+    "expected": { "pdp_url_tested": "https://example.com/products/final", "failure_fingerprints": ["PDP_CANONICAL_REDIRECT"] }
   },
   {
     "name": "PDP not found",

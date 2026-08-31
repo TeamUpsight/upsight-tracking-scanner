@@ -16,9 +16,45 @@ function cmsFromSignals(signals: string[]): CmsPlatform {
   return signals.length > 0 ? 'Custom' : 'Unknown';
 }
 
-export function replayEvidence(evidence: EvidenceBundle): Partial<StorefrontAudit> {
+/**
+ * Replay only consumes the normalized, bounded EvidenceBundle contract produced
+ * by EvidenceCollector.  Copy the mutable leaves that quality rules may need to
+ * canonicalize so an API replay/review can never mutate stored evidence in
+ * memory.  Older evidence omitted selected_modules; that remains equivalent to
+ * explicitly selecting every module.
+ */
+export function normalizeReplayEvidence(source: EvidenceBundle): EvidenceBundle {
+  return {
+    ...source,
+    selected_modules: selectedAuditModules(source.selected_modules),
+    page: { ...source.page, cms_signals: [...source.page.cms_signals] },
+    network: {
+      ...source.network,
+      relevant_requests: [...source.network.relevant_requests],
+      installation_signals: [...(source.network.installation_signals || [])],
+      novel_endpoints: [...source.network.novel_endpoints]
+    },
+    consent: { ...source.consent },
+    product: {
+      ...source.product,
+      pdp_candidates: [...source.product.pdp_candidates],
+      ga4_view_item_hits: [...source.product.ga4_view_item_hits],
+      data_layer_view_item_hits: [...(source.product.data_layer_view_item_hits || [])],
+      meta_view_content_hits: [...source.product.meta_view_content_hits]
+    },
+    server_side: { ...source.server_side },
+    runtime: {
+      ...source.runtime,
+      proxy_attempts: [...(source.runtime.proxy_attempts || [])],
+      module_durations_ms: { ...source.runtime.module_durations_ms },
+      screenshots: [...source.runtime.screenshots]
+    }
+  };
+}
+
+export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit> {
+  const evidence = normalizeReplayEvidence(source);
   const selected_modules = selectedAuditModules(evidence.selected_modules);
-  evidence.selected_modules = selected_modules;
   const consentSelected = selected_modules.includes('consent');
   const trackingSelected = selected_modules.includes('tracking');
   const serverSelected = selected_modules.includes('server_side');

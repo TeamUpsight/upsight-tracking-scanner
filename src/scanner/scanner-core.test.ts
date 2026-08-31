@@ -11,7 +11,7 @@ import { reviewAudit } from './quality/audit-reviewer';
 import { buildDebugPackageFiles } from './quality/debug-package';
 import { buildQualityMetrics } from './quality/metrics';
 import { buildLatestReviewQueue } from './quality/review-queue';
-import { calculateQaPriority, qaPrioritySignals } from './quality/fingerprints';
+import { calculateQaPriority, generateFailureFingerprints, qaPrioritySignals } from './quality/fingerprints';
 import { buildBrowserlessCdpUrl, buildRotatingFallbackProxy, getExternalProxyForGeo, rotateDecodoSessionUsername } from './proxy/decodo';
 import { buildProxyAttemptPlan, classifyConfirmedTunnelFailure, shouldUseBrowserlessResidentialFallback } from './proxy/provider';
 import { FinalizeOnce } from './resolver/lifecycle';
@@ -74,6 +74,25 @@ describe('audit module selection', () => {
     expect(result.consistency_violations).toEqual([]);
     expect(result.failure_fingerprints).not.toContain('SERVER_FP_COLLECTOR');
     expect(qaPrioritySignals(result, evidence, result.consistency_violations || []).map((signal) => signal.code)).not.toContain('MODULE_RESULT_INCOMPLETE');
+  });
+
+  it('uses a normalized replay copy, defaults legacy module selections, and leaves evidence untouched', () => {
+    const evidence = baseEvidence('legacy-replay.example');
+    evidence.selected_modules = undefined;
+    evidence.page.valid = true;
+    evidence.product.executed = true;
+    evidence.product.discovery_executed = true;
+    evidence.product.pdp_candidates = ['https://legacy-replay.example/products/item'];
+    evidence.product.navigation_succeeded = true;
+    const result = replayEvidence(evidence);
+    expect(result.selected_modules).toEqual(AUDIT_MODULE_ORDER);
+    expect(evidence.selected_modules).toBeUndefined();
+
+    evidence.selected_modules = ['server_side'];
+    evidence.server_side.collector_cookie_persistence_checked = true;
+    const before = structuredClone(evidence);
+    expect(replayEvidence(evidence).consistency_violations).toContain('COLLECTOR_COOKIE_CHECK_WITHOUT_COLLECTOR');
+    expect(evidence).toEqual(before);
   });
 
   it('preserves tracking without a Consent audit and server-side without PDP discovery', () => {
@@ -322,6 +341,15 @@ describe('review priority scoring', () => {
       site_ga4_detected: true, site_ga4_collection_hit_detected: true
     };
     expect(calculateQaPriority(audit, collector.bundle, [])).toBe(0);
+  });
+
+  it('keeps infrastructure failures operational instead of scanner-rule QA defects', () => {
+    const evidence = baseEvidence('proxy-only.example');
+    evidence.page.valid = false;
+    evidence.page.access_category = 'proxy_error';
+    const result = replayEvidence(evidence);
+    expect(qaPrioritySignals(result, evidence, result.consistency_violations || []).map((signal) => signal.code))
+      .not.toContain('SCAN_EXECUTION_FAILED');
   });
 });
 
@@ -711,6 +739,20 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     expect(review).not.toHaveProperty('sanitized_trace');
   });
 
+  it('flags stale recovery only when it occurs after finalization', () => {
+    const evidence = baseEvidence('stale-after-finalization.example');
+    const review = reviewAudit({
+      audit: { audit_id: 'review-stale', domain: 'example.com', scan_status: 'failed', trace_steps: '[]' },
+      evidence,
+      trace: [
+        { step: 'scan_finalized' },
+        { step: 'stale_scan_recovered' }
+      ]
+    });
+    expect(review.violations).toContainEqual(expect.objectContaining({ code: 'STALE_RECOVERY_AFTER_FINALIZATION' }));
+    expect(review.patch_plan.join(' ')).not.toMatch(/gemini|outreach|modify source/i);
+  });
+
   it('builds chart-ready quality metrics and actionable failure clusters', () => {
     const evidence = baseEvidence();
     evidence.page.valid = true;
@@ -735,6 +777,23 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     expect(metrics.failure_clusters[0].recommendation).toContain('PDP');
     expect(metrics.verified.category_summaries[0]).toMatchObject({ category: 'GA4', true_positive: 1 });
     expect(metrics.operational).toMatchObject({ total_audits: 1, unique_websites: 1 });
+  });
+
+  it('scores human ground truth across positive and negative accuracy outcomes', () => {
+    const evidence = baseEvidence('ground-truth.example');
+    evidence.page.valid = true;
+    const absent: StorefrontAudit = {
+      audit_id: 'absent', domain: 'absent.example', group_label: null, scan_started_at: '2026-08-27T00:00:00.000Z', scan_completed_at: null,
+      scan_status: 'completed', error_category: 'none', tested_geos: 'USA', cms_platform_detected: 'Unknown', overall_status: 'warning', overall_confidence: 'medium',
+      consent_status: 'pass', cmp_provider: 'Not Found', product_payload_status: 'ga4_not_detected', pdp_url_tested: null, server_side_status: 'not_detected', ss_collection_type: 'not_detected', trace_steps: '[]',
+      site_ga4_detected: false, evidence_bundle: evidence
+    };
+    const present = { ...absent, audit_id: 'present', domain: 'present.example', site_ga4_detected: true };
+    const metrics = buildQualityMetrics([absent, present], [
+      { audit_id: 'absent', verdict: 'correct', category: 'GA4', expected_value: 'not_detected', notes: null, created_at: '2026-08-27T01:00:00.000Z' },
+      { audit_id: 'present', verdict: 'incorrect', category: 'GA4', expected_value: 'not_detected', notes: null, created_at: '2026-08-27T01:00:00.000Z' }
+    ]);
+    expect(metrics.verified.category_summaries).toContainEqual(expect.objectContaining({ category: 'GA4', true_negative: 1, false_positive: 1 }));
   });
 
   it('builds one review row per website with feedback only from its latest audit', () => {
@@ -887,8 +946,14 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     });
     expect(Object.keys(files)).toEqual(expect.arrayContaining([
       'audit-result.json', 'trace.jsonl', 'evidence.json', 'network-summary.json', 'cmp-evidence.json',
-      'product-evidence.json', 'build-metadata.json', 'screenshots/home_page.jpg'
+      'product-evidence.json', 'normalized-evidence.json', 'quality-summary.json', 'proxy-attempt-summary.json',
+      'build-metadata.json', 'screenshots/home_page.jpg'
     ]));
+    expect(JSON.parse(String(files['quality-summary.json']))).toMatchObject({
+      selected_modules: ['consent', 'tracking', 'server_side'],
+      candidate_pdp_url: null,
+      final_pdp_url: null
+    });
   });
 });
 
@@ -1000,6 +1065,24 @@ describe('status resolver and consistency', () => {
     expect(result.violations).toContain('SITE_GA4_PRODUCT_STATUS_CONTRADICTION');
   });
 
+  it('removes confident absence conclusions from an invalid page without touching skipped modules', () => {
+    const evidence = baseEvidence('invalid-page.example');
+    evidence.selected_modules = ['tracking'];
+    evidence.page.valid = false;
+    const result = enforceConsistency({
+      site_ga4_detected: false,
+      site_meta_detected: false,
+      finding_confidence: {
+        ga4: { detected: false, confidence: 'high', evidence: [], reason_code: 'GA4_NOT_DETECTED' },
+        meta: { detected: false, confidence: 'high', evidence: [], reason_code: 'META_NOT_DETECTED' }
+      }
+    }, evidence);
+    expect(result.audit).toMatchObject({ site_ga4_detected: null, site_meta_detected: null });
+    expect(result.audit.finding_confidence?.ga4).toMatchObject({ detected: null, reason_code: 'GA4_NOT_TESTED' });
+    expect(result.violations).toContain('INVALID_PAGE_ABSENCE_CONCLUSION');
+    expect(result.violations).not.toContain('INVALID_PAGE_CONSENT_CONCLUSION');
+  });
+
   it('resolves access failure directly without creating a false contradiction', () => {
     const evidence = baseEvidence('lumee.com');
     evidence.page.valid = false;
@@ -1040,6 +1123,49 @@ describe('status resolver and consistency', () => {
     expect(result.failure_fingerprints).not.toContain('PROXY_TUNNEL_FAILED');
   });
 
+  it('creates stable quality fingerprints from normalized runtime and resolver evidence', () => {
+    const evidence = baseEvidence('fingerprints.example');
+    evidence.selected_modules = ['tracking'];
+    evidence.page.valid = true;
+    evidence.product.executed = true;
+    evidence.product.discovery_executed = true;
+    evidence.product.pdp_candidates = ['https://fingerprints.example/products/old'];
+    evidence.product.candidate_url = 'https://fingerprints.example/products/old';
+    evidence.product.final_pdp_url = 'https://fingerprints.example/products/new';
+    evidence.product.pdp_url = evidence.product.final_pdp_url;
+    evidence.product.navigation_succeeded = false;
+    evidence.runtime.failed_phase = 'product_pdp_load';
+    const partial = replayEvidence(evidence);
+    partial.scan_status = 'partial';
+    partial.failure_fingerprints = undefined;
+    const codes = generateFailureFingerprints(partial, evidence);
+    expect(codes).toEqual(expect.arrayContaining(['PDP_NAV_TIMEOUT', 'PDP_CANONICAL_REDIRECT', 'PRODUCT_MODULE_BUDGET_EXHAUSTED']));
+
+    const proxyEvidence = baseEvidence('proxy-fingerprints.example');
+    proxyEvidence.page.valid = false;
+    proxyEvidence.page.access_category = 'proxy_error';
+    proxyEvidence.runtime.proxy_attempts = [
+      { provider: 'decodo', attempt: 1, configured_port: 10001, failure_reason: 'PROXY_TARGET_TUNNEL_FAILED' },
+      { provider: 'decodo', attempt: 2, configured_port: 10002, failure_reason: 'PROXY_EXTERNAL_TUNNEL_FAILED' }
+    ];
+    expect(replayEvidence(proxyEvidence).failure_fingerprints).toEqual(expect.arrayContaining([
+      'PROXY_TUNNEL_FAILED', 'PROXY_TARGET_TUNNEL_FAILED', 'PROXY_EXTERNAL_TUNNEL_FAILED'
+    ]));
+
+    const timeoutEvidence = baseEvidence('global-timeout.example');
+    timeoutEvidence.page.valid = true;
+    timeoutEvidence.page.access_category = 'scan_timeout';
+    expect(replayEvidence(timeoutEvidence).failure_fingerprints).toContain('SCAN_GLOBAL_TIMEOUT');
+  });
+
+  it('surfaces missing finalization as a lifecycle fingerprint only when an audit is terminal', () => {
+    const evidence = baseEvidence('missing-finalization.example');
+    const audit = replayEvidence(evidence);
+    audit.scan_status = 'failed';
+    audit.trace_steps = '[]';
+    expect(generateFailureFingerprints(audit, evidence)).toContain('SCAN_FINALIZATION_MISSING');
+  });
+
   it('classifies a non-resolving storefront without blaming the proxy', () => {
     const evidence = baseEvidence('missing.example');
     evidence.page.valid = false;
@@ -1063,9 +1189,11 @@ describe('offline replay regression corpus', () => {
     it(fixture.name, () => {
       const evidence = baseEvidence('example.com');
       evidence.page = { ...evidence.page, valid: true, status_code: 200, access_category: 'none', ...fixture.page };
+      evidence.selected_modules = fixture.selected_modules ?? evidence.selected_modules;
       evidence.consent = { ...evidence.consent, ...fixture.consent };
       evidence.product = { ...evidence.product, ...fixture.product };
       evidence.server_side = { ...evidence.server_side, ...fixture.server_side };
+      evidence.runtime = { ...evidence.runtime, ...fixture.runtime };
       evidence.network.relevant_requests = fixture.requests || [];
       evidence.network.total_requests = evidence.network.relevant_requests.length;
       evidence.product.ga4_view_item_hits = evidence.network.relevant_requests.filter((request: TrackingRequestEvidence) => request.vendor === 'ga4' && request.event === 'view_item');

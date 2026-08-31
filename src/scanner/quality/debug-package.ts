@@ -1,5 +1,6 @@
 import type { EvidenceBundle, StorefrontAudit } from '../../types';
 import { sanitizeValue } from './sanitize';
+import { qaPrioritySignals } from './fingerprints';
 
 export function buildDebugPackageFiles(audit: StorefrontAudit) {
   const trace = (() => {
@@ -18,9 +19,19 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
     'audit-result.json': JSON.stringify(sanitizeValue({ ...audit, trace_steps: undefined, evidence_bundle: undefined }), null, 2),
     'trace.jsonl': (sanitizeValue(trace) as unknown[]).map((line) => JSON.stringify(line)).join('\n'),
     'evidence.json': JSON.stringify(sanitizeValue(withoutScreenshots), null, 2),
+    'normalized-evidence.json': JSON.stringify(sanitizeValue(withoutScreenshots), null, 2),
     'network-summary.json': JSON.stringify(sanitizeValue(evidence?.network || {}), null, 2),
     'cmp-evidence.json': JSON.stringify(sanitizeValue(evidence?.consent || {}), null, 2),
     'product-evidence.json': JSON.stringify(sanitizeValue(evidence?.product || {}), null, 2),
+    'quality-summary.json': JSON.stringify(sanitizeValue({
+      selected_modules: evidence?.selected_modules || audit.selected_modules || ['consent', 'tracking', 'server_side'],
+      qa_priority: audit.qa_priority ?? null,
+      qa_priority_signals: evidence ? qaPrioritySignals(audit, evidence, audit.consistency_violations || []) : [],
+      failure_fingerprints: audit.failure_fingerprints || [],
+      consistency_violations: audit.consistency_violations || [],
+      candidate_pdp_url: evidence?.product.candidate_url || null,
+      final_pdp_url: evidence?.product.final_pdp_url || evidence?.product.pdp_url || null
+    }), null, 2),
     'proxy-attempt-summary.json': JSON.stringify(sanitizeValue({
       initial_provider: evidence?.runtime.proxy_initial_provider || null,
       final_provider: evidence?.runtime.proxy_final_provider || null,
