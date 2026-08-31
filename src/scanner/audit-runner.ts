@@ -12,7 +12,8 @@ import type {
   TrackingRequestEvidence
 } from '../types';
 import { selectedAuditModules } from '../audit-modules';
-import { boundedInteger } from '../shared/config';
+import { boundedInteger, bulkProxyRetryLimit, globalScanTimeoutMs, singleProxyRetryLimit } from '../shared/config';
+import { buildMetadata } from '../build-metadata';
 import { browserGeoProfile, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
 import { createBrowserQlHandoff } from './browserless-bql';
 import { attachAuthorizedAccessHeader } from './authorized-access';
@@ -50,12 +51,12 @@ import { parseGA4Request } from './tracking/ga4';
 import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } from './tracking/meta';
 import { PDP_MIN_TRACKING_OBSERVATION_MS, PDP_NAVIGATION_ATTEMPT_LIMIT, PDP_POST_LOAD_OBSERVATION_MS } from './version';
 
-const DEFAULT_AUDIT_TIMEOUT_MS = 90_000;
 const HOMEPAGE_OBSERVATION_MS = 4_000;
 const POST_REJECT_OBSERVATION_MS = 5_000;
 const BOT_CHALLENGE_OBSERVATION_MS = 12_000;
 const DEFAULT_PRODUCT_DISCOVERY_BUDGET_MS = 15_000;
 const DEFAULT_PRODUCT_CONSENT_BUDGET_MS = 15_000;
+const TRACKING_PRODUCT_MODULE_BUDGET_MS = 30_000;
 
 export const activeScansRegistry = {
   abortedScans: new Set<string | number>(),
@@ -78,6 +79,16 @@ class ScanTermination extends Error {
   ) {
     super(message);
   }
+}
+
+class PhaseTimeout extends Error {
+  constructor(readonly phase: string) {
+    super(`${phase} exceeded its bounded runtime budget`);
+  }
+}
+
+function isPhaseTimeout(error: unknown): error is PhaseTimeout {
+  return error instanceof PhaseTimeout;
 }
 
 export function normalizeAuditDomain(input: unknown): string | null {
@@ -825,7 +836,7 @@ export async function runStorefrontAudit(
   onUpdate: (updates: Partial<StorefrontAudit>) => Promise<void>
 ): Promise<void> {
   const startedMs = Date.now();
-  const timeoutMs = boundedInteger(process.env.AUDIT_TIMEOUT_MS, DEFAULT_AUDIT_TIMEOUT_MS, 30_000, 300_000);
+  const timeoutMs = globalScanTimeoutMs();
   // Phase budgets are intentionally capped below the full audit budget so one slow
   // product or consent operation cannot consume the Browserless session.
   const maxPhaseBudgetMs = Math.max(3_000, timeoutMs - 5_000);
@@ -925,7 +936,14 @@ export async function runStorefrontAudit(
       const result = await Promise.race([
         operation(),
         new Promise<T>((_, reject) => {
-          timer = setTimeout(() => reject(new ScanTermination('scan_timeout', 'failed', `${phase} exceeded its bounded runtime budget`)), remaining);
+          timer = setTimeout(() => {
+            try {
+              check();
+              reject(new PhaseTimeout(phase));
+            } catch (error) {
+              reject(error);
+            }
+          }, remaining);
         })
       ]);
       evidence.runtime.last_successful_phase = phase;
@@ -1263,7 +1281,6 @@ export async function runStorefrontAudit(
     persistProxyMetric({ kind: 'connect', geo, port: lastProxyPort, duration_ms: connectDuration });
     await configureConnectedSession(Boolean(cdpUrl));
     await verifyProxyEgress();
-    if (proxyFallbackUsed && currentProxyProvider === 'browserless_residential') proxyFallbackRecovered = true;
   };
 
   const connectViaBrowserQl = async (attempt: number) => {
@@ -1310,7 +1327,7 @@ export async function runStorefrontAudit(
 
   try {
     await onUpdate({ scan_status: 'scanning', scan_mode: evidence.mode, selected_modules: selectedModules, trace_steps: '[]' });
-    addTrace('scan_started', { domain: normalizedDomain || 'invalid', tested_geos: params.tested_geos, mode: evidence.mode });
+    addTrace('scan_started', { domain: normalizedDomain || 'invalid', tested_geos: params.tested_geos, mode: evidence.mode, ...buildMetadata });
     addTrace('audit_modules_selected', { selected_modules: selectedModules });
     if (!normalizedDomain) {
       finalStatus = 'failed';
@@ -1341,9 +1358,7 @@ export async function runStorefrontAudit(
       addTrace('dns_preflight_completed', { status: 'resolved', sources: dnsEvidence.sources });
     }
 
-    const maxProxyRetries = params.is_bulk
-      ? boundedInteger(process.env.DECODO_MAX_RETRIES_BULK ?? process.env.BULK_PROXY_RETRIES, 1, 0, 1)
-      : boundedInteger(process.env.DECODO_MAX_RETRIES_SINGLE ?? process.env.MANUAL_PROXY_RETRIES, 1, 0, 1);
+    const maxProxyRetries = params.is_bulk ? bulkProxyRetryLimit() : singleProxyRetryLimit();
     let solveCaptchas = false;
     let proxyModeOverride: string | undefined;
     let browserQlEscalated = false;
@@ -1407,26 +1422,24 @@ export async function runStorefrontAudit(
             addTrace('proxy_retry_failed', { provider: 'decodo', attempt: proxyAttempt + 1, configured_port: lastProxyPort });
             proxyFallbackUsed = true;
             proxyModeOverride = 'browserless_residential';
-            currentProxyProvider = 'browserless_residential';
             addTrace('proxy_provider_fallback_started', { from: 'decodo', to: 'browserless_residential', attempt: proxyAttempt + 1 });
-            try {
-              await connectSession(proxyAttempt + 1, false, proxyModeOverride);
-              addTrace('proxy_provider_fallback_succeeded', { provider: 'browserless_residential', recovery: true });
-              // connectSession's egress probe used the new session; target navigation resumes below.
-              proxyFallbackRecovered = true;
-              response = await homepage!.goto(`https://${normalizedDomain}`, { waitUntil: 'commit', timeout: 15_000 });
-              await waitForDomContentSoft(homepage!, 'consent_initial_load', boundedInteger(process.env.HOMEPAGE_DOMCONTENT_TIMEOUT_MS, 15_000, 3_000, 30_000));
-              break;
-            } catch (fallbackError) {
-              addTrace('proxy_provider_fallback_failed', { provider: 'browserless_residential', failure_code: classifyBrowserConnectionError(fallbackError) });
-              addTrace('proxy_failure_classified', { reason_code: 'PROXY_BROWSERLESS_FALLBACK_FAILED', provider: 'browserless_residential' });
-              throw new ScanTermination('proxy_error', 'failed', 'Browserless Residential proxy fallback failed');
-            }
+            proxyAttempt += 1;
+            // Re-enter the ordinary connect, navigation, and access-validation loop.
+            continue;
           }
           addTrace('proxy_retry_failed', { provider: 'decodo', attempt: proxyAttempt + 1, configured_port: lastProxyPort });
           if (params.is_bulk) addTrace('proxy_failure_classified', { reason_code: 'PROXY_RETRY_EXHAUSTED', proxy_fallback_candidate: true, provider: 'decodo' });
           else addTrace('proxy_failure_classified', { reason_code: 'PROXY_RETRY_EXHAUSTED', provider: 'decodo' });
           throw new ScanTermination('proxy_error', 'failed', 'Proxy tunnel failed after bounded retry');
+        }
+        if (isProxyFailure(error)) {
+          if (proxyFallbackUsed && String(currentProxyProvider) === 'browserless_residential') {
+            addTrace('proxy_provider_fallback_failed', { provider: 'browserless_residential', failure_code: classifyBrowserConnectionError(error) });
+          }
+          addTrace('proxy_failure_classified', {
+            reason_code: classifyBrowserConnectionError(error), provider: currentProxyProvider, attempt: proxyAttempt + 1
+          });
+          throw new ScanTermination('proxy_error', 'failed', 'Proxy transport failed during browser navigation');
         }
         if (isNavigationTimeout(error)) throw new ScanTermination('navigation_timeout', 'failed', 'Homepage navigation timed out');
         addTrace('homepage_navigation_failed', { failure_code: classifyNavigationError(error) });
@@ -1532,6 +1545,10 @@ export async function runStorefrontAudit(
         evidence.runtime.proxy_retry_recovered = true;
         addTrace('proxy_retry_succeeded', { provider: currentProxyProvider, attempt: proxyAttempt + 1, configured_port: lastProxyPort });
       }
+      if (proxyFallbackUsed && String(currentProxyProvider) === 'browserless_residential') {
+        proxyFallbackRecovered = true;
+        addTrace('proxy_provider_fallback_succeeded', { provider: 'browserless_residential', recovery: true });
+      }
       break;
     }
 
@@ -1583,6 +1600,7 @@ export async function runStorefrontAudit(
 
     let cmp: ReturnType<typeof detectCMP>;
     const consentStarted = Date.now();
+    let consentRejectionPending = false;
     if (consentSelected) {
     evidence.consent.executed = true;
     const cmpRaw = await captureCmpRawEvidence(homepage!);
@@ -1607,34 +1625,10 @@ export async function runStorefrontAudit(
       reason_code: cmp.reason_code
     });
 
-    if (cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown' && cmp.banner_visible) {
-      evidence.consent.interaction_attempted = true;
-      const before = await captureConsentState(homepage!);
-      let actionTaken = await clickConsentChoice(homepage!, 'reject');
-      if (!actionTaken) actionTaken = await callConsentApi(homepage!, cmp.provider, 'reject');
-      if (actionTaken) {
-        await wait(1_500, homepage);
-        const after = await captureConsentState(homepage!);
-        const verified = verifyConsentRejection(cmp.provider, before, after);
-        evidence.consent.rejection_verified = verified.verified;
-        addTrace(verified.verified ? 'reject_action_verified' : 'reject_action_not_verified', { evidence: verified.evidence });
-      } else {
-        addTrace('reject_action_not_available', { provider: cmp.provider });
-      }
-      if (evidence.consent.rejection_verified) {
-        currentPhase = 'consent_post_reject';
-        try {
-          const postRejectResponse = await homepage!.reload({ waitUntil: 'commit', timeout: 15_000 });
-          await waitForDomContentSoft(homepage!, 'consent_post_reject', 10_000);
-          if (!isValidStorefrontStatus(postRejectResponse?.status() || null)) throw new Error('Post-reject reload did not return a valid storefront');
-          await wait(POST_REJECT_OBSERVATION_MS, homepage);
-          evidence.consent.post_reject_observation_completed = true;
-        } catch (error) {
-          addTrace('post_reject_observation_failed', { reason: String((error as Error).message || error) });
-        }
-      }
+    consentRejectionPending = cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown' && cmp.banner_visible;
+    if (consentRejectionPending && trackingSelected) {
+      addTrace('consent_reject_deferred_until_tracking_completed', { provider: cmp.provider });
     }
-    evidence.runtime.module_durations_ms.consent = Date.now() - consentStarted;
     } else {
       // Tracking may enable an existing CMP, but this deliberately does not execute a Consent audit.
       const cmpRaw = await captureCmpRawEvidence(homepage!);
@@ -1644,17 +1638,33 @@ export async function runStorefrontAudit(
     }
 
     const productStarted = Date.now();
+    // Reserve time for selected later modules; this is a local product budget,
+    // never a replacement for the global audit deadline.
+    const productDeadline = Math.min(startedMs + timeoutMs - 5_000, productStarted + TRACKING_PRODUCT_MODULE_BUDGET_MS);
+    const productBudgetRemaining = () => Math.max(0, productDeadline - Date.now());
+    const checkProductBudget = () => {
+      check();
+      if (productBudgetRemaining() <= 0) throw new PhaseTimeout('tracking_product');
+    };
     if (trackingSelected) {
     evidence.product.executed = true;
     evidence.product.discovery_executed = true;
     currentPhase = 'product_discovery';
     addTrace('product_context_started', { max_pdp_urls_to_audit: 1, max_candidate_attempts: PDP_NAVIGATION_ATTEMPT_LIMIT });
-    const pdpCandidates = await withinPhaseBudget(
-      'product_discovery',
-      productDiscoveryBudgetMs,
-      () => discoverPdp(homepage!, effectiveDomain, check)
-    );
-    check();
+    let pdpCandidates: string[] = [];
+    try {
+      pdpCandidates = await withinPhaseBudget(
+        'product_discovery',
+        Math.max(1, Math.min(productDiscoveryBudgetMs, productBudgetRemaining())),
+        () => discoverPdp(homepage!, effectiveDomain, check)
+      );
+      check();
+    } catch (error) {
+      if (!isPhaseTimeout(error)) throw error;
+      finalStatus = 'partial';
+      evidence.runtime.failed_phase ||= 'product_discovery';
+      addTrace('product_discovery_budget_exhausted', { reason_code: 'PRODUCT_DISCOVERY_TIMEOUT' });
+    }
     evidence.product.pdp_candidates = pdpCandidates.map((url) => safeUrl(url) || '').filter(Boolean);
     if (!pdpCandidates.length) {
       addTrace('product_payload_status_decision', { status: 'pdp_not_found', reason_code: 'PDP_NOT_FOUND' });
@@ -1692,11 +1702,22 @@ export async function runStorefrontAudit(
         } else {
           currentPhase = 'product_consent_enablement';
           evidence.consent.acceptance_attempted = true;
-          const accepted = await withinPhaseBudget(
-            'product_consent_enablement',
-            productConsentBudgetMs,
-            async () => clickConsentChoice(homepage!, 'accept') || await callConsentApi(homepage!, cmp.provider, 'accept')
-          );
+          let accepted = false;
+          try {
+            accepted = await withinPhaseBudget(
+              'product_consent_enablement',
+              productConsentBudgetMs,
+              async () => clickConsentChoice(homepage!, 'accept') || await callConsentApi(homepage!, cmp.provider, 'accept')
+            );
+          } catch (error) {
+            if (error instanceof ScanTermination) throw error;
+            finalStatus = 'partial';
+            evidence.runtime.failed_phase ||= 'product_consent_enablement';
+            addTrace('product_consent_enablement_inconclusive', {
+              reason_code: isPhaseTimeout(error) ? 'PRODUCT_CONSENT_ENABLEMENT_TIMEOUT' : 'PRODUCT_CONSENT_ENABLEMENT_FAILED',
+              error_family: runtimeErrorFamily(error)
+            });
+          }
           check();
           addTrace('product_consent_enablement', { attempted: true, action_taken: accepted, provider: cmp.provider });
           if (accepted) {
@@ -1741,19 +1762,31 @@ export async function runStorefrontAudit(
       await attachAuthorizedAccessHeader(context!, pdpPage, effectiveDomain);
       let selectedPdp = false;
       let pdpNavigationCommitted = false;
-      for (const [candidateIndex, pdpUrl] of pdpCandidates.slice(0, PDP_NAVIGATION_ATTEMPT_LIMIT).entries()) {
+      const maxPdpCandidates = Math.min(3, PDP_NAVIGATION_ATTEMPT_LIMIT, pdpCandidates.length);
+      for (const [candidateIndex, pdpUrl] of pdpCandidates.slice(0, maxPdpCandidates).entries()) {
+        try { checkProductBudget(); } catch (error) {
+          if (!isPhaseTimeout(error)) throw error;
+          finalStatus = 'partial';
+          evidence.runtime.failed_phase ||= 'product_pdp_load';
+          addTrace('tracking_product_budget_exhausted', { reason_code: 'TRACKING_PRODUCT_TIMEOUT', candidates_attempted: candidateIndex });
+          break;
+        }
         currentPhase = 'product_pdp_load';
         const viewItemStart = evidence.product.ga4_view_item_hits.length;
         const dataLayerViewItemStart = (evidence.product.data_layer_view_item_hits || []).length;
         addTrace('pdp_navigation_started', {
           pdp_url: safeUrl(pdpUrl),
           candidate_attempt: candidateIndex + 1,
-          candidate_limit: Math.min(PDP_NAVIGATION_ATTEMPT_LIMIT, pdpCandidates.length)
+            candidate_limit: maxPdpCandidates
         });
         let pdpOperation = 'pdp_navigation_commit';
         try {
           check();
-          const pdpResponse = await pdpPage.goto(pdpUrl, { waitUntil: 'commit', timeout: 12_000 });
+          const pdpResponse = await withinPhaseBudget(
+            'product_pdp_navigation',
+            Math.max(1, Math.min(12_000, productBudgetRemaining())),
+            () => pdpPage!.goto(pdpUrl, { waitUntil: 'commit', timeout: 12_000 })
+          );
           addTrace('pdp_navigation_committed', {
             pdp_url: safeUrl(pdpUrl),
             status: pdpResponse?.status() ?? null,
@@ -1762,7 +1795,7 @@ export async function runStorefrontAudit(
           pdpNavigationCommitted = true;
           pdpOperation = 'pdp_domcontentloaded';
           await waitForDomContentSoft(pdpPage, 'product_pdp_load', 12_000);
-          check();
+          checkProductBudget();
           pdpOperation = 'pdp_access_inspection';
           const pdpAccess = await inspectPageAccess(pdpPage, pdpResponse);
           if (!isValidStorefrontStatus(pdpResponse?.status() || null) || pdpAccess.category !== 'none') {
@@ -1777,6 +1810,7 @@ export async function runStorefrontAudit(
           }
           pdpOperation = 'pdp_settlement_wait';
           await wait(750, pdpPage);
+          checkProductBudget();
           pdpOperation = 'pdp_candidate_assessment';
           let assessmentUnavailable = false;
           let assessment: Awaited<ReturnType<typeof inspectPdpCandidate>>;
@@ -1827,6 +1861,7 @@ export async function runStorefrontAudit(
               candidateHits = candidateViewItemHits();
               if (candidateHits.some((hit) => hit.has_product)) break;
               await wait(100, pdpPage);
+              checkProductBudget();
             }
             const candidateDataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector);
             if (candidateDataLayerCaptured > 0) {
@@ -1893,6 +1928,7 @@ export async function runStorefrontAudit(
             const latest = candidateViewItemHits();
             if (latest.some((hit) => hit.has_product) && Date.now() - observationStart >= PDP_MIN_TRACKING_OBSERVATION_MS) break;
             await wait(100, pdpPage);
+            checkProductBudget();
           }
           pdpOperation = 'pdp_data_layer_capture';
           const dataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector);
@@ -1928,6 +1964,12 @@ export async function runStorefrontAudit(
           break;
         } catch (error) {
           if (error instanceof ScanTermination) throw error;
+          if (isPhaseTimeout(error)) {
+            finalStatus = 'partial';
+            evidence.runtime.failed_phase ||= 'product_pdp_load';
+            addTrace('tracking_product_budget_exhausted', { reason_code: 'TRACKING_PRODUCT_TIMEOUT', candidate_attempt: candidateIndex + 1 });
+            break;
+          }
           const connectionFailure = classifyBrowserConnectionError(error);
           addTrace('pdp_candidate_navigation_failed', {
             pdp_url: safeUrl(pdpUrl),
@@ -1969,7 +2011,7 @@ export async function runStorefrontAudit(
               });
               break;
             }
-          } else if (candidateIndex + 1 < Math.min(PDP_NAVIGATION_ATTEMPT_LIMIT, pdpCandidates.length)) {
+          } else if (candidateIndex + 1 < maxPdpCandidates) {
             try {
               if (pdpPage !== homepage && homepage && !homepage.isClosed()) {
                 if (!pdpPage.isClosed()) await pdpPage.close();
@@ -1998,7 +2040,7 @@ export async function runStorefrontAudit(
         evidence.product.ga4_view_item_hits = [];
         evidence.product.data_layer_view_item_hits = [];
         addTrace('pdp_navigation_failed', {
-          candidates_attempted: Math.min(PDP_NAVIGATION_ATTEMPT_LIMIT, pdpCandidates.length),
+          candidates_attempted: maxPdpCandidates,
           reason: 'No accessible in-stock product candidate was confirmed',
           reason_code: 'PDP_NO_USABLE_CANDIDATE'
         });
@@ -2008,6 +2050,53 @@ export async function runStorefrontAudit(
     } else {
       addTrace('tracking_module_skipped');
     }
+
+    // Reject interaction is deliberately after Tracking so it cannot erase the
+    // initial product/tracking evidence when both modules are selected.
+    if (consentRejectionPending) {
+      currentPhase = 'consent_reject';
+      evidence.consent.interaction_attempted = true;
+      try {
+        const before = await withinPhaseBudget('consent_reject_state', productConsentBudgetMs, () => captureConsentState(homepage!));
+        const actionTaken = await withinPhaseBudget(
+          'consent_reject_action',
+          productConsentBudgetMs,
+          async () => clickConsentChoice(homepage!, 'reject') || await callConsentApi(homepage!, cmp.provider, 'reject')
+        );
+        if (actionTaken) {
+          await wait(1_500, homepage);
+          const after = await withinPhaseBudget('consent_reject_state', productConsentBudgetMs, () => captureConsentState(homepage!));
+          const verified = verifyConsentRejection(cmp.provider, before, after);
+          evidence.consent.rejection_verified = verified.verified;
+          addTrace(verified.verified ? 'reject_action_verified' : 'reject_action_not_verified', { evidence: verified.evidence });
+        } else {
+          addTrace('reject_action_not_available', { provider: cmp.provider });
+        }
+      } catch (error) {
+        if (error instanceof ScanTermination) throw error;
+        finalStatus = 'partial';
+        evidence.runtime.failed_phase ||= 'consent_reject';
+        addTrace('consent_reject_inconclusive', {
+          reason_code: isPhaseTimeout(error) ? 'CONSENT_REJECT_TIMEOUT' : 'CONSENT_REJECT_FAILED',
+          error_family: runtimeErrorFamily(error)
+        });
+      }
+      if (evidence.consent.rejection_verified) {
+        currentPhase = 'consent_post_reject';
+        try {
+          const postRejectResponse = await homepage!.reload({ waitUntil: 'commit', timeout: 15_000 });
+          await waitForDomContentSoft(homepage!, 'consent_post_reject', 10_000);
+          if (!isValidStorefrontStatus(postRejectResponse?.status() || null)) throw new Error('Post-reject reload did not return a valid storefront');
+          await wait(POST_REJECT_OBSERVATION_MS, homepage);
+          evidence.consent.post_reject_observation_completed = true;
+        } catch (error) {
+          if (error instanceof ScanTermination) throw error;
+          finalStatus = 'partial';
+          addTrace('post_reject_observation_failed', { error_family: runtimeErrorFamily(error) });
+        }
+      }
+    }
+    evidence.runtime.module_durations_ms.consent = Date.now() - consentStarted;
 
     const serverStarted = Date.now();
     const remaining = timeoutMs - (Date.now() - startedMs);
@@ -2077,8 +2166,8 @@ export async function runStorefrontAudit(
         { error_category: error.category, reason: error.message, phase: currentPhase, reason_code: error.category === 'scan_timeout' ? 'SCAN_TIMEOUT' : undefined, error_family: error.category }
       );
     } else {
-      const timedOut = isNavigationTimeout(error) || Date.now() - startedMs >= timeoutMs;
-      finalError = timedOut ? 'scan_timeout' : isProxyFailure(error) ? 'proxy_error' : 'unknown_error';
+      const timedOut = Date.now() - startedMs >= timeoutMs;
+      finalError = timedOut ? 'scan_timeout' : isProxyFailure(error) ? 'proxy_error' : isNavigationTimeout(error) ? 'navigation_timeout' : 'unknown_error';
       finalStatus = 'failed';
       terminalReasonCode = timedOut ? 'SCAN_TIMEOUT' : finalError === 'proxy_error' ? 'PROXY_RUNTIME_FAILURE' : 'UNEXPECTED_RUNTIME_ERROR';
       addTrace('scan_failed', {

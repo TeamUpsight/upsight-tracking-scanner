@@ -112,7 +112,7 @@ evidence.json
 network-summary.json
 cmp-evidence.json
 product-evidence.json
-scanner-version.json
+build-metadata.json
 screenshots/
 ```
 

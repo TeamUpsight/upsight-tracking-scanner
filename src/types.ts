@@ -117,6 +117,8 @@ export interface ScreenshotEvidence {
 export interface EvidenceBundle {
   audit_id: string;
   scanner_version: string;
+  build_commit: string | null;
+  build_timestamp: string;
   rule_pack_version: string;
   domain: string;
   geo: 'USA' | 'EU' | 'UK';

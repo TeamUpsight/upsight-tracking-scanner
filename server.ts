@@ -21,17 +21,18 @@ import { compareReplay, replayEvidence } from './src/scanner/quality/replay';
 import { buildLatestReviewQueue } from './src/scanner/quality/review-queue';
 import type { EvidenceBundle, QaFeedback, ScanMode, StorefrontAudit } from './src/types';
 import { normalizeAuditModules, selectedAuditModules } from './src/audit-modules';
-import { boundedInteger } from './src/shared/config';
+import { boundedInteger, bulkProxyRetryLimit, globalScanTimeoutMs } from './src/shared/config';
+import { buildMetadata } from './src/build-metadata';
 
 dotenv.config();
 
 const app = express();
 const db = new AuditDatabase();
 const port = boundedInteger(process.env.PORT, 3000, 1, 65_535);
-const maxBatchDomains = boundedInteger(process.env.MAX_BATCH_SIZE || process.env.MAX_BATCH_DOMAINS, 5_000, 1, 5_000);
+const maxBatchDomains = boundedInteger(process.env.MAX_BATCH_SIZE, 5_000, 1, 5_000);
 const maxCsvBytes = boundedInteger(process.env.MAX_CSV_BYTES, 5_242_880, 10_000, 10_000_000);
 const scanConcurrency = boundedInteger(process.env.SCAN_CONCURRENCY, 3, 1, 10);
-const scanTimeoutMs = boundedInteger(process.env.AUDIT_TIMEOUT_MS, 90_000, 30_000, 300_000);
+const scanTimeoutMs = globalScanTimeoutMs();
 const staleScanMinutes = boundedInteger(process.env.STALE_SCAN_MINUTES, 10, 3, 1_440);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: maxCsvBytes, files: 1 } });
 
@@ -321,7 +322,7 @@ function csvCell(value: unknown) {
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', queue: queue.stats() }));
+app.get('/api/health', (_req, res) => res.json({ status: 'ok', build: buildMetadata, queue: queue.stats() }));
 app.use('/api/v1', internalAuth);
 
 app.post('/api/v1/scan', asyncRoute(async (req, res) => {
@@ -586,14 +587,14 @@ app.get('/api/v1/scanner/access-readiness', (_req, res) => res.json({
   proxy_mode: process.env.BROWSERLESS_PROXY_MODE || 'decodo',
   bql_escalation_enabled: process.env.BROWSERLESS_BQL_ESCALATION === 'true',
   egress_probe_enabled: process.env.PROXY_EGRESS_PROBE === 'true',
-  proxy_configuration_issues: validateProxyConfiguration(boundedInteger(process.env.BULK_PROXY_RETRIES, 1, 0, 1))
+  proxy_configuration_issues: validateProxyConfiguration(bulkProxyRetryLimit())
 }));
 app.get('/api/v1/queue', (_req, res) => res.json(queue.stats()));
 
 async function startServer() {
   await db.initialize();
   hydrateProxyHealth(await db.getProxyHealth());
-  const proxyIssues = validateProxyConfiguration(boundedInteger(process.env.BULK_PROXY_RETRIES, 1, 0, 1));
+  const proxyIssues = validateProxyConfiguration(bulkProxyRetryLimit());
   if (proxyIssues.length) console.warn('[Proxy] Configuration readiness issues:', proxyIssues);
   await recoverStaleAudits();
   setInterval(() => void recoverStaleAudits().catch((error) => console.error('[Recovery] Failed:', error)), 60_000).unref();

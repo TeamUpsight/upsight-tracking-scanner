@@ -8,7 +8,8 @@ import type {
 } from '../../types';
 import { parseGA4DataLayerEntry, parseGA4Request, toGA4Evidence } from '../tracking/ga4';
 import { parseMetaRequest, toMetaEvidence } from '../tracking/meta';
-import { RULE_PACK_VERSION, SCANNER_VERSION } from '../version';
+import { RULE_PACK_VERSION } from '../version';
+import { buildMetadata } from '../../build-metadata';
 
 const KNOWN_TRACKING_HOSTS = [
   'google-analytics.com',
@@ -71,7 +72,7 @@ export class EvidenceCollector {
     this.collectionDomain = input.domain;
     this.bundle = {
       audit_id: String(input.auditId),
-      scanner_version: SCANNER_VERSION,
+      ...buildMetadata,
       rule_pack_version: RULE_PACK_VERSION,
       domain: input.domain,
       geo: input.geo,

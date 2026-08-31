@@ -842,7 +842,7 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     });
     expect(Object.keys(files)).toEqual(expect.arrayContaining([
       'audit-result.json', 'trace.jsonl', 'evidence.json', 'network-summary.json', 'cmp-evidence.json',
-      'product-evidence.json', 'scanner-version.json', 'screenshots/home_page.jpg'
+      'product-evidence.json', 'build-metadata.json', 'screenshots/home_page.jpg'
     ]));
   });
 });

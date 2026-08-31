@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && node dist/server.cjs",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "typecheck": "tsc --noEmit",
     "lint": "npm run typecheck",
@@ -36,7 +36,6 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^22.14.0",
     "@types/pg": "^8.20.0",
-    "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",

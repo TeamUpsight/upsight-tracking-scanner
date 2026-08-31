@@ -29,9 +29,9 @@ Use `src/shared/config.ts` and caller-specific minimum/maximum bounds when addin
 
 ## Current build and runtime
 
-`npm run build` runs Vite for frontend assets and esbuild for a CommonJS Node bundle at `dist/server.cjs` with external packages. `npm run start` serves `dist/` from Express, initializes PostgreSQL/proxy health/recovery, and connects externally to Browserless and Decodo as audits run. Production must not use memory storage and should be behind TLS, Cloudflare Access, and the internal API token.
+`npm run build` removes old `dist/`, builds Vite frontend assets, and bundles a CommonJS Node server at `dist/server.cjs` with external packages. `npm run start` always runs that build before serving `dist/`, so it cannot launch a stale server bundle. Production must run `npm ci` on its own target platform and never receive `node_modules/`, `dist/`, or `.env` in a handoff. It should be behind TLS, Cloudflare Access, and the internal API token.
 
-`dist/` and `node_modules/` are generated/installed content. The archive has no CI, Dockerfile, Wrangler file, or infrastructure-as-code manifest.
+`dist/` and `node_modules/` are generated/installed content. The archive has no CI, Dockerfile, Wrangler file, or infrastructure-as-code manifest. Build provenance includes `scanner_version`, optional `build_commit`, and `build_timestamp`; it is exposed through health, `scan_started`, Evidence Bundles, and debug exports.
 
 ## Documented target architecture
 
@@ -59,7 +59,7 @@ Use a production-like smoke for static UI, health, unauthorized/authorized API b
 
 ## Pitfalls and invariants
 
-- Keep Browserless session timeout at least as large as the audit timeout.
+- Keep Browserless session timeout at least as large as the audit timeout. `AUDIT_TIMEOUT_MS` is the single global deadline consumed by both queue cancellation and scanner runtime.
 - Never silently bypass the selected geo proxy or fall back to memory in production.
 - Queue messages should contain audit identity and non-sensitive options only.
 - Do not place secrets in committed Wrangler variables, images, logs, traces, evidence, or artifact names.

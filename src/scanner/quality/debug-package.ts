@@ -29,8 +29,10 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
       fallback_candidate: evidence?.runtime.proxy_fallback_candidate || false,
       attempts: evidence?.runtime.proxy_attempts || []
     }), null, 2),
-    'scanner-version.json': JSON.stringify({
+    'build-metadata.json': JSON.stringify({
       scanner_version: evidence?.scanner_version || 'unknown',
+      build_commit: evidence?.build_commit || null,
+      build_timestamp: evidence?.build_timestamp || 'unknown',
       rule_pack_version: evidence?.rule_pack_version || 'unknown'
     }, null, 2)
   };

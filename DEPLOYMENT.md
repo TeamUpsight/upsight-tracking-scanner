@@ -13,6 +13,10 @@ npm run start
 
 Required production values are documented in `.env.example`. Do not set `USE_MEMORY_DB=true` in production. Put the service behind TLS and Cloudflare Access, set `INTERNAL_API_TOKEN`, and use a platform secret store for database, Browserless, and proxy credentials.
 
+Deploy source plus `package.json` and `package-lock.json`, never `node_modules/`, `dist/`, or `.env`. Run `npm ci` on the Linux/Cloudflare target so optional native binaries match that platform, then run `npm run build` (or `npm run start`, which rebuilds first). A source handoff created with `git archive` honors `.gitattributes` and excludes `.env`, `node_modules`, and `dist`.
+
+Each build records `scanner_version`, `build_commit` when CI or Git makes it available, and `build_timestamp`. `/api/health`, `scan_started` traces, Evidence Bundles, and debug packages expose that provenance without exposing secrets.
+
 For storefronts owned by the team, use the narrowly scoped authorization pattern in `ACCESS_RELIABILITY.md`. Do not create broad WAF bypasses and do not send audit credentials to third-party storefronts.
 
 The production build emits:
