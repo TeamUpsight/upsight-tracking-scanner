@@ -14,7 +14,7 @@ import type {
 } from '../types';
 import { selectedAuditModules } from '../audit-modules';
 import { classifyAuditTermination } from '../audit-lifecycle';
-import { boundedInteger, bulkProxyRetryLimit, globalScanTimeoutMs, singleProxyRetryLimit } from '../shared/config';
+import { boundedInteger, bulkProxyRetryLimit, consentTimingValues, globalScanTimeoutMs, singleProxyRetryLimit } from '../shared/config';
 import { buildMetadata } from '../build-metadata';
 import { browserGeoProfile, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
 import { createBrowserQlHandoff } from './browserless-bql';
@@ -22,6 +22,11 @@ import { attachAuthorizedAccessHeader } from './authorized-access';
 import { decideAccessTransition, type AccessIdentity } from './access-state-machine';
 import { detectCMP, type CmpRawEvidence } from './consent/detect-cmp';
 import { verifyConsentAcceptance, verifyConsentRejection, type ConsentStateSnapshot } from './consent/consent-state';
+import {
+  consentNavigationReadiness,
+  createFreshConsentContext,
+  navigateFreshConsentContext
+} from './consent/fresh-context';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { isValidStorefrontStatus, resolveAccessDecision, resolveHostnameEvidence, type AccessDecision } from './navigation';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
@@ -54,7 +59,6 @@ import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } f
 import { PDP_MIN_TRACKING_OBSERVATION_MS, PDP_NAVIGATION_ATTEMPT_LIMIT, PDP_POST_LOAD_OBSERVATION_MS } from './version';
 
 const HOMEPAGE_OBSERVATION_MS = 4_000;
-const POST_REJECT_OBSERVATION_MS = 5_000;
 const BOT_CHALLENGE_OBSERVATION_MS = 12_000;
 const DEFAULT_PRODUCT_DISCOVERY_BUDGET_MS = 15_000;
 const DEFAULT_PRODUCT_CONSENT_BUDGET_MS = 15_000;
@@ -894,6 +898,7 @@ export async function runStorefrontAudit(
     3_000,
     maxPhaseBudgetMs
   );
+  const consentTimings = consentTimingValues();
   const pdpCandidateAttemptLimit = boundedInteger(
     process.env.PDP_NAVIGATION_ATTEMPT_LIMIT,
     PDP_NAVIGATION_ATTEMPT_LIMIT,
@@ -923,6 +928,8 @@ export async function runStorefrontAudit(
   let browser: Browser | null = null;
   let context: BrowserContext | null = null;
   let homepage: Page | null = null;
+  let consentContext: BrowserContext | null = null;
+  let consentHomepage: Page | null = null;
   let pdpPage: Page | null = null;
   let browserConnectedAt: number | null = null;
   let currentPhase = 'initialization';
@@ -1034,6 +1041,10 @@ export async function runStorefrontAudit(
   };
 
   const closeSession = async () => {
+    if (consentHomepage && !consentHomepage.isClosed()) await consentHomepage.close().catch(() => {});
+    consentHomepage = null;
+    if (consentContext) await consentContext.close().catch(() => {});
+    consentContext = null;
     if (pdpPage && !pdpPage.isClosed()) await pdpPage.close().catch(() => {});
     pdpPage = null;
     if (context) await context.close().catch(() => {});
@@ -1771,33 +1782,76 @@ export async function runStorefrontAudit(
     const consentStarted = Date.now();
     let consentRejectionPending = false;
     if (consentSelected) {
-    evidence.consent.executed = true;
-    const cmpRaw = await captureCmpRawEvidence(homepage!);
-    cmpRaw.network_hosts = [...cmpNetworkSignals];
-    cmp = detectCMP(cmpRaw);
-    evidence.consent.dom_selectors = cmpRaw.dom_selectors.slice(0, 50);
-    evidence.consent.network_signals = cmpRaw.network_hosts.slice(0, 100);
-    evidence.consent.script_hosts = [...new Set(cmpRaw.script_urls.map((url) => {
-      try { return new URL(url).hostname; } catch { return ''; }
-    }).filter(Boolean))].slice(0, 50);
-    evidence.consent.cookie_names = [...new Set(cmpRaw.cookie_names)].slice(0, 100);
-    evidence.consent.window_globals = cmpRaw.window_globals.slice(0, 50);
-    evidence.consent.iframe_hosts = [...new Set(cmpRaw.iframe_urls.map((url) => {
-      try { return new URL(url).hostname; } catch { return ''; }
-    }).filter(Boolean))].slice(0, 50);
-    evidence.consent.provider_evidence = cmp.evidence;
-    evidence.consent.banner_visible = cmp.banner_visible;
-    addTrace(cmp.provider === 'Not Found' ? 'cmp_not_found' : 'cmp_provider_detected', {
-      provider: cmp.provider,
-      confidence: cmp.confidence,
-      evidence: cmp.evidence,
-      reason_code: cmp.reason_code
-    });
-
-    consentRejectionPending = cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown' && cmp.banner_visible;
-    if (consentRejectionPending && trackingSelected) {
-      addTrace('consent_reject_deferred_until_tracking_completed', { provider: cmp.provider });
-    }
+      evidence.consent.executed = true;
+      currentPhase = 'consent_fresh_initial_load';
+      try {
+        const freshConsent = await createFreshConsentContext(browser!, {
+          requestedGeo: geo,
+          proxyRegion: currentProxyCountry,
+          independentlyVerified: evidence.runtime.proxy_egress_reachable ? evidence.runtime.proxy_country_verified : null
+        });
+        consentContext = freshConsent.context;
+        consentHomepage = freshConsent.page;
+        const consentAuthorized = await attachAuthorizedAccessHeader(consentContext, consentHomepage, effectiveDomain);
+        addTrace('consent_fresh_context_ready', {
+          service_workers: freshConsent.service_workers,
+          separate_from_tracking_context: consentContext !== context,
+          geo: freshConsent.geo,
+          authorized_access: Boolean(consentAuthorized)
+        });
+        const navigation = await navigateFreshConsentContext(consentHomepage, `https://${normalizedDomain}`, { timings: consentTimings });
+        const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
+        const readiness = consentNavigationReadiness(consentAccess);
+        if (readiness.status !== 'ready') {
+          cmp = {
+            provider: 'Unknown', confidence: 'low', evidence: ['blocked_or_challenged'], banner_visible: null,
+            reason_code: 'BLOCKED_OR_CHALLENGED'
+          };
+          evidence.consent.provider_evidence = cmp.evidence;
+          evidence.consent.banner_visible = null;
+          addTrace('consent_fresh_navigation_blocked_or_challenged', {
+            error_category: consentAccess.category,
+            reason_code: 'BLOCKED_OR_CHALLENGED',
+            access_reason_code: consentAccess.reasonCode
+          });
+        } else {
+          const cmpRaw = await captureCmpRawEvidence(consentHomepage);
+          cmp = detectCMP(cmpRaw);
+          evidence.consent.dom_selectors = cmpRaw.dom_selectors.slice(0, 50);
+          evidence.consent.network_signals = cmpRaw.network_hosts.slice(0, 100);
+          evidence.consent.script_hosts = [...new Set(cmpRaw.script_urls.map((url) => {
+            try { return new URL(url).hostname; } catch { return ''; }
+          }).filter(Boolean))].slice(0, 50);
+          evidence.consent.cookie_names = [...new Set(cmpRaw.cookie_names)].slice(0, 100);
+          evidence.consent.window_globals = cmpRaw.window_globals.slice(0, 50);
+          evidence.consent.iframe_hosts = [...new Set(cmpRaw.iframe_urls.map((url) => {
+            try { return new URL(url).hostname; } catch { return ''; }
+          }).filter(Boolean))].slice(0, 50);
+          evidence.consent.provider_evidence = cmp.evidence;
+          evidence.consent.banner_visible = cmp.banner_visible;
+          addTrace(cmp.provider === 'Not Found' ? 'cmp_not_found' : 'cmp_provider_detected', {
+            provider: cmp.provider,
+            confidence: cmp.confidence,
+            evidence: cmp.evidence,
+            reason_code: cmp.reason_code
+          });
+        }
+      } catch (error) {
+        cmp = {
+          provider: 'Unknown', confidence: 'low', evidence: ['fresh_context_navigation_inconclusive'], banner_visible: null,
+          reason_code: 'DETECTION_INCONCLUSIVE'
+        };
+        finalStatus = 'partial';
+        evidence.runtime.failed_phase ||= 'consent_fresh_initial_load';
+        addTrace('consent_fresh_navigation_inconclusive', {
+          reason_code: 'DETECTION_INCONCLUSIVE',
+          error_family: runtimeErrorFamily(error)
+        });
+      }
+      consentRejectionPending = cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown' && cmp.banner_visible;
+      if (consentRejectionPending && trackingSelected) {
+        addTrace('consent_reject_deferred_until_tracking_completed', { provider: cmp.provider });
+      }
     } else {
       // Tracking may enable an existing CMP, but this deliberately does not execute a Consent audit.
       const cmpRaw = await captureCmpRawEvidence(homepage!);
@@ -2270,15 +2324,15 @@ export async function runStorefrontAudit(
       currentPhase = 'consent_reject';
       evidence.consent.interaction_attempted = true;
       try {
-        const before = await withinPhaseBudget('consent_reject_state', productConsentBudgetMs, () => captureConsentState(homepage!));
+        const before = await withinPhaseBudget('consent_reject_state', productConsentBudgetMs, () => captureConsentState(consentHomepage!));
         const actionTaken = await withinPhaseBudget(
           'consent_reject_action',
           productConsentBudgetMs,
-          async () => clickConsentChoice(homepage!, 'reject') || await callConsentApi(homepage!, cmp.provider, 'reject')
+          async () => clickConsentChoice(consentHomepage!, 'reject') || await callConsentApi(consentHomepage!, cmp.provider, 'reject')
         );
         if (actionTaken) {
-          await wait(1_500, homepage);
-          const after = await withinPhaseBudget('consent_reject_state', productConsentBudgetMs, () => captureConsentState(homepage!));
+          await wait(consentTimings.postActionSettleMs, consentHomepage);
+          const after = await withinPhaseBudget('consent_reject_state', productConsentBudgetMs, () => captureConsentState(consentHomepage!));
           const verified = verifyConsentRejection(cmp.provider, before, after);
           evidence.consent.rejection_verified = verified.verified;
           addTrace(verified.verified ? 'reject_action_verified' : 'reject_action_not_verified', { evidence: verified.evidence });
@@ -2297,10 +2351,10 @@ export async function runStorefrontAudit(
       if (evidence.consent.rejection_verified) {
         currentPhase = 'consent_post_reject';
         try {
-          const postRejectResponse = await homepage!.reload({ waitUntil: 'commit', timeout: 15_000 });
-          await waitForDomContentSoft(homepage!, 'consent_post_reject', 10_000);
+          const postRejectResponse = await consentHomepage!.reload({ waitUntil: 'commit', timeout: 15_000 });
+          await waitForDomContentSoft(consentHomepage!, 'consent_post_reject', consentTimings.providerReadinessMs);
           if (!isValidStorefrontStatus(postRejectResponse?.status() || null)) throw new Error('Post-reject reload did not return a valid storefront');
-          await wait(POST_REJECT_OBSERVATION_MS, homepage);
+          await wait(consentTimings.reloadSettleMs, consentHomepage);
           evidence.consent.post_reject_observation_completed = true;
         } catch (error) {
           if (error instanceof ScanTermination) throw error;

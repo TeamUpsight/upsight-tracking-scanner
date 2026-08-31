@@ -24,3 +24,19 @@ export function bulkProxyRetryLimit() {
 export function singleProxyRetryLimit() {
   return boundedInteger(process.env.DECODO_MAX_RETRIES_SINGLE, 1, 0, 1);
 }
+
+export interface ConsentTimingValues {
+  initialObservationMs: number;
+  providerReadinessMs: number;
+  postActionSettleMs: number;
+  reloadSettleMs: number;
+}
+
+export function consentTimingValues(): ConsentTimingValues {
+  return {
+    initialObservationMs: boundedInteger(process.env.CONSENT_INITIAL_OBSERVATION_MS, 5_000, 250, 15_000),
+    providerReadinessMs: boundedInteger(process.env.CONSENT_PROVIDER_READINESS_MS, 3_000, 250, 10_000),
+    postActionSettleMs: boundedInteger(process.env.CONSENT_POST_ACTION_SETTLE_MS, 3_000, 250, 10_000),
+    reloadSettleMs: boundedInteger(process.env.CONSENT_RELOAD_SETTLE_MS, 5_000, 250, 15_000)
+  };
+}
