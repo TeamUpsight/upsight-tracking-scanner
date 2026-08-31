@@ -1,0 +1,1 @@
+{"signals":{"status":403,"headers":{"x-waf":"fixture"},"title":"Request blocked","bodyText":"Request blocked by web application firewall"},"expected":{"category":"bot_protection","reasonCode":"GENERIC_WAF_CHALLENGE","challengeType":"generic_waf"}}

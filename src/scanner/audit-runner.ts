@@ -237,7 +237,12 @@ export function classifyNavigationError(error: unknown) {
   return 'NAVIGATION_UNKNOWN_ERROR';
 }
 
-async function inspectPageAccess(page: Page, response: Response | null): Promise<AccessDecision> {
+async function inspectPageAccess(
+  page: Page,
+  response: Response | null,
+  evidence?: EvidenceBundle,
+  accessNetworkSignals: string[] = []
+): Promise<AccessDecision> {
   const headers = response ? await response.allHeaders().catch(() => ({} as Record<string, string>)) : {};
   const content = await page.evaluate(() => {
     const selectors = [
@@ -245,23 +250,33 @@ async function inspectPageAccess(page: Page, response: Response | null): Promise
       'iframe[src*="captcha-delivery.com"]', '[class*="datadome"]', '#px-captcha', '[class*="captcha"]',
       '[class*="akamai"]', '[class*="perimeterx"]', '[class*="human-security"]', '[class*="waf"]'
     ];
-    const frameAndScriptMarkers = [
-      ...Array.from(document.querySelectorAll('iframe[src]')).map((element) => (element as HTMLIFrameElement).src),
-      ...Array.from(document.querySelectorAll('script[src]')).map((element) => (element as HTMLScriptElement).src)
-    ].filter((value) => /challenge|turnstile|captcha|datadome|akamai|perimeterx|human/i.test(value));
+    const iframeUrls = Array.from(document.querySelectorAll('iframe[src]')).map((element) => (element as HTMLIFrameElement).src);
+    const scriptUrls = Array.from(document.querySelectorAll('script[src]')).map((element) => (element as HTMLScriptElement).src);
     return {
       title: document.title,
       bodyText: (document.body?.innerText || '').slice(0, 20_000),
-      domSignals: [...selectors.filter((selector) => document.querySelector(selector)), ...frameAndScriptMarkers]
+      domSignals: selectors.filter((selector) => document.querySelector(selector)),
+      iframeUrls,
+      scriptUrls
     };
-  }).catch(() => ({ title: '', bodyText: '', domSignals: [] as string[] }));
+  }).catch(() => ({ title: '', bodyText: '', domSignals: [] as string[], iframeUrls: [] as string[], scriptUrls: [] as string[] }));
+  const cookieNames = await page.context().cookies([page.url()]).then((cookies) => cookies.map((cookie) => cookie.name)).catch(() => [] as string[]);
   return resolveAccessDecision({
     status: response?.status() ?? null,
     headers,
     url: page.url(),
     title: content.title,
     bodyText: content.bodyText,
-    domSignals: content.domSignals
+    domSignals: content.domSignals,
+    iframeUrls: content.iframeUrls,
+    scriptUrls: content.scriptUrls,
+    cookieNames,
+    networkUrls: evidence ? [
+      ...evidence.network.relevant_requests.map((request) => `${request.host}${request.path}`),
+      ...evidence.network.response_statuses.map((response) => `${response.host}${response.path}`),
+      ...accessNetworkSignals
+    ].slice(-130) : [],
+    redirectPaths: evidence?.page.redirect_chain.map((hop) => `${hop.host}${hop.path}`) || []
   });
 }
 
@@ -928,6 +943,7 @@ export async function runStorefrontAudit(
   let contextObserversAttached = false;
   const collectorCookieNames = new Set<string>();
   const cmpNetworkSignals = new Set<string>();
+  const accessNetworkSignals = new Set<string>();
   const responseInspectionTasks = new Set<Promise<void>>();
   let scriptResponsesInspected = 0;
 
@@ -1039,6 +1055,19 @@ export async function runStorefrontAudit(
     evidence.runtime.proxy_fallback_used = proxyFallbackUsed;
     evidence.runtime.proxy_fallback_recovered = proxyFallbackRecovered;
     evidence.runtime.proxy_fallback_candidate = Boolean(params.is_bulk && finalError === 'proxy_error' && !proxyFallbackUsed);
+    evidenceCollector.setAccess({
+      valid_storefront: evidence.page.valid,
+      final_url: evidence.page.final_url,
+      http_status: evidence.page.status_code,
+      initial_provider: initialProxyProvider,
+      final_provider: currentProxyProvider,
+      proxy_fallback_used: proxyFallbackUsed,
+      proxy_fallback_recovered: proxyFallbackRecovered,
+      challenge_detected: evidence.access.challenge_detected || Boolean(evidence.page.bot_provider),
+      time_to_valid_storefront_ms: evidence.page.valid === true
+        ? evidence.access.time_to_valid_storefront_ms ?? Date.now() - startedMs
+        : null
+    });
     if (responseInspectionTasks.size > 0) {
       await Promise.race([
         Promise.allSettled([...responseInspectionTasks]),
@@ -1080,6 +1109,10 @@ export async function runStorefrontAudit(
     contextObserversAttached = true;
     browserContext.on('request', (request: Request) => {
       const requestUrl = request.url();
+      if (/challenge|turnstile|captcha|datadome|akamai|perimeterx|humansecurity|cdn-cgi|px-captcha/i.test(requestUrl)) {
+        const sanitized = safeUrl(requestUrl);
+        if (sanitized && accessNetworkSignals.size < 30) accessNetworkSignals.add(sanitized);
+      }
       if (/cookielaw\.org|onetrust\.com|otSDKStub\.js|Optanon\.js|cookiebot|didomi|usercentrics|osano|iubenda|privacy-bar|tracking-consent|shopify\.com\/privacy/i.test(requestUrl)) {
         const sanitized = safeUrl(requestUrl);
         if (sanitized && cmpNetworkSignals.size < 100) cmpNetworkSignals.add(sanitized);
@@ -1206,6 +1239,9 @@ export async function runStorefrontAudit(
       const actualCountry = parseEgressCountry(payload);
       const expectedCountries = geo === 'USA' ? ['us'] : geo === 'UK' ? ['gb', 'uk'] : ['de', 'nl', 'fr', 'it', 'es'];
       evidence.runtime.proxy_egress_reachable = true;
+      evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, neutral
+        ? { neutral_https_result: 'reachable' }
+        : { egress_result: 'reachable' });
       if (actualCountry) {
         currentProxyCountry = actualCountry;
         evidence.runtime.proxy_country = currentProxyCountry;
@@ -1228,6 +1264,9 @@ export async function runStorefrontAudit(
         ip_fingerprint_stored: Boolean(evidence.runtime.proxy_ip_hash)
       });
     } catch {
+      evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, neutral
+        ? { neutral_https_result: 'unreachable' }
+        : { egress_result: 'inconclusive' });
       if (neutral) {
         neutralProbeSucceeded = false;
         addTrace('proxy_neutral_probe_completed', { reachable: false, provider: currentProxyProvider });
@@ -1296,6 +1335,18 @@ export async function runStorefrontAudit(
     };
     addTrace('access_identity_created', { ...identity });
     evidence.runtime.proxy_attempts?.push({ provider: currentProxyProvider, attempt: attempt + 1, configured_port: lastProxyPort });
+    evidenceCollector.recordAccessProxyAttempt({
+      provider: currentProxyProvider,
+      geo,
+      port: lastProxyPort,
+      attempt: attempt + 1,
+      connect_duration_ms: null,
+      egress_result: 'not_tested',
+      neutral_https_result: 'not_tested',
+      target_result: 'not_tested',
+      failure_classification: null
+    });
+    evidenceCollector.setAccess({ access_attempt_count: attempt + 1, final_provider: currentProxyProvider });
     addTrace('browser_connecting', {
       attempt,
       connection: cdpUrl ? summarizeCdpUrlForTrace(cdpUrl) : { type: 'local' },
@@ -1309,6 +1360,9 @@ export async function runStorefrontAudit(
     } catch (error) {
       const failureCode = classifyBrowserConnectionError(error);
       evidence.runtime.browser_connection_failure_code = failureCode;
+      evidenceCollector.updateAccessProxyAttempt(attempt + 1, {
+        target_result: 'failed', failure_classification: failureCode
+      });
       addTrace('browser_connection_failed', {
         attempt,
         proxy_port: lastProxyPort,
@@ -1324,6 +1378,7 @@ export async function runStorefrontAudit(
     const connectDuration = Date.now() - connectStart;
     const lastAttempt = evidence.runtime.proxy_attempts?.at(-1);
     if (lastAttempt) lastAttempt.connection_ms = connectDuration;
+    evidenceCollector.updateAccessProxyAttempt(attempt + 1, { connect_duration_ms: connectDuration });
     browserConnectedAt = Date.now();
     evidence.runtime.browserless_connect_ms = connectDuration;
     recordProxyConnect(geo, lastProxyPort, connectDuration);
@@ -1339,7 +1394,14 @@ export async function runStorefrontAudit(
     const bqlProxyCountry = getProxyCountryHint(proxy, geo, attempt);
     evidence.runtime.bql_escalation_attempted = true;
     evidence.runtime.captcha_attempted = true;
+    evidenceCollector.recordAccessProxyAttempt({
+      provider: 'decodo', geo, port: bqlProxyPort, attempt: attempt + 1,
+      connect_duration_ms: null, egress_result: 'not_tested', neutral_https_result: 'not_tested',
+      target_result: 'not_tested', failure_classification: null
+    });
+    evidenceCollector.setAccess({ access_attempt_count: attempt + 1, challenge_solver_used: true, challenge_solver_result: 'inconclusive' });
     addTrace('browserql_escalation_started', { attempt, proxy_port: bqlProxyPort });
+    const handoffStarted = Date.now();
     const handoff = await createBrowserQlHandoff({
       host: process.env.BROWSERLESS_HOST || 'chrome.browserless.io',
       token: process.env.BROWSERLESS_TOKEN,
@@ -1357,6 +1419,7 @@ export async function runStorefrontAudit(
     evidence.runtime.captcha_found = handoff.captchaFound;
     evidence.runtime.captcha_solved = handoff.captchaSolved;
     browser = await chromium.connectOverCDP(handoff.browserWSEndpoint, { timeout: 30_000 });
+    evidenceCollector.updateAccessProxyAttempt(attempt + 1, { connect_duration_ms: Date.now() - handoffStarted });
     browserConnectedAt = Date.now();
     await configureConnectedSession(true);
     evidence.runtime.bql_escalation_succeeded = true;
@@ -1429,6 +1492,10 @@ export async function runStorefrontAudit(
           });
           if (proxyAttempt > 0 && process.env.PROXY_NEUTRAL_PROBE_ENABLED !== 'false') await verifyProxyEgress(true);
           const classification = classifyConfirmedTunnelFailure(lastTunnelPhase, neutralProbeSucceeded);
+          evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, {
+            target_result: 'failed', failure_classification: classification
+          });
+          evidenceCollector.setAccess({ challenge_type: 'proxy_failure' });
           addTrace('proxy_failure_classified', { reason_code: classification, provider: 'decodo', attempt: proxyAttempt + 1 });
           if (evidence.runtime.proxy_egress_reachable && dnsEvidence.status !== 'resolved') {
             addTrace('target_origin_unreachable_after_healthy_proxy', {
@@ -1474,6 +1541,7 @@ export async function runStorefrontAudit(
             continue;
           }
           addTrace('proxy_retry_failed', { provider: 'decodo', attempt: proxyAttempt + 1, configured_port: lastProxyPort });
+          evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, { failure_classification: 'PROXY_RETRY_EXHAUSTED' });
           if (params.is_bulk) addTrace('proxy_failure_classified', { reason_code: 'PROXY_RETRY_EXHAUSTED', proxy_fallback_candidate: true, provider: 'decodo' });
           else addTrace('proxy_failure_classified', { reason_code: 'PROXY_RETRY_EXHAUSTED', provider: 'decodo' });
           throw new ScanTermination('proxy_error', 'failed', 'Proxy tunnel failed after bounded retry');
@@ -1485,6 +1553,10 @@ export async function runStorefrontAudit(
           addTrace('proxy_failure_classified', {
             reason_code: classifyBrowserConnectionError(error), provider: currentProxyProvider, attempt: proxyAttempt + 1
           });
+          evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, {
+            target_result: 'failed', failure_classification: 'PROXY_PROVIDER_UNREACHABLE'
+          });
+          evidenceCollector.setAccess({ challenge_type: 'proxy_failure' });
           throw new ScanTermination('proxy_error', 'failed', 'Proxy transport failed during browser navigation');
         }
         if (isNavigationTimeout(error)) throw new ScanTermination('navigation_timeout', 'failed', 'Homepage navigation timed out');
@@ -1494,9 +1566,10 @@ export async function runStorefrontAudit(
 
       let status = response?.status() ?? null;
       evidenceCollector.setPage({ redirectChain: await redirectChain(response) });
-      let access = await inspectPageAccess(homepage!, response);
+      let access = await inspectPageAccess(homepage!, response, evidence, [...accessNetworkSignals]);
 
       if (access.category === 'bot_protection') {
+        evidenceCollector.setAccess({ challenge_detected: true, challenge_type: access.challengeType });
         evidenceCollector.setPage({
           botProvider: access.botProvider,
           botSignals: access.botSignals,
@@ -1511,13 +1584,13 @@ export async function runStorefrontAudit(
         const challengeStarted = Date.now();
         while (Date.now() - challengeStarted < BOT_CHALLENGE_OBSERVATION_MS) {
           await wait(500, homepage);
-          const observed = await inspectPageAccess(homepage!, null);
+          const observed = await inspectPageAccess(homepage!, null, evidence, [...accessNetworkSignals]);
           if (observed.category === 'none' && !isNonStorefrontUrl(homepage!.url())) {
             try {
               response = await homepage!.reload({ waitUntil: 'commit', timeout: 15_000 });
               await waitForDomContentSoft(homepage!, 'challenge_clear_reload', 10_000);
               status = response?.status() ?? null;
-              access = await inspectPageAccess(homepage!, response);
+              access = await inspectPageAccess(homepage!, response, evidence, [...accessNetworkSignals]);
             } catch {
               access = observed;
             }
@@ -1534,6 +1607,7 @@ export async function runStorefrontAudit(
       if (access.category === 'bot_protection' && params.enable_captcha_solving && !params.is_bulk && bqlEnabled &&
         !browserQlEscalated && proxyAttempt < maxProxyRetries) {
         browserQlEscalated = true;
+        evidenceCollector.setAccess({ challenge_solver_used: true, challenge_solver_result: 'inconclusive' });
         try {
           const previousPort = lastProxyPort;
           const bqlAttempt = proxyAttempt + 1;
@@ -1546,19 +1620,30 @@ export async function runStorefrontAudit(
           response = await homepage!.reload({ waitUntil: 'commit', timeout: 15_000 });
           await waitForDomContentSoft(homepage!, 'browserql_handoff_reload', 10_000);
           status = response?.status() ?? null;
-          access = await inspectPageAccess(homepage!, response);
+          access = await inspectPageAccess(homepage!, response, evidence, [...accessNetworkSignals]);
           if (access.category === 'none') {
             evidenceCollector.setPage({ challengeCleared: true, redirectChain: await redirectChain(response) });
+            evidenceCollector.setAccess({ challenge_solver_result: 'succeeded' });
             addTrace('browserql_challenge_clear_verified', { status });
           } else {
-            addTrace('browserql_challenge_clear_not_verified', { status, error_category: access.category });
+            evidenceCollector.setAccess({ challenge_solver_result: 'failed' });
+            evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, { failure_classification: 'CHALLENGE_SOLVER_FAILED' });
+            addTrace('browserql_challenge_clear_not_verified', { status, error_category: access.category, reason_code: 'CHALLENGE_SOLVER_FAILED' });
           }
         } catch (error) {
-          addTrace('browserql_escalation_failed', { reason: safeUnhandledFailureReason(error) });
+          evidenceCollector.setAccess({ challenge_solver_result: 'failed' });
+          evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, { failure_classification: 'CHALLENGE_SOLVER_FAILED' });
+          addTrace('browserql_escalation_failed', { reason: safeUnhandledFailureReason(error), reason_code: 'CHALLENGE_SOLVER_FAILED' });
         }
       }
 
       if (access.category !== 'none') {
+        evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, {
+          target_result: access.category === 'rate_limited' || access.category === 'bot_protection' || access.category === 'access_blocked'
+            ? 'blocked' : 'failed',
+          failure_classification: access.reasonCode
+        });
+        if (access.challengeType) evidenceCollector.setAccess({ challenge_detected: true, challenge_type: access.challengeType });
         evidenceCollector.setPage({
           valid: false,
           statusCode: status,
@@ -1633,6 +1718,7 @@ export async function runStorefrontAudit(
       evidence.page.redirect_chain
     );
     if ((!canonicalRedirect && !externalRedirectAccepted) || isNonStorefrontUrl(finalUrl)) {
+      evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, { target_result: 'blocked', failure_classification: 'GENERIC_WAF_CHALLENGE' });
       evidenceCollector.setPage({ valid: false, statusCode: response?.status() || null, finalUrl: safeUrl(finalUrl), accessCategory: 'access_blocked' });
       addTrace('non_storefront_redirect_detected', { final_url: safeUrl(finalUrl), final_host: finalHost });
       throw new ScanTermination('access_blocked', 'failed', 'Navigation did not reach a valid storefront');
@@ -1649,6 +1735,16 @@ export async function runStorefrontAudit(
       retryAfterMs: null,
       botProvider: null,
       botSignals: []
+    });
+    evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, { target_result: 'valid_storefront', failure_classification: null });
+    evidenceCollector.setAccess({
+      valid_storefront: isValidStorefrontStatus(response?.status() || null),
+      final_url: safeUrl(finalUrl),
+      http_status: response?.status() || null,
+      final_provider: currentProxyProvider,
+      proxy_fallback_used: proxyFallbackUsed,
+      proxy_fallback_recovered: proxyFallbackRecovered,
+      time_to_valid_storefront_ms: Date.now() - startedMs
     });
     if (externalRedirectAccepted) {
       addTrace('external_storefront_redirect_accepted', {
@@ -1883,7 +1979,7 @@ export async function runStorefrontAudit(
           await waitForDomContentSoft(pdpPage, 'product_pdp_load', 12_000);
           checkProductBudget();
           pdpOperation = 'pdp_access_inspection';
-          const pdpAccess = await inspectPageAccess(pdpPage, pdpResponse);
+          const pdpAccess = await inspectPageAccess(pdpPage, pdpResponse, evidence, [...accessNetworkSignals]);
           if ((!navigationTimedOut && !isValidStorefrontStatus(pdpResponse?.status() || null)) || pdpAccess.category !== 'none') {
             addTrace('pdp_access_invalid', {
               pdp_url: safeUrl(pdpUrl),

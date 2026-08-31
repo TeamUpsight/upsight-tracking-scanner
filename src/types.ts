@@ -114,6 +114,30 @@ export interface ScreenshotEvidence {
   content_base64: string;
 }
 
+export type AccessChallengeType =
+  | 'cloudflare'
+  | 'turnstile'
+  | 'datadome'
+  | 'akamai'
+  | 'perimeterx'
+  | 'captcha'
+  | 'generic_waf'
+  | 'rate_limit'
+  | 'proxy_failure'
+  | 'unknown_challenge';
+
+export interface ProxyAccessAttemptEvidence {
+  provider: 'decodo' | 'browserless_residential';
+  geo: 'USA' | 'EU' | 'UK';
+  port: number | null;
+  attempt: number;
+  connect_duration_ms: number | null;
+  egress_result: 'not_tested' | 'reachable' | 'unreachable' | 'inconclusive';
+  neutral_https_result: 'not_tested' | 'reachable' | 'unreachable' | 'inconclusive';
+  target_result: 'not_tested' | 'valid_storefront' | 'blocked' | 'failed' | 'inconclusive';
+  failure_classification: string | null;
+}
+
 export interface EvidenceBundle {
   audit_id: string;
   scanner_version: string;
@@ -124,6 +148,22 @@ export interface EvidenceBundle {
   geo: 'USA' | 'EU' | 'UK';
   mode: ScanMode;
   selected_modules?: AuditModule[];
+  access: {
+    valid_storefront: boolean | null;
+    final_url: string | null;
+    http_status: number | null;
+    access_attempt_count: number;
+    initial_provider: 'decodo' | 'browserless_residential' | null;
+    final_provider: 'decodo' | 'browserless_residential' | null;
+    proxy_fallback_used: boolean;
+    proxy_fallback_recovered: boolean;
+    challenge_detected: boolean;
+    challenge_type: AccessChallengeType | null;
+    challenge_solver_used: boolean;
+    challenge_solver_result: 'not_used' | 'succeeded' | 'failed' | 'inconclusive';
+    time_to_valid_storefront_ms: number | null;
+    proxy_attempts: ProxyAccessAttemptEvidence[];
+  };
   page: {
     homepage_attempted: boolean;
     dns_resolution_status: 'resolved' | 'not_resolved' | 'inconclusive' | 'not_tested';

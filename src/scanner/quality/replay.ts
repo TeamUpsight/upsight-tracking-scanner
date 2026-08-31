@@ -24,9 +24,26 @@ function cmsFromSignals(signals: string[]): CmsPlatform {
  * explicitly selecting every module.
  */
 export function normalizeReplayEvidence(source: EvidenceBundle): EvidenceBundle {
+  const access = source.access || {
+    valid_storefront: source.page.valid,
+    final_url: source.page.final_url,
+    http_status: source.page.status_code,
+    access_attempt_count: source.runtime.proxy_attempts?.length || 0,
+    initial_provider: source.runtime.proxy_initial_provider || 'decodo',
+    final_provider: source.runtime.proxy_final_provider || 'decodo',
+    proxy_fallback_used: Boolean(source.runtime.proxy_fallback_used),
+    proxy_fallback_recovered: Boolean(source.runtime.proxy_fallback_recovered),
+    challenge_detected: Boolean(source.page.bot_provider),
+    challenge_type: source.page.access_category === 'rate_limited' ? 'rate_limit' as const : null,
+    challenge_solver_used: Boolean(source.runtime.bql_escalation_attempted),
+    challenge_solver_result: source.runtime.bql_escalation_succeeded ? 'succeeded' as const : 'not_used' as const,
+    time_to_valid_storefront_ms: null,
+    proxy_attempts: []
+  };
   return {
     ...source,
     selected_modules: selectedAuditModules(source.selected_modules),
+    access: { ...access, proxy_attempts: [...access.proxy_attempts] },
     page: { ...source.page, cms_signals: [...source.page.cms_signals] },
     network: {
       ...source.network,
@@ -54,6 +71,9 @@ export function normalizeReplayEvidence(source: EvidenceBundle): EvidenceBundle 
 
 export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit> {
   const evidence = normalizeReplayEvidence(source);
+  if (evidence.access.valid_storefront !== null) evidence.page.valid = evidence.access.valid_storefront;
+  if (evidence.access.final_url) evidence.page.final_url = evidence.access.final_url;
+  if (evidence.access.http_status !== null) evidence.page.status_code = evidence.access.http_status;
   const selected_modules = selectedAuditModules(evidence.selected_modules);
   const consentSelected = selected_modules.includes('consent');
   const trackingSelected = selected_modules.includes('tracking');

@@ -35,6 +35,16 @@ function safeHostPath(raw: string) {
   }
 }
 
+function safeAccessUrl(raw: string | null | undefined) {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
 function baseDomain(host: string) {
   return host.toLowerCase().replace(/^www\./, '');
 }
@@ -78,6 +88,22 @@ export class EvidenceCollector {
       geo: input.geo,
       mode,
       selected_modules: input.selectedModules,
+      access: {
+        valid_storefront: null,
+        final_url: null,
+        http_status: null,
+        access_attempt_count: 0,
+        initial_provider: 'decodo',
+        final_provider: 'decodo',
+        proxy_fallback_used: false,
+        proxy_fallback_recovered: false,
+        challenge_detected: false,
+        challenge_type: null,
+        challenge_solver_used: false,
+        challenge_solver_result: 'not_used',
+        time_to_valid_storefront_ms: null,
+        proxy_attempts: []
+      },
       page: {
         homepage_attempted: false,
         dns_resolution_status: 'not_tested',
@@ -325,6 +351,35 @@ export class EvidenceCollector {
     if (input.challengeCleared !== undefined) this.bundle.page.challenge_cleared = input.challengeCleared;
     if (input.redirectChain) this.bundle.page.redirect_chain = input.redirectChain.slice(0, 20);
     if (input.cmsSignals) this.bundle.page.cms_signals = [...new Set(input.cmsSignals)].slice(0, 20);
+  }
+
+  setAccess(input: Partial<EvidenceBundle['access']>) {
+    const access = this.bundle.access;
+    if (input.valid_storefront !== undefined) access.valid_storefront = input.valid_storefront;
+    if (input.final_url !== undefined) access.final_url = safeAccessUrl(input.final_url);
+    if (input.http_status !== undefined) access.http_status = input.http_status;
+    if (input.access_attempt_count !== undefined) access.access_attempt_count = input.access_attempt_count;
+    if (input.initial_provider !== undefined) access.initial_provider = input.initial_provider;
+    if (input.final_provider !== undefined) access.final_provider = input.final_provider;
+    if (input.proxy_fallback_used !== undefined) access.proxy_fallback_used = input.proxy_fallback_used;
+    if (input.proxy_fallback_recovered !== undefined) access.proxy_fallback_recovered = input.proxy_fallback_recovered;
+    if (input.challenge_detected !== undefined) access.challenge_detected = input.challenge_detected;
+    if (input.challenge_type !== undefined) access.challenge_type = input.challenge_type;
+    if (input.challenge_solver_used !== undefined) access.challenge_solver_used = input.challenge_solver_used;
+    if (input.challenge_solver_result !== undefined) access.challenge_solver_result = input.challenge_solver_result;
+    if (input.time_to_valid_storefront_ms !== undefined) access.time_to_valid_storefront_ms = input.time_to_valid_storefront_ms;
+  }
+
+  recordAccessProxyAttempt(input: EvidenceBundle['access']['proxy_attempts'][number]) {
+    const attempts = this.bundle.access.proxy_attempts;
+    if (attempts.length >= 10) return;
+    attempts.push({ ...input });
+    this.bundle.access.access_attempt_count = Math.max(this.bundle.access.access_attempt_count, input.attempt);
+  }
+
+  updateAccessProxyAttempt(attempt: number, input: Partial<EvidenceBundle['access']['proxy_attempts'][number]>) {
+    const record = this.bundle.access.proxy_attempts.find((item) => item.attempt === attempt);
+    if (record) Object.assign(record, input);
   }
 
   setObservedDomain(domain: string) {

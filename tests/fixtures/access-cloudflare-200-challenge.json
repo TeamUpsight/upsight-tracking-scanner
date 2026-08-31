@@ -1,0 +1,1 @@
+{"signals":{"status":200,"headers":{"server":"cloudflare","cf-ray":"fixture"},"title":"Just a moment","domSignals":[".cf-challenge"]},"expected":{"category":"bot_protection","reasonCode":"CLOUDFLARE_CHALLENGE","challengeType":"cloudflare"}}

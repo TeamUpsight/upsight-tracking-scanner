@@ -1,0 +1,1 @@
+{"attempt":{"provider":"decodo","geo":"USA","port":10001,"attempt":1,"connect_duration_ms":120,"egress_result":"reachable","neutral_https_result":"reachable","target_result":"failed","failure_classification":"PROXY_TARGET_TUNNEL_FAILED"}}

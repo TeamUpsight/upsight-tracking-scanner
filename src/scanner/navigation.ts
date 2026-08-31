@@ -1,5 +1,5 @@
 import { lookup } from 'node:dns/promises';
-import type { ErrorCategory } from '../types';
+import type { AccessChallengeType, ErrorCategory } from '../types';
 
 export const INVALID_STOREFRONT_STATUSES = new Set([403, 407, 408, 423, 425, 429, 451]);
 
@@ -18,6 +18,11 @@ export interface AccessSignals {
   title?: string;
   bodyText?: string;
   domSignals?: string[];
+  scriptUrls?: string[];
+  iframeUrls?: string[];
+  cookieNames?: string[];
+  networkUrls?: string[];
+  redirectPaths?: string[];
 }
 
 export interface AccessDecision {
@@ -25,6 +30,7 @@ export interface AccessDecision {
   reasonCode: string;
   botProvider: string | null;
   botSignals: string[];
+  challengeType: AccessChallengeType | null;
   retryAfterMs: number | null;
 }
 
@@ -41,21 +47,28 @@ export function parseRetryAfterMs(value: string | null | undefined, nowMs = Date
   return Math.min(Math.max(0, dateMs - nowMs), 86_400_000);
 }
 
-export function detectBotChallengeEvidence(input: AccessSignals) {
+export function detectAccessChallenge(input: AccessSignals) {
   const headers = normalizedHeaders(input.headers);
   const status = input.status;
   const url = String(input.url || '').toLowerCase();
   const title = String(input.title || '').toLowerCase();
   const body = String(input.bodyText || '').slice(0, 20_000).toLowerCase();
   const dom = (input.domSignals || []).map((value) => value.toLowerCase());
+  const scripts = (input.scriptUrls || []).map((value) => value.toLowerCase());
+  const frames = (input.iframeUrls || []).map((value) => value.toLowerCase());
+  const cookies = (input.cookieNames || []).map((value) => value.toLowerCase());
+  const network = (input.networkUrls || []).map((value) => value.toLowerCase());
+  const redirects = (input.redirectPaths || []).map((value) => value.toLowerCase());
+  const allMarkers = [...dom, ...scripts, ...frames, ...cookies, ...network, ...redirects, url];
   const signals: string[] = [];
   let provider: string | null = null;
 
   const add = (signal: string) => { if (!signals.includes(signal)) signals.push(signal); };
   const server = headers.server?.toLowerCase() || '';
+  const turnstile = allMarkers.some((value) => value.includes('turnstile') || value.includes('challenges.cloudflare.com'));
   const cloudflare = Boolean(headers['cf-ray']) || server.includes('cloudflare') ||
     url.includes('/cdn-cgi/challenge') || url.includes('cf-chl-') ||
-    dom.some((value) => value.includes('cf-turnstile') || value.includes('challenge-form'));
+    allMarkers.some((value) => value.includes('cf-chl-') || value.includes('__cf_bm') || value.includes('cf_clearance') || value.includes('challenge-form'));
   if (cloudflare) {
     provider = 'Cloudflare';
     add('cloudflare');
@@ -63,19 +76,20 @@ export function detectBotChallengeEvidence(input: AccessSignals) {
     if (headers['cf-mitigated']?.toLowerCase() === 'challenge') add('cf_mitigated_challenge');
   }
 
-  const datadome = Boolean(headers['x-datadome']) || /datadome|captcha-delivery\.com/.test(url) ||
-    dom.some((value) => /datadome|captcha-delivery/.test(value));
+  const datadome = Boolean(headers['x-datadome']) || allMarkers.some((value) => /datadome|captcha-delivery/.test(value));
   if (datadome) { provider = provider || 'DataDome'; add('datadome'); }
 
-  const akamai = Boolean(headers['akamai-grn']) || /akamai|akam\//.test(server + url) ||
-    dom.some((value) => value.includes('akamai'));
+  const akamai = Boolean(headers['akamai-grn']) || allMarkers.some((value) => /akamai|akam\//.test(server + value));
   if (akamai) { provider = provider || 'Akamai'; add('akamai'); }
 
-  const perimeterX = Boolean(headers['x-px']) || /px-captcha|perimeterx|humansecurity/.test(url) ||
-    dom.some((value) => /px-captcha|perimeterx/.test(value));
+  const perimeterX = Boolean(headers['x-px']) || allMarkers.some((value) => /px-captcha|perimeterx|humansecurity/.test(value));
   if (perimeterX) { provider = provider || 'HUMAN/PerimeterX'; add('perimeterx'); }
 
-  const strongDom = dom.some((value) => /turnstile|captcha|challenge/.test(value));
+  const captcha = allMarkers.some((value) => /captcha|recaptcha|hcaptcha/.test(value));
+  const genericWaf = Boolean(headers['x-waf'] || headers['x-sucuri-id'] || headers['x-firewall']) ||
+    /waf|web application firewall|request (?:blocked|denied)/.test(body) ||
+    allMarkers.some((value) => /waf|web application firewall|request (?:blocked|denied)/.test(value));
+  const strongDom = allMarkers.some((value) => /turnstile|captcha|challenge/.test(value));
   if (strongDom) add('challenge_dom');
   const challengeUrl = /captcha|challenge|verify/.test(url);
   if (challengeUrl) add('challenge_url');
@@ -84,32 +98,51 @@ export function detectBotChallengeEvidence(input: AccessSignals) {
   if (phrase) add('challenge_phrase');
 
   const statusSupportsChallenge = status === null || status === 200 || status === 202 || status === 403 || status === 429 || status === 503;
-  const providerEvidence = cloudflare || datadome || akamai || perimeterX;
+  const providerEvidence = cloudflare || datadome || akamai || perimeterX || genericWaf;
   const detected = statusSupportsChallenge && (
     strongDom || challengeUrl ||
     (providerEvidence && (status === 403 || status === 429 || status === 503 || Boolean(phrase))) ||
     (Boolean(phrase) && (status === 403 || status === 503 || title.includes(phrase!)))
   );
-  return { detected, provider: detected ? (provider || 'Unknown') : null, signals: detected ? signals : [] };
+  const challengeType: AccessChallengeType | null = !detected ? null
+    : turnstile ? 'turnstile'
+    : cloudflare ? 'cloudflare'
+    : datadome ? 'datadome'
+    : akamai ? 'akamai'
+    : perimeterX ? 'perimeterx'
+    : genericWaf ? 'generic_waf'
+    : captcha ? 'captcha'
+    : 'unknown_challenge';
+  return { detected, provider: detected ? (provider || challengeType) : null, signals: detected ? signals.slice(0, 30) : [], challengeType };
+}
+
+// Compatibility export; access callers should use the normalized detector.
+export const detectBotChallengeEvidence = detectAccessChallenge;
+
+function challengeReasonCode(type: AccessChallengeType) {
+  return ({
+    cloudflare: 'CLOUDFLARE_CHALLENGE', turnstile: 'TURNSTILE_CHALLENGE', datadome: 'DATADOME_CHALLENGE',
+    akamai: 'AKAMAI_CHALLENGE', perimeterx: 'PERIMETERX_CHALLENGE', rate_limit: 'RATE_LIMITED'
+  } satisfies Partial<Record<AccessChallengeType, string>>)[type] || 'GENERIC_WAF_CHALLENGE';
 }
 
 export function resolveAccessDecision(input: AccessSignals): AccessDecision {
   const headers = normalizedHeaders(input.headers);
   const retryAfterMs = parseRetryAfterMs(headers['retry-after']);
   if (input.status === 407) {
-    return { category: 'proxy_error', reasonCode: 'PROXY_AUTH_REQUIRED', botProvider: null, botSignals: [], retryAfterMs };
+    return { category: 'proxy_error', reasonCode: 'PROXY_PROVIDER_UNREACHABLE', botProvider: null, botSignals: [], challengeType: 'proxy_failure', retryAfterMs };
   }
   if (input.status === 429) {
-    return { category: 'rate_limited', reasonCode: 'HTTP_RATE_LIMITED', botProvider: null, botSignals: [], retryAfterMs };
+    return { category: 'rate_limited', reasonCode: 'RATE_LIMITED', botProvider: null, botSignals: [], challengeType: 'rate_limit', retryAfterMs };
   }
-  const bot = detectBotChallengeEvidence(input);
+  const bot = detectAccessChallenge(input);
   if (bot.detected) {
-    return { category: 'bot_protection', reasonCode: 'BOT_PROTECTION', botProvider: bot.provider, botSignals: bot.signals, retryAfterMs };
+    return { category: 'bot_protection', reasonCode: challengeReasonCode(bot.challengeType!), botProvider: bot.provider, botSignals: bot.signals, challengeType: bot.challengeType, retryAfterMs };
   }
   if (input.status !== null && (INVALID_STOREFRONT_STATUSES.has(input.status) || input.status >= 500)) {
-    return { category: 'access_blocked', reasonCode: `HTTP_${input.status}`, botProvider: null, botSignals: [], retryAfterMs };
+    return { category: 'access_blocked', reasonCode: `HTTP_${input.status}`, botProvider: null, botSignals: [], challengeType: null, retryAfterMs };
   }
-  return { category: 'none', reasonCode: 'STOREFRONT_VALID', botProvider: null, botSignals: [], retryAfterMs };
+  return { category: 'none', reasonCode: 'STOREFRONT_VALID', botProvider: null, botSignals: [], challengeType: null, retryAfterMs };
 }
 
 export function classifyHttpAccess(status: number | null): ErrorCategory | 'none' {

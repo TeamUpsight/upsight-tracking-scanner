@@ -1,0 +1,1 @@
+{"signals":{"status":429,"headers":{"retry-after":"12"}},"expected":{"category":"rate_limited","reasonCode":"RATE_LIMITED","challengeType":"rate_limit"}}

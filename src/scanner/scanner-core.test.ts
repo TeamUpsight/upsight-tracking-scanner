@@ -509,7 +509,7 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
       status: 429,
       headers: { server: 'cloudflare', 'cf-ray': 'safe-test', 'retry-after': '12' },
       title: 'Just a moment'
-    })).toMatchObject({ category: 'rate_limited', reasonCode: 'HTTP_RATE_LIMITED', retryAfterMs: 12_000 });
+    })).toMatchObject({ category: 'rate_limited', reasonCode: 'RATE_LIMITED', challengeType: 'rate_limit', retryAfterMs: 12_000 });
     expect(resolveAccessDecision({
       status: 403,
       headers: { server: 'cloudflare', 'cf-ray': 'safe-test', 'cf-mitigated': 'challenge' },
@@ -519,6 +519,34 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
       .toMatchObject({ category: 'access_blocked', reasonCode: 'HTTP_403' });
     expect(resolveAccessDecision({ status: 200, title: 'Verify you are human' }))
       .toMatchObject({ category: 'bot_protection' });
+  });
+
+  it('normalizes bounded access fixtures and never treats a challenge page as a storefront', () => {
+    const fixture = <T>(name: string) => JSON.parse(readFileSync(path.join(process.cwd(), 'tests/fixtures', name), 'utf8')) as T;
+    for (const name of ['access-cloudflare-200-challenge.json', 'access-403-waf.json', 'access-429.json']) {
+      const testCase = fixture<{ signals: Parameters<typeof resolveAccessDecision>[0]; expected: Record<string, unknown> }>(name);
+      expect(resolveAccessDecision(testCase.signals)).toMatchObject(testCase.expected);
+    }
+    const cloudflare = fixture<{ signals: Parameters<typeof resolveAccessDecision>[0] }>('access-cloudflare-200-challenge.json');
+    expect(resolveAccessDecision(cloudflare.signals).category).not.toBe('none');
+  });
+
+  it('replays normalized proxy, fallback, and solver access evidence without absence findings', () => {
+    const fixture = <T>(name: string) => JSON.parse(readFileSync(path.join(process.cwd(), 'tests/fixtures', name), 'utf8')) as T;
+    const targetFailure = fixture<{ attempt: EvidenceBundle['access']['proxy_attempts'][number] }>('access-target-tunnel-failure.json');
+    const recovery = fixture<{ access: Partial<EvidenceBundle['access']> }>('access-browserless-fallback-recovery.json');
+    const solverRecovery = fixture<{ access: Partial<EvidenceBundle['access']> }>('access-challenge-solver-recovery.json');
+    const solverFailure = fixture<{ access: Partial<EvidenceBundle['access']> }>('access-challenge-solver-failure.json');
+    const evidence = baseEvidence('access-fixture.example');
+    evidence.access = { ...evidence.access, ...recovery.access, proxy_attempts: [targetFailure.attempt] };
+    expect(evidence.access).toMatchObject({ final_provider: 'browserless_residential', proxy_fallback_recovered: true, proxy_attempts: [targetFailure.attempt] });
+    expect({ ...evidence.access, ...solverRecovery.access }).toMatchObject({ challenge_solver_result: 'succeeded' });
+    evidence.access = { ...evidence.access, ...solverFailure.access };
+    const result = replayEvidence(evidence);
+    expect(result).toMatchObject({
+      scan_status: 'failed', consent_status: 'inconclusive', product_payload_status: 'not_tested',
+      site_ga4_detected: null, site_meta_detected: null
+    });
   });
 
   it('accepts only an evidence-backed HTTPS cross-domain redirect chain', () => {
