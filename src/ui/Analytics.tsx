@@ -139,7 +139,7 @@ export function QualityDashboard({ quality, onOpenAudit }: { quality: any; onOpe
   const [trendMetric, setTrendMetric] = useState<'audits' | 'completed' | 'failed' | 'inconclusive'>('audits');
   const [distributionKey, setDistributionKey] = useState('overall_status');
   const distributions = [
-    ['overall_status', 'Overall'], ['scan_status', 'Scan Status'], ['error_category', 'Access'],
+    ['overall_status', 'Overall'], ['scan_status', 'Scan Status'], ['error_category', 'Operational / Access'],
     ['cms', 'CMS'], ['cmp', 'CMP'], ['consent', 'Consent'], ['ga4_installation', 'GA4'],
     ['meta_installation', 'Meta'], ['product_payload', 'PDP / View Item'], ['server_side', 'Server-Side']
   ];

@@ -8,10 +8,14 @@ export function StatusBadge({ value }: { value: unknown }) {
     'didomi', 'usercentrics', 'cookieyes', 'osano', 'iubenda', 'trustarc', 'fides', 'quantcast',
     'iab tcf', 'shopify privacy'
   ]).has(normalized);
-  const tone = normalized.includes('pdp not found') || normalized.includes('missing view item') ||
+  const tone = normalized.includes('not tested')
+    ? 'border-slate-800 bg-[#11151d] text-slate-500'
+    : normalized.includes('inconclusive')
+      ? 'border-amber-700/60 bg-amber-950/40 text-amber-300'
+    : normalized.includes('pdp not found') || normalized.includes('missing view item') ||
     normalized.includes('warning') || normalized.includes('partial')
     ? 'border-amber-700/60 bg-amber-950/60 text-amber-300'
-    : normalized.includes('inconclusive') || normalized.includes('not tested') || normalized.includes('not detected') ||
+    : normalized.includes('not detected') ||
       normalized.includes('not found') || normalized.includes('unknown') || normalized === 'none' || normalized === 'cancelled'
       ? 'border-slate-700 bg-slate-900 text-slate-300'
       : normalized.includes('fail') || normalized.includes('violation') || normalized.includes('leakage') ||
