@@ -46,7 +46,7 @@ export function generateFailureFingerprints(audit: Partial<StorefrontAudit>, evi
   const codes = new Set<string>();
   if (audit.error_category === 'rate_limited') codes.add('HTTP_RATE_LIMITED');
   if (audit.error_category === 'proxy_error') codes.add('PROXY_TUNNEL_FAILED');
-  const access = evidence.access;
+  const access: Partial<EvidenceBundle['access']> = evidence.access || {};
   const attempts = accessAttempts(evidence);
   const accessFailures = attempts.map((attempt) => attempt.failure_classification);
   if (accessFailures.includes('PROXY_PROVIDER_UNREACHABLE')) codes.add('PROXY_PROVIDER_UNREACHABLE');
@@ -116,7 +116,7 @@ export function qaPrioritySignals(
     add('ACCESS_STATE_CONTRADICTION', 'Access facts disagree across recorded states', 35, 'high');
   }
 
-  const access = evidence.access;
+  const access: Partial<EvidenceBundle['access']> = evidence.access || {};
   const attempts = accessAttempts(evidence);
   const targetTunnelFailures = attempts.filter((attempt) => attempt.failure_classification === 'PROXY_TARGET_TUNNEL_FAILED').length;
   if (access.challenge_type === 'unknown_challenge') add('UNKNOWN_CHALLENGE_TYPE', 'New challenge type needs access review', 25, 'high');

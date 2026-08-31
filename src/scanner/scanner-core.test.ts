@@ -377,6 +377,17 @@ describe('review priority scoring', () => {
     expect(qaPrioritySignals(result, evidence, result.consistency_violations || []).map((signal) => signal.code))
       .not.toContain('SCAN_EXECUTION_FAILED');
   });
+
+  it('keeps legacy evidence without access telemetry visible in the audit list', () => {
+    const evidence = baseEvidence('legacy-evidence.example');
+    delete (evidence as Partial<EvidenceBundle>).access;
+    const audit: Partial<StorefrontAudit> = {
+      scan_status: 'completed', error_category: 'none', cms_platform_detected: 'Shopify', cmp_provider: 'Shopify Privacy',
+      consent_status: 'pass', product_payload_status: 'pass', server_side_status: 'not_detected'
+    };
+    expect(() => qaPrioritySignals(audit, evidence, [])).not.toThrow();
+    expect(() => generateFailureFingerprints(audit, evidence)).not.toThrow();
+  });
 });
 
 describe('CMP confidence rules', () => {
