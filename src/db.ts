@@ -24,18 +24,15 @@ export class AuditDatabase {
   private nextMemoryId = 1;
 
   constructor() {
+    const connectionString = process.env.DATABASE_URL;
     const host = process.env.DB_HOST;
     const database = process.env.DB_NAME;
     const user = process.env.DB_USER;
     const password = process.env.DB_PASSWORD;
     const port = boundedInteger(process.env.DB_PORT, 5432, 1, 65_535);
-    if (host && database && user) {
+    if (connectionString || (host && database && user)) {
       this.pool = new pg.Pool({
-        host,
-        database,
-        user,
-        password,
-        port,
+        ...(connectionString ? { connectionString } : { host, database, user, password, port }),
         ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
         connectionTimeoutMillis: 5_000,
         max: boundedInteger(process.env.DB_POOL_MAX, 5, 1, 50)
@@ -50,7 +47,7 @@ export class AuditDatabase {
         console.warn('[Database] Explicit USE_MEMORY_DB=true; audit data is process-local and non-persistent.');
         return;
       }
-      throw new Error('Database configuration is missing. Set DB_HOST, DB_NAME, and DB_USER, or explicitly set USE_MEMORY_DB=true for local development.');
+      throw new Error('Database configuration is missing. Set DATABASE_URL (recommended for Supabase) or DB_HOST, DB_NAME, and DB_USER; alternatively set USE_MEMORY_DB=true for local development.');
     }
 
     const client = await this.pool.connect();
