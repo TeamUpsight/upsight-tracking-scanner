@@ -74,3 +74,10 @@ npm run validate
 ## Documentation maintenance
 
 When architecture, commands, domain ownership, invariants, or known risks change, update the smallest relevant file under `docs/ai/`. Keep this root file concise; add a nested `AGENTS.md` only when a subtree develops genuinely different commands or safety rules.
+
+## Git delivery
+
+- After completing a code change, inspect the diff, run the proportionate validation above, and create a Git commit before handoff unless the user explicitly asks not to commit.
+- Stage only files changed for the current task; never include pre-existing or unrelated working-tree changes. Use `git diff --check` before staging and a concise imperative commit message.
+- Push the new commit to the configured upstream after committing when remote access is available. If a push fails, keep the local commit intact and report the exact blocker plus the command needed to retry.
+- Never amend, rebase, force-push, or commit secrets, generated artifacts, `.env` files, or credentials unless the user explicitly authorizes that action.
