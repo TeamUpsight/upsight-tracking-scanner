@@ -1237,7 +1237,7 @@ export async function runStorefrontAudit(
     let cdpUrl = '';
     let proxy = '';
     if (provider === 'browserless' && process.env.BROWSERLESS_TOKEN) {
-      const proxyMode = proxyModeOverride || process.env.BROWSERLESS_PROXY_MODE || 'decodo';
+      const proxyMode = proxyModeOverride || 'decodo';
       currentProxyProvider = proxyMode === 'browserless_residential' ? 'browserless_residential' : 'decodo';
       if (currentProxyProvider === 'browserless_residential') {
         const plan = buildProxyAttemptPlan({ provider: currentProxyProvider, geo, attempt, portOffset: proxyPortOffset,
@@ -1314,8 +1314,7 @@ export async function runStorefrontAudit(
 
   const connectViaBrowserQl = async (attempt: number) => {
     if (!process.env.BROWSERLESS_TOKEN) throw new Error('BrowserQL requires a Browserless token');
-    const proxyMode = process.env.BROWSERLESS_PROXY_MODE || 'decodo';
-    const proxy = proxyMode === 'decodo' ? getExternalProxyForGeo(geo, attempt, proxyPortOffset) : '';
+    const proxy = getExternalProxyForGeo(geo, attempt, proxyPortOffset);
     const bqlProxyPort = parseProxyUrl(proxy).port;
     const bqlProxyCountry = getProxyCountryHint(proxy, geo, attempt);
     evidence.runtime.bql_escalation_attempted = true;
@@ -1324,14 +1323,9 @@ export async function runStorefrontAudit(
     const handoff = await createBrowserQlHandoff({
       host: process.env.BROWSERLESS_HOST || 'chrome.browserless.io',
       token: process.env.BROWSERLESS_TOKEN,
-      route: process.env.BROWSERLESS_BQL_ROUTE === 'stealth' ? 'stealth' : 'standard',
+      route: 'standard',
       url: `https://${normalizedDomain}`,
       externalProxyServer: proxy || undefined,
-      builtInProxy: proxyMode === 'browserless_residential' ? 'residential' :
-        proxyMode === 'browserless_datacenter' ? 'datacenter' : undefined,
-      proxyCountry: proxyMode.startsWith('browserless_') ? bqlProxyCountry : undefined,
-      proxySticky: proxyMode.startsWith('browserless_'),
-      proxyLocaleMatch: proxyMode.startsWith('browserless_'),
       browserLocale: browserGeoProfile(bqlProxyCountry).locale,
       sessionTimeoutMs: browserlessSessionTimeoutMs,
       reconnectTimeoutMs: Math.min(30_000, browserlessSessionTimeoutMs),
@@ -1513,7 +1507,7 @@ export async function runStorefrontAudit(
         }
       }
 
-      const bqlEnabled = process.env.BROWSERLESS_BQL_ESCALATION === 'true';
+      const bqlEnabled = process.env.BROWSERLESS_CHALLENGE_SOLVING_ENABLED === 'true';
       if (access.category === 'bot_protection' && params.enable_captcha_solving && !params.is_bulk && bqlEnabled &&
         !browserQlEscalated && proxyAttempt < maxProxyRetries) {
         browserQlEscalated = true;

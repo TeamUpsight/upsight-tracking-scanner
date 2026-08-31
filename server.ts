@@ -398,7 +398,7 @@ app.post('/api/v1/scans/:id/difficult-site-rerun', asyncRoute(async (req, res) =
   queue.add(queueJobForAudit(audit, { enable_captcha_solving: true, is_bulk: false }));
   res.status(202).json({
     ...audit,
-    escalation_enabled: process.env.BROWSERLESS_BQL_ESCALATION === 'true',
+    challenge_solving_enabled: process.env.BROWSERLESS_CHALLENGE_SOLVING_ENABLED === 'true',
     authorized_access_enabled: Boolean(process.env.AUTHORIZED_SCAN_DOMAINS)
   });
 }));
@@ -539,8 +539,8 @@ app.get('/api/v1/scanner/access-readiness', (_req, res) => res.json({
   browser_provider: process.env.BROWSER_PROVIDER || 'browserless',
   browserless_host: process.env.BROWSERLESS_HOST || 'chrome.browserless.io',
   browserless_route: process.env.BROWSERLESS_ROUTE === 'standard' ? 'standard' : 'stealth',
-  proxy_mode: process.env.BROWSERLESS_PROXY_MODE || 'decodo',
-  bql_escalation_enabled: process.env.BROWSERLESS_BQL_ESCALATION === 'true',
+  challenge_solving_enabled: process.env.BROWSERLESS_CHALLENGE_SOLVING_ENABLED === 'true',
+  challenge_solving_bulk_enabled: false,
   egress_probe_enabled: process.env.PROXY_EGRESS_PROBE === 'true',
   proxy_configuration_issues: validateProxyConfiguration(bulkProxyRetryLimit())
 }));

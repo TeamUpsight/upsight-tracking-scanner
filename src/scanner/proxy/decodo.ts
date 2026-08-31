@@ -161,9 +161,8 @@ export function validateProxyConfiguration(maxRetries = 1) {
 }
 
 function isBackconnectProxy(parsed: URL) {
-  const configuredGateway = (process.env.DECODO_ROTATING_GATEWAY_HOST || 'gate.decodo.com').toLowerCase();
   const hostname = parsed.hostname.toLowerCase();
-  return parsed.port === '7000' || hostname === 'gate.decodo.com' || hostname === configuredGateway;
+  return parsed.port === '7000' || hostname === 'gate.decodo.com';
 }
 
 function rotateExistingSessionUsername(username: string, sessionId: string) {
@@ -229,8 +228,8 @@ export function getExternalProxyForGeo(geo: string, attempt = 0, portOffset = 0)
 export function buildRotatingFallbackProxy(baseProxy: string, geo: string) {
   if (process.env.DECODO_ENABLE_ROTATING_GATEWAY_FALLBACK !== 'true' || !isValidProxy(baseProxy)) return '';
   const parsed = new URL(baseProxy);
-  const host = process.env.DECODO_ROTATING_GATEWAY_HOST || 'gate.decodo.com';
-  const port = boundedInteger(process.env.DECODO_ROTATING_GATEWAY_PORT, 7000, 1, 65_535);
+  const host = 'gate.decodo.com';
+  const port = 7000;
   if (!host) return '';
   parsed.hostname = host;
   parsed.port = String(port);
@@ -252,7 +251,7 @@ export function buildBrowserlessCdpUrl(options: {
   solveCaptchas?: boolean;
   timeoutMs?: number;
   browserLocale?: string;
-  builtInProxy?: 'residential' | 'datacenter';
+  builtInProxy?: 'residential';
   proxyCountry?: string;
   proxySticky?: boolean;
   proxyLocaleMatch?: boolean;

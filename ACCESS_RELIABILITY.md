@@ -25,8 +25,8 @@ All options are listed in `.env.example`.
 
 - `BROWSERLESS_SESSION_TIMEOUT_MS` must be greater than or equal to `AUDIT_TIMEOUT_MS`.
 - `PRODUCT_DISCOVERY_BUDGET_MS=15000` and `PRODUCT_CONSENT_BUDGET_MS=15000` are capped below `AUDIT_TIMEOUT_MS`. They prevent a slow sitemap, PDP, or consent operation from consuming the entire Browserless session; they do not change Decodo, Browserless route, credential, or proxy selection.
-- `BROWSERLESS_PROXY_MODE=decodo` is the default. Browserless residential/datacenter modes are explicit A/B alternatives.
-- `BROWSERLESS_BQL_ESCALATION=false` and `BROWSERLESS_RATE_LIMIT_FALLBACK=false` are opt-in because they require plan entitlement and may consume paid units.
+- Decodo is the only ordinary/challenge proxy provider. Browserless Residential is used only by the bounded non-bulk fallback; Browserless datacenter mode is not configured or supported.
+- `BROWSERLESS_CHALLENGE_SOLVING_ENABLED=true` permits the manual difficult-site BrowserQL handoff. `BROWSERLESS_CHALLENGE_SOLVING_BULK=false` is an invariant: bulk scans never solve challenges.
 - `DECODO_MAX_RETRIES_BULK=1` and `DECODO_MAX_RETRIES_SINGLE=1` bound the tunnel retry ladder.
 - `BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED=true` permits individual/diagnostic fallback; `BROWSERLESS_RESIDENTIAL_FALLBACK_BULK=false` keeps bulk scans cost-bounded.
 - `DECODO_ENABLE_ROTATING_GATEWAY_FALLBACK=false` keeps the rotating gateway experimental and out of the default path.

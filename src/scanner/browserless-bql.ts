@@ -4,7 +4,7 @@ export interface BrowserQlHandoffOptions {
   route: 'standard' | 'stealth';
   url: string;
   externalProxyServer?: string;
-  builtInProxy?: 'residential' | 'datacenter';
+  builtInProxy?: 'residential';
   proxyCountry?: string;
   proxySticky?: boolean;
   proxyLocaleMatch?: boolean;
