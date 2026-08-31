@@ -12,6 +12,7 @@ import type {
   TrackingRequestEvidence
 } from '../types';
 import { selectedAuditModules } from '../audit-modules';
+import { classifyAuditTermination } from '../audit-lifecycle';
 import { boundedInteger, bulkProxyRetryLimit, globalScanTimeoutMs, singleProxyRetryLimit } from '../shared/config';
 import { buildMetadata } from '../build-metadata';
 import { browserGeoProfile, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
@@ -942,12 +943,15 @@ export async function runStorefrontAudit(
   };
 
   const check = () => {
-    if (activeScansRegistry.isAborted(params.audit_id)) {
-      throw new ScanTermination('cancelled', 'cancelled', 'Manual cancellation requested');
-    }
-    if (params.abortSignal?.aborted || Date.now() - startedMs >= timeoutMs) {
-      throw new ScanTermination('scan_timeout', 'failed', 'Audit execution timeout');
-    }
+    const termination = classifyAuditTermination(
+      activeScansRegistry.isAborted(params.audit_id),
+      Boolean(params.abortSignal?.aborted) || Date.now() - startedMs >= timeoutMs
+    );
+    if (termination) throw new ScanTermination(
+      termination.category,
+      termination.scanStatus,
+      termination.category === 'cancelled' ? 'Manual cancellation requested' : 'Audit execution timeout'
+    );
     if (orderedUpdates.failure) {
       throw new ScanTermination('database_error', 'failed', 'Audit progress persistence failed');
     }

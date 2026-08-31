@@ -20,7 +20,8 @@ import { qaPrioritySignals } from './src/scanner/quality/fingerprints';
 import { compareReplay, replayEvidence } from './src/scanner/quality/replay';
 import { buildLatestReviewQueue } from './src/scanner/quality/review-queue';
 import type { EvidenceBundle, QaFeedback, ScanMode, StorefrontAudit } from './src/types';
-import { normalizeAuditModules, selectedAuditModules } from './src/audit-modules';
+import { normalizeAuditModules } from './src/audit-modules';
+import { isRecoverableStaleAudit, queueJobForAudit, rerunAuditOptions, shouldEnqueueAudit, type AuditQueueJob } from './src/audit-lifecycle';
 import { boundedInteger, bulkProxyRetryLimit, globalScanTimeoutMs } from './src/shared/config';
 import { buildMetadata } from './src/build-metadata';
 
@@ -61,24 +62,15 @@ function auditsWithCurrentQa(audits: StorefrontAudit[], feedback: QaFeedback[]) 
   });
 }
 
-interface AuditJob {
-  audit_id: string | number;
-  domain: string;
-  enable_captcha_solving: boolean;
-  is_bulk: boolean;
-  scan_mode: ScanMode;
-  selected_modules: import('./src/types').AuditModule[];
-  available_at?: number;
-}
-
 class InMemoryAuditQueue {
-  private readonly pending: AuditJob[] = [];
+  private readonly pending: AuditQueueJob[] = [];
   private readonly active = new Set<string>();
   private readonly activeDomains = new Set<string>();
   private readonly domainCooldowns = new Map<string, { until: number; reason: string }>();
   private drainTimer: NodeJS.Timeout | null = null;
 
-  add(job: AuditJob) {
+  add(job: AuditQueueJob) {
+    if (!shouldEnqueueAudit(this.has(job.audit_id))) return;
     const jitterMax = job.is_bulk ? boundedInteger(process.env.BULK_DOMAIN_JITTER_MS, 2_500, 0, 30_000) : 0;
     this.pending.push({ ...job, available_at: Date.now() + (jitterMax ? Math.floor(Math.random() * jitterMax) : 0) });
     this.drain();
@@ -164,7 +156,7 @@ class InMemoryAuditQueue {
     else if (audit.scan_status === 'completed' || audit.scan_status === 'partial') this.domainCooldowns.delete(domain);
   }
 
-  private async execute(job: AuditJob) {
+  private async execute(job: AuditQueueJob) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), scanTimeoutMs);
     try {
@@ -290,9 +282,8 @@ function asyncRoute(
 async function recoverStaleAudits() {
   const audits = await db.getRecoverableStaleAudits(staleScanMinutes, 5000);
   for (const audit of audits) {
-    if (!['pending', 'scanning'].includes(audit.scan_status) || queue.has(audit.audit_id)) continue;
     const trace = parseStoredTrace(audit.trace_steps);
-    if (trace.some((step) => step.step === 'scan_finalized')) continue;
+    if (!isRecoverableStaleAudit(audit, queue.has(audit.audit_id), trace)) continue;
     trace.push({ step: 'stale_scan_recovered', reason: 'No active or queued worker exists after the emergency recovery threshold', timestamp: new Date().toISOString() });
     trace.push({ step: 'scan_finalized', scan_status: 'failed', error_category: 'unknown_error', timestamp: new Date().toISOString() });
     await db.recoverStaleAudit(audit.audit_id, {
@@ -336,14 +327,7 @@ app.post('/api/v1/scan', asyncRoute(async (req, res) => {
   if (!selectedModules) return res.status(400).json({ error: 'selected_modules must be a non-empty array of supported modules.' });
   const groupLabel = req.body?.group_label ? String(req.body.group_label).slice(0, 120) : null;
   const audit = await db.createAudit(domain, geo, groupLabel, mode, selectedModules);
-  queue.add({
-    audit_id: audit.audit_id,
-    domain,
-    enable_captcha_solving: req.body?.enable_captcha_solving === true,
-    is_bulk: false,
-    scan_mode: mode,
-    selected_modules: selectedModules
-  });
+  queue.add(queueJobForAudit(audit, { enable_captcha_solving: req.body?.enable_captcha_solving === true, is_bulk: false }));
   res.status(202).json(audit);
 }));
 
@@ -371,14 +355,7 @@ app.post('/api/v1/scan/bulk', upload.single('file'), asyncRoute(async (req, res)
   for (const domain of domains) {
     const audit = await db.createAudit(domain, geo, groupLabel, mode, selectedModules);
     audits.push(audit);
-    queue.add({
-      audit_id: audit.audit_id,
-      domain,
-      enable_captcha_solving: false,
-      is_bulk: true,
-      scan_mode: mode,
-      selected_modules: selectedModules
-    });
+    queue.add(queueJobForAudit(audit, { enable_captcha_solving: false, is_bulk: true }));
   }
   res.status(202).json({ count: audits.length, duplicates_removed: lines.length - start - domains.length, audits });
 }));
@@ -393,17 +370,9 @@ app.post('/api/v1/scans/bulk-rerun', asyncRoute(async (req, res) => {
     const source = await db.getAudit(id);
     if (!source) continue;
     if (!source.tested_geos) continue;
-    const mode: ScanMode = source.scan_mode === 'diagnostic' ? 'diagnostic' : 'normal';
-    const selectedModules = selectedAuditModules(source.selected_modules);
-    const audit = await db.createAudit(source.domain, source.tested_geos, source.group_label, mode, selectedModules);
-    queue.add({
-      audit_id: audit.audit_id,
-      domain: source.domain,
-      enable_captcha_solving: false,
-      is_bulk: true,
-      scan_mode: mode,
-      selected_modules: selectedModules
-    });
+    const rerun = rerunAuditOptions(source);
+    const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules);
+    queue.add(queueJobForAudit(audit, { enable_captcha_solving: false, is_bulk: true }));
     created.push(audit);
   }
   if (!created.length) return res.status(404).json({ error: 'No selected audits could be re-run.' });
@@ -414,16 +383,9 @@ app.post('/api/v1/scans/:id/diagnostic-rerun', asyncRoute(async (req, res) => {
   const source = await db.getAudit(req.params.id);
   if (!source) return res.status(404).json({ error: 'Audit not found.' });
   if (!source.tested_geos) return res.status(400).json({ error: 'Source audit has no valid geo.' });
-  const selectedModules = selectedAuditModules(source.selected_modules);
-  const audit = await db.createAudit(source.domain, source.tested_geos, source.group_label, 'diagnostic', selectedModules);
-  queue.add({
-    audit_id: audit.audit_id,
-    domain: source.domain,
-    enable_captcha_solving: false,
-    is_bulk: false,
-    scan_mode: 'diagnostic',
-    selected_modules: selectedModules
-  });
+  const rerun = rerunAuditOptions(source, 'diagnostic');
+  const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules);
+  queue.add(queueJobForAudit(audit, { enable_captcha_solving: false, is_bulk: false }));
   res.status(202).json(audit);
 }));
 
@@ -431,16 +393,9 @@ app.post('/api/v1/scans/:id/difficult-site-rerun', asyncRoute(async (req, res) =
   const source = await db.getAudit(req.params.id);
   if (!source) return res.status(404).json({ error: 'Audit not found.' });
   if (!source.tested_geos) return res.status(400).json({ error: 'Source audit has no valid geo.' });
-  const selectedModules = selectedAuditModules(source.selected_modules);
-  const audit = await db.createAudit(source.domain, source.tested_geos, source.group_label, 'diagnostic', selectedModules);
-  queue.add({
-    audit_id: audit.audit_id,
-    domain: source.domain,
-    enable_captcha_solving: true,
-    is_bulk: false,
-    scan_mode: 'diagnostic',
-    selected_modules: selectedModules
-  });
+  const rerun = rerunAuditOptions(source, 'diagnostic');
+  const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules);
+  queue.add(queueJobForAudit(audit, { enable_captcha_solving: true, is_bulk: false }));
   res.status(202).json({
     ...audit,
     escalation_enabled: process.env.BROWSERLESS_BQL_ESCALATION === 'true',
