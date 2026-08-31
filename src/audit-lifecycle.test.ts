@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { classifyAuditTermination, isRecoverableStaleAudit, queueJobForAudit, rerunAuditOptions, shouldEnqueueAudit } from './audit-lifecycle';
 import { AuditDatabase } from './db';
+import { decideAccessTransition } from './scanner/access-state-machine';
 import { EvidenceCollector } from './scanner/evidence/evidence-collector';
 import { replayEvidence } from './scanner/quality/replay';
 import type { StorefrontAudit } from './types';
@@ -40,12 +41,15 @@ describe('API queue lifecycle contracts', () => {
   });
 
   it('propagates stored scan mode and selected modules to single and bulk jobs', () => {
-    const source = audit({ scan_mode: 'diagnostic', selected_modules: ['server_side', 'tracking'] });
-    expect(queueJobForAudit(source, { enable_captcha_solving: false, is_bulk: false })).toMatchObject({
-      scan_mode: 'diagnostic', selected_modules: ['tracking', 'server_side'], is_bulk: false
+    const source = audit({
+      scan_mode: 'diagnostic', selected_modules: ['server_side', 'tracking'],
+      queue_options: { enable_captcha_solving: false, is_bulk: false, proxy_provider: 'decodo' }
     });
-    expect(queueJobForAudit(source, { enable_captcha_solving: false, is_bulk: true })).toMatchObject({
-      scan_mode: 'diagnostic', selected_modules: ['tracking', 'server_side'], is_bulk: true
+    expect(queueJobForAudit(source)).toMatchObject({
+      scan_mode: 'diagnostic', selected_modules: ['tracking', 'server_side'], is_bulk: false, proxy_provider: 'decodo'
+    });
+    expect(queueJobForAudit(source, { is_bulk: true })).toMatchObject({
+      scan_mode: 'diagnostic', selected_modules: ['tracking', 'server_side'], is_bulk: true, proxy_provider: 'decodo'
     });
   });
 
@@ -54,17 +58,32 @@ describe('API queue lifecycle contracts', () => {
     expect(shouldEnqueueAudit(true)).toBe(false);
   });
 
-  it('preserves source options for ordinary and proxy-fallback reruns while diagnostic reruns change only mode', () => {
-    const source = audit({ scan_mode: 'diagnostic', selected_modules: ['tracking'] });
-    expect(rerunAuditOptions(source)).toMatchObject({ domain: 'example.com', tested_geos: 'EU', group_label: 'batch-a', scan_mode: 'diagnostic', selected_modules: ['tracking'] });
+  it('preserves source options for reruns while changing only their explicit execution override', () => {
+    const source = audit({
+      scan_mode: 'diagnostic', selected_modules: ['tracking'],
+      queue_options: { enable_captcha_solving: true, is_bulk: true, proxy_provider: 'decodo' }
+    });
+    expect(rerunAuditOptions(source)).toMatchObject({
+      domain: 'example.com', tested_geos: 'EU', group_label: 'batch-a', scan_mode: 'diagnostic', selected_modules: ['tracking'],
+      queue_options: { enable_captcha_solving: true, is_bulk: true, proxy_provider: 'decodo' }
+    });
     expect(rerunAuditOptions(source, 'normal')).toMatchObject({ scan_mode: 'normal', selected_modules: ['tracking'] });
+    expect(queueJobForAudit({ ...source, ...rerunAuditOptions(source, undefined, { is_bulk: false, proxy_provider: 'browserless_residential' }) })).toMatchObject({
+      is_bulk: false, enable_captcha_solving: true, proxy_provider: 'browserless_residential'
+    });
   });
 
   it('recovers only orphaned, unfinished audits', () => {
-    expect(isRecoverableStaleAudit(audit(), false, [])).toBe(true);
+    expect(isRecoverableStaleAudit(audit({ scan_status: 'scanning' }), false, [])).toBe(true);
     expect(isRecoverableStaleAudit(audit(), true, [])).toBe(false);
     expect(isRecoverableStaleAudit(audit({ scan_status: 'failed' }), false, [])).toBe(false);
     expect(isRecoverableStaleAudit(audit(), false, [{ step: 'scan_finalized' }])).toBe(false);
+  });
+
+  it('never automatically upgrades bulk Decodo exhaustion to Browserless Residential', () => {
+    expect(decideAccessTransition({
+      event: 'proxy_failure', isBulk: true, decodoAttempts: 1, maxDecodoRetries: 1, fallbackEnabled: true, challengeSolvingEnabled: false
+    })).toBe('finalize');
   });
 });
 
@@ -89,7 +108,12 @@ describe('audit persistence contracts', () => {
     await expect(db.getAudit(finalized.audit_id)).resolves.toMatchObject({ error_category: 'scan_timeout' });
 
     const stale = await db.createAudit('stale.example', 'USA');
-    await expect(db.recoverStaleAudit(stale.audit_id, { scan_status: 'failed', error_category: 'unknown_error' })).resolves.toMatchObject({ scan_status: 'failed' });
+    await db.updateAudit(stale.audit_id, { scan_started_at: '2026-08-01T00:00:00.000Z' });
+    await expect(db.claimPendingAudit(stale.audit_id)).resolves.toMatchObject({ scan_status: 'scanning' });
+    await expect(db.getAudit(stale.audit_id)).resolves.not.toMatchObject({ scan_started_at: '2026-08-01T00:00:00.000Z' });
+    await expect(db.claimPendingAudit(stale.audit_id)).resolves.toBeNull();
+    await expect(db.requeueStaleAudit(stale.audit_id, '[]')).resolves.toMatchObject({ scan_status: 'pending' });
+    await expect(db.claimPendingAudit(stale.audit_id)).resolves.toMatchObject({ scan_status: 'scanning' });
   });
 
   it('persists PDP, tracking-enablement, and safe proxy fallback evidence through the existing evidence model', () => {
@@ -110,6 +134,9 @@ describe('audit persistence contracts', () => {
     expect(persisted.evidence_bundle?.consent.tracking_enablement).toBe('accepted');
     expect(persisted.runtime_metrics?.proxy_fallback_candidate).toBe(true);
     expect(persisted.runtime_metrics?.proxy_attempts).toEqual(evidence.runtime.proxy_attempts);
+    expect(persisted.evidence_bundle?.access.proxy_attempts).toEqual(evidence.access.proxy_attempts);
+    expect(persisted.evidence_bundle?.scanner_version).toBeTruthy();
+    expect(persisted.evidence_bundle?.build_commit).toBeDefined();
     expect(JSON.stringify(persisted.evidence_bundle)).not.toMatch(/proxy.*(?:password|credential)|browserless.*token/i);
   });
 });

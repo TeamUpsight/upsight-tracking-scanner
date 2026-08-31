@@ -18,6 +18,13 @@ export type ErrorCategory =
 export type Confidence = 'high' | 'medium' | 'low';
 export type ScanMode = 'normal' | 'diagnostic';
 export type AuditModule = 'consent' | 'tracking' | 'server_side';
+export type AuditProxyProvider = 'decodo' | 'browserless_residential';
+
+export interface AuditQueueOptions {
+  is_bulk: boolean;
+  enable_captcha_solving: boolean;
+  proxy_provider: AuditProxyProvider;
+}
 
 export type ConsentStatus =
   | 'pass'
@@ -305,6 +312,7 @@ export interface StorefrontAudit {
   scan_status: ScanStatus;
   scan_mode?: ScanMode;
   selected_modules?: AuditModule[];
+  queue_options?: AuditQueueOptions | null;
   error_category: ErrorCategory;
   terminal_runtime_phase?: string | null;
   terminal_reason_code?: string | null;

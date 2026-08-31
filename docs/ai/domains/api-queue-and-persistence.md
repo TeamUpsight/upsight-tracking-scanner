@@ -27,7 +27,7 @@ The UI sends Bearer authentication through `src/ui/api.ts`. The server also acce
 
 `InMemoryAuditQueue` stores pending jobs, active IDs/domains, and per-domain cooldowns. It enforces global concurrency and one active job per domain, adds bulk jitter, runs `runStorefrontAudit` with an abort timeout, persists proxy metrics, applies cooldowns after rate-limit/bot/access outcomes, and performs a guarded fallback failure write if execution escapes the runner finalizer.
 
-On startup and every minute, `recoverStaleAudits` marks orphaned pending/scanning rows terminal and high priority when no worker/queue entry exists. It does not resume work.
+On startup and every minute, persisted pending rows are requeued and stale orphaned scanning rows are safely reset to restart from the audit start. Atomic pending claims prevent concurrent workers from running the same audit; active browser sessions are never resumed mid-page.
 
 ## Persistence model
 

@@ -160,8 +160,9 @@ class InMemoryAuditQueue {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), scanTimeoutMs);
     try {
-      const audit = await db.getAudit(job.audit_id);
-      if (!audit || !audit.domain) throw new Error('Queued audit row is missing or invalid.');
+      const audit = await db.claimPendingAudit(job.audit_id);
+      if (!audit) return;
+      if (!audit.domain) throw new Error('Queued audit row is missing or invalid.');
       await runStorefrontAudit({
         audit_id: audit.audit_id,
         domain: audit.domain,
@@ -171,6 +172,7 @@ class InMemoryAuditQueue {
         is_bulk: job.is_bulk,
         scan_mode: job.scan_mode,
         selected_modules: job.selected_modules,
+        proxy_provider: job.proxy_provider,
         abortSignal: controller.signal,
         onProxyMetric: (event) => db.recordProxyMetric(event)
       }, (updates) => db.updateAudit(audit.audit_id, updates).then(() => undefined));
@@ -284,24 +286,16 @@ async function recoverStaleAudits() {
   for (const audit of audits) {
     const trace = parseStoredTrace(audit.trace_steps);
     if (!isRecoverableStaleAudit(audit, queue.has(audit.audit_id), trace)) continue;
-    trace.push({ step: 'stale_scan_recovered', reason: 'No active or queued worker exists after the emergency recovery threshold', timestamp: new Date().toISOString() });
-    trace.push({ step: 'scan_finalized', scan_status: 'failed', error_category: 'unknown_error', timestamp: new Date().toISOString() });
-    await db.recoverStaleAudit(audit.audit_id, {
-      scan_status: 'failed',
-      scan_completed_at: new Date().toISOString(),
-      error_category: 'unknown_error',
-      terminal_runtime_phase: audit.runtime_metrics?.failed_phase || audit.runtime_metrics?.last_successful_phase || 'stale_recovery',
-      terminal_reason_code: 'STALE_SCAN_RECOVERED',
-      overall_status: 'inconclusive',
-      overall_confidence: 'low',
-      consent_status: audit.consent_status || 'not_tested',
-      product_payload_status: audit.product_payload_status || 'not_tested',
-      server_side_status: audit.server_side_status || 'not_tested',
-      ss_collection_type: audit.ss_collection_type || 'not_tested',
-      failure_fingerprints: [...new Set([...(audit.failure_fingerprints || []), 'SCAN_FINALIZATION_MISSING'])],
-      qa_priority: 100,
-      trace_steps: JSON.stringify(trace)
-    });
+    trace.push({ step: 'stale_scan_requeued', reason: 'No active or queued worker exists after the recovery threshold; restarting from audit start', timestamp: new Date().toISOString() });
+    const requeued = await db.requeueStaleAudit(audit.audit_id, JSON.stringify(trace));
+    if (requeued) queue.add(queueJobForAudit(requeued));
+  }
+}
+
+async function restorePendingAudits() {
+  const audits = await db.getPendingAudits(5000);
+  for (const audit of audits) {
+    if (!queue.has(audit.audit_id)) queue.add(queueJobForAudit(audit));
   }
 }
 
@@ -326,8 +320,10 @@ app.post('/api/v1/scan', asyncRoute(async (req, res) => {
   if (!validMode(mode)) return res.status(400).json({ error: 'mode must be normal or diagnostic.' });
   if (!selectedModules) return res.status(400).json({ error: 'selected_modules must be a non-empty array of supported modules.' });
   const groupLabel = req.body?.group_label ? String(req.body.group_label).slice(0, 120) : null;
-  const audit = await db.createAudit(domain, geo, groupLabel, mode, selectedModules);
-  queue.add(queueJobForAudit(audit, { enable_captcha_solving: req.body?.enable_captcha_solving === true, is_bulk: false }));
+  const audit = await db.createAudit(domain, geo, groupLabel, mode, selectedModules, {
+    enable_captcha_solving: req.body?.enable_captcha_solving === true, is_bulk: false, proxy_provider: 'decodo'
+  });
+  queue.add(queueJobForAudit(audit));
   res.status(202).json(audit);
 }));
 
@@ -353,9 +349,11 @@ app.post('/api/v1/scan/bulk', upload.single('file'), asyncRoute(async (req, res)
   const groupLabel = req.body?.group_label ? String(req.body.group_label).slice(0, 120) : null;
   const audits: StorefrontAudit[] = [];
   for (const domain of domains) {
-    const audit = await db.createAudit(domain, geo, groupLabel, mode, selectedModules);
+    const audit = await db.createAudit(domain, geo, groupLabel, mode, selectedModules, {
+      enable_captcha_solving: false, is_bulk: true, proxy_provider: 'decodo'
+    });
     audits.push(audit);
-    queue.add(queueJobForAudit(audit, { enable_captcha_solving: false, is_bulk: true }));
+    queue.add(queueJobForAudit(audit));
   }
   res.status(202).json({ count: audits.length, duplicates_removed: lines.length - start - domains.length, audits });
 }));
@@ -370,9 +368,9 @@ app.post('/api/v1/scans/bulk-rerun', asyncRoute(async (req, res) => {
     const source = await db.getAudit(id);
     if (!source) continue;
     if (!source.tested_geos) continue;
-    const rerun = rerunAuditOptions(source);
-    const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules);
-    queue.add(queueJobForAudit(audit, { enable_captcha_solving: false, is_bulk: true }));
+    const rerun = rerunAuditOptions(source, undefined, { enable_captcha_solving: false, is_bulk: true, proxy_provider: 'decodo' });
+    const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules, rerun.queue_options);
+    queue.add(queueJobForAudit(audit));
     created.push(audit);
   }
   if (!created.length) return res.status(404).json({ error: 'No selected audits could be re-run.' });
@@ -383,9 +381,9 @@ app.post('/api/v1/scans/:id/diagnostic-rerun', asyncRoute(async (req, res) => {
   const source = await db.getAudit(req.params.id);
   if (!source) return res.status(404).json({ error: 'Audit not found.' });
   if (!source.tested_geos) return res.status(400).json({ error: 'Source audit has no valid geo.' });
-  const rerun = rerunAuditOptions(source, 'diagnostic');
-  const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules);
-  queue.add(queueJobForAudit(audit, { enable_captcha_solving: false, is_bulk: false }));
+  const rerun = rerunAuditOptions(source, 'diagnostic', { enable_captcha_solving: false, is_bulk: false, proxy_provider: 'decodo' });
+  const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules, rerun.queue_options);
+  queue.add(queueJobForAudit(audit));
   res.status(202).json(audit);
 }));
 
@@ -393,14 +391,26 @@ app.post('/api/v1/scans/:id/difficult-site-rerun', asyncRoute(async (req, res) =
   const source = await db.getAudit(req.params.id);
   if (!source) return res.status(404).json({ error: 'Audit not found.' });
   if (!source.tested_geos) return res.status(400).json({ error: 'Source audit has no valid geo.' });
-  const rerun = rerunAuditOptions(source, 'diagnostic');
-  const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules);
-  queue.add(queueJobForAudit(audit, { enable_captcha_solving: true, is_bulk: false }));
+  const rerun = rerunAuditOptions(source, 'diagnostic', { enable_captcha_solving: true, is_bulk: false, proxy_provider: 'decodo' });
+  const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules, rerun.queue_options);
+  queue.add(queueJobForAudit(audit));
   res.status(202).json({
     ...audit,
     challenge_solving_enabled: process.env.BROWSERLESS_CHALLENGE_SOLVING_ENABLED === 'true',
     authorized_access_enabled: Boolean(process.env.AUTHORIZED_SCAN_DOMAINS)
   });
+}));
+
+app.post('/api/v1/scans/:id/proxy-fallback-rerun', asyncRoute(async (req, res) => {
+  const source = await db.getAudit(req.params.id);
+  if (!source) return res.status(404).json({ error: 'Audit not found.' });
+  if (!source.tested_geos || source.scan_status !== 'failed' || !source.runtime_metrics?.proxy_fallback_candidate) {
+    return res.status(409).json({ error: 'This audit is not eligible for a Browserless Residential fallback rerun.' });
+  }
+  const rerun = rerunAuditOptions(source, undefined, { is_bulk: false, proxy_provider: 'browserless_residential' });
+  const audit = await db.createAudit(rerun.domain, rerun.tested_geos, rerun.group_label, rerun.scan_mode, rerun.selected_modules, rerun.queue_options);
+  queue.add(queueJobForAudit(audit));
+  res.status(202).json(audit);
 }));
 
 app.get('/api/v1/scans', asyncRoute(async (req, res) => {
@@ -551,8 +561,9 @@ async function startServer() {
   hydrateProxyHealth(await db.getProxyHealth());
   const proxyIssues = validateProxyConfiguration(bulkProxyRetryLimit());
   if (proxyIssues.length) console.warn('[Proxy] Configuration readiness issues:', proxyIssues);
+  await restorePendingAudits();
   await recoverStaleAudits();
-  setInterval(() => void recoverStaleAudits().catch((error) => console.error('[Recovery] Failed:', error)), 60_000).unref();
+  setInterval(() => void restorePendingAudits().then(recoverStaleAudits).catch((error) => console.error('[Recovery] Failed:', error)), 60_000).unref();
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);

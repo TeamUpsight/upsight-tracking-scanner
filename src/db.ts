@@ -1,11 +1,12 @@
 import pg from 'pg';
-import type { AuditModule, QaFeedback, ScanMode, StorefrontAudit } from './types';
+import type { AuditModule, AuditQueueOptions, QaFeedback, ScanMode, StorefrontAudit } from './types';
 import { selectedAuditModules } from './audit-modules';
+import { normalizeQueueOptions } from './audit-lifecycle';
 import { boundedInteger } from './shared/config';
 import type { ProxyMetricEvent } from './scanner/proxy/decodo';
 
 const AUDIT_COLUMNS = new Set([
-  'domain', 'group_label', 'scan_started_at', 'scan_completed_at', 'scan_status', 'scan_mode', 'selected_modules',
+  'domain', 'group_label', 'scan_started_at', 'scan_completed_at', 'scan_status', 'scan_mode', 'selected_modules', 'queue_options',
   'error_category', 'terminal_runtime_phase', 'terminal_reason_code', 'tested_geos', 'cms_platform_detected', 'overall_status', 'overall_confidence',
   'consent_status', 'cmp_provider', 'product_payload_status', 'pdp_url_tested', 'server_side_status',
   'ss_collection_type', 'trace_steps', 'site_ga4_detected', 'site_ga4_measurement_ids',
@@ -65,6 +66,7 @@ export class AuditDatabase {
           scan_status VARCHAR(50) NOT NULL DEFAULT 'pending',
           scan_mode VARCHAR(20) NOT NULL DEFAULT 'normal',
           selected_modules TEXT[] NOT NULL DEFAULT ARRAY['consent', 'tracking', 'server_side'],
+          queue_options JSONB NOT NULL DEFAULT '{"is_bulk":false,"enable_captcha_solving":false,"proxy_provider":"decodo"}'::jsonb,
           error_category VARCHAR(100) NOT NULL DEFAULT 'none',
           terminal_runtime_phase VARCHAR(100) NULL,
           terminal_reason_code VARCHAR(100) NULL,
@@ -127,6 +129,7 @@ export class AuditDatabase {
       await client.query(`
         ALTER TABLE storefront_audits_v2 ADD COLUMN IF NOT EXISTS scan_mode VARCHAR(20) NOT NULL DEFAULT 'normal';
         ALTER TABLE storefront_audits_v2 ADD COLUMN IF NOT EXISTS selected_modules TEXT[] NOT NULL DEFAULT ARRAY['consent', 'tracking', 'server_side'];
+        ALTER TABLE storefront_audits_v2 ADD COLUMN IF NOT EXISTS queue_options JSONB NOT NULL DEFAULT '{"is_bulk":false,"enable_captcha_solving":false,"proxy_provider":"decodo"}'::jsonb;
         ALTER TABLE storefront_audits_v2 ADD COLUMN IF NOT EXISTS terminal_runtime_phase VARCHAR(100) NULL;
         ALTER TABLE storefront_audits_v2 ADD COLUMN IF NOT EXISTS terminal_reason_code VARCHAR(100) NULL;
         ALTER TABLE storefront_audits_v2 ADD COLUMN IF NOT EXISTS site_ga4_detected BOOLEAN NULL;
@@ -205,15 +208,16 @@ export class AuditDatabase {
     testedGeos: string | null = null,
     groupLabel: string | null = null,
     scanMode: ScanMode = 'normal',
-    selectedModules?: AuditModule[]
+    selectedModules?: AuditModule[],
+    queueOptions?: Partial<AuditQueueOptions>
   ): Promise<StorefrontAudit> {
     if (this.pool) {
       const result = await this.pool.query(
         `INSERT INTO storefront_audits_v2
-          (domain, group_label, scan_started_at, scan_status, scan_mode, selected_modules, error_category, tested_geos, cms_platform_detected, trace_steps)
-         VALUES ($1, $2, NOW(), 'pending', $3, $4, 'none', $5, 'Unknown', '[]')
+          (domain, group_label, scan_started_at, scan_status, scan_mode, selected_modules, queue_options, error_category, tested_geos, cms_platform_detected, trace_steps)
+         VALUES ($1, $2, NOW(), 'pending', $3, $4, $5, 'none', $6, 'Unknown', '[]')
          RETURNING *`,
-        [domain, groupLabel, scanMode, selectedAuditModules(selectedModules), testedGeos]
+        [domain, groupLabel, scanMode, selectedAuditModules(selectedModules), normalizeQueueOptions(queueOptions), testedGeos]
       );
       return result.rows[0];
     }
@@ -227,6 +231,7 @@ export class AuditDatabase {
       scan_status: 'pending',
       scan_mode: scanMode,
       selected_modules: selectedAuditModules(selectedModules),
+      queue_options: normalizeQueueOptions(queueOptions),
       error_category: 'none',
       tested_geos: testedGeos as StorefrontAudit['tested_geos'],
       cms_platform_detected: 'Unknown',
@@ -285,6 +290,41 @@ export class AuditDatabase {
     return this.memoryDb[index];
   }
 
+  async claimPendingAudit(id: string | number): Promise<StorefrontAudit | null> {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `UPDATE storefront_audits_v2 SET scan_status = 'scanning', scan_started_at = NOW() WHERE audit_id = $1 AND scan_status = 'pending' RETURNING *`,
+        [id]
+      );
+      return result.rows[0] || null;
+    }
+    if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
+    const audit = this.memoryDb.find((candidate) => String(candidate.audit_id) === String(id));
+    if (!audit || audit.scan_status !== 'pending') return null;
+    audit.scan_status = 'scanning';
+    audit.scan_started_at = new Date().toISOString();
+    return audit;
+  }
+
+  async requeueStaleAudit(id: string | number, traceSteps: string): Promise<StorefrontAudit | null> {
+    const updates = { scan_status: 'pending' as const, scan_started_at: new Date().toISOString(), scan_completed_at: null, trace_steps: traceSteps };
+    if (this.pool) {
+      const result = await this.pool.query(
+        `UPDATE storefront_audits_v2
+         SET scan_status = $2, scan_started_at = $3, scan_completed_at = $4, trace_steps = $5
+         WHERE audit_id = $1 AND scan_status = 'scanning'
+         RETURNING *`,
+        [id, updates.scan_status, updates.scan_started_at, updates.scan_completed_at, updates.trace_steps]
+      );
+      return result.rows[0] || null;
+    }
+    if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
+    const audit = this.memoryDb.find((candidate) => String(candidate.audit_id) === String(id));
+    if (!audit || audit.scan_status !== 'scanning') return null;
+    Object.assign(audit, updates);
+    return audit;
+  }
+
   async getAudit(id: string | number): Promise<StorefrontAudit | null> {
     if (this.pool) {
       const result = await this.pool.query('SELECT * FROM storefront_audits_v2 WHERE audit_id = $1', [id]);
@@ -316,19 +356,32 @@ export class AuditDatabase {
     if (this.pool) {
       const result = await this.pool.query(
         `SELECT * FROM storefront_audits_v2
-         WHERE scan_status = ANY($1::TEXT[])
-           AND scan_started_at < NOW() - make_interval(mins => $2)
+         WHERE scan_status = 'scanning'
+           AND scan_started_at < NOW() - make_interval(mins => $1)
          ORDER BY scan_started_at ASC
-         LIMIT $3`,
-        [['pending', 'scanning'], boundedMinutes, boundedLimit]
+         LIMIT $2`,
+        [boundedMinutes, boundedLimit]
       );
       return result.rows;
     }
     if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
     const cutoff = Date.now() - boundedMinutes * 60_000;
     return this.memoryDb.filter((audit) =>
-      ['pending', 'scanning'].includes(audit.scan_status) && new Date(audit.scan_started_at).getTime() < cutoff
+      audit.scan_status === 'scanning' && new Date(audit.scan_started_at).getTime() < cutoff
     ).slice(0, boundedLimit);
+  }
+
+  async getPendingAudits(limit = 5000): Promise<StorefrontAudit[]> {
+    const boundedLimit = Math.max(1, Math.min(limit, 5_000));
+    if (this.pool) {
+      const result = await this.pool.query(
+        `SELECT * FROM storefront_audits_v2 WHERE scan_status = 'pending' ORDER BY scan_started_at ASC LIMIT $1`,
+        [boundedLimit]
+      );
+      return result.rows;
+    }
+    if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
+    return this.memoryDb.filter((audit) => audit.scan_status === 'pending').slice(0, boundedLimit);
   }
 
   async getAuditsByGroup(groupLabel: string): Promise<StorefrontAudit[]> {

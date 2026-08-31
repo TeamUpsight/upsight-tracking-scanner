@@ -4,6 +4,7 @@ import type {
   CmpProvider,
   ConsentStatus,
   AuditModule,
+  AuditProxyProvider,
   ErrorCategory,
   EvidenceBundle,
   ScanMode,
@@ -870,6 +871,7 @@ export async function runStorefrontAudit(
     is_bulk?: boolean;
     scan_mode?: ScanMode;
     selected_modules?: AuditModule[];
+    proxy_provider?: AuditProxyProvider;
     abortSignal?: AbortSignal;
     onProxyMetric?: (event: ProxyMetricEvent) => Promise<void>;
   },
@@ -930,9 +932,9 @@ export async function runStorefrontAudit(
   let lastInterimUpdate = 0;
   const orderedUpdates = new OrderedAuditUpdates<Partial<StorefrontAudit>>(onUpdate);
   let proxyAttempt = 0;
-  let currentProxyProvider: ProxyProvider = 'decodo';
-  const initialProxyProvider: ProxyProvider = 'decodo';
-  let proxyFallbackUsed = false;
+  let currentProxyProvider: ProxyProvider = params.proxy_provider === 'browserless_residential' ? 'browserless_residential' : 'decodo';
+  const initialProxyProvider: ProxyProvider = currentProxyProvider;
+  let proxyFallbackUsed = currentProxyProvider === 'browserless_residential';
   let proxyFallbackRecovered = false;
   let neutralProbeSucceeded: boolean | undefined;
   let lastTunnelPhase: 'connect' | 'target' = 'connect';
@@ -1466,7 +1468,7 @@ export async function runStorefrontAudit(
 
     const maxProxyRetries = params.is_bulk ? bulkProxyRetryLimit() : singleProxyRetryLimit();
     let solveCaptchas = false;
-    let proxyModeOverride: string | undefined;
+    let proxyModeOverride: ProxyProvider | undefined = params.proxy_provider;
     let browserQlEscalated = false;
     let response: Response | null = null;
     while (true) {
