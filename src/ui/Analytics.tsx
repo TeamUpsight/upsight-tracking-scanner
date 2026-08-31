@@ -15,11 +15,12 @@ export function formatDuration(value: unknown) {
   return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)} s`;
 }
 
-export function MetricCard({ label, value, helper, tone = 'default' }: {
+export function MetricCard({ label, value, helper, tone = 'default', compact = false }: {
   label: string;
   value: string | number;
   helper?: string;
   tone?: 'default' | 'good' | 'warning' | 'danger';
+  compact?: boolean;
 }) {
   const tones = {
     default: 'from-slate-500/10 to-transparent',
@@ -28,9 +29,9 @@ export function MetricCard({ label, value, helper, tone = 'default' }: {
     danger: 'from-rose-500/15 to-transparent'
   };
   return (
-    <article className={`rounded-xl border border-neutral-border bg-gradient-to-br ${tones[tone]} p-3.5 shadow-sm`}>
+    <article className={`rounded-xl border border-neutral-border bg-gradient-to-br ${tones[tone]} ${compact ? 'p-2.5' : 'p-3.5'} shadow-sm`}>
       <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-slate-400">{label}</div>
-      <div className="mt-1.5 text-xl font-bold tracking-tight text-white">{value}</div>
+      <div className={`${compact ? 'mt-1 text-lg' : 'mt-1.5 text-xl'} font-bold tracking-tight text-white`}>{value}</div>
       {helper && <p className="mt-1 text-[10px] leading-relaxed text-slate-400">{helper}</p>}
     </article>
   );
