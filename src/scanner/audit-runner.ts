@@ -27,6 +27,8 @@ import {
   createFreshConsentContext,
   navigateFreshConsentContext
 } from './consent/fresh-context';
+import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
+import { runConsentV2Session, type ConsentV2SessionOutput } from './consent/v2-session';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { isValidStorefrontStatus, resolveAccessDecision, resolveHostnameEvidence, type AccessDecision } from './navigation';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
@@ -930,6 +932,7 @@ export async function runStorefrontAudit(
   let homepage: Page | null = null;
   let consentContext: BrowserContext | null = null;
   let consentHomepage: Page | null = null;
+  let consentV2: ConsentV2SessionOutput | null = null;
   let pdpPage: Page | null = null;
   let browserConnectedAt: number | null = null;
   let currentPhase = 'initialization';
@@ -1098,6 +1101,22 @@ export async function runStorefrontAudit(
       terminal_reason_code: terminalReasonCode,
       scan_completed_at: new Date().toISOString()
     };
+    if (consentV2) {
+      const compatibility = mapConsentV2ToExisting(consentV2.result, {
+        geo,
+        page_valid: evidence.page.valid,
+        tracking_before_interaction: consentV2.tracking.signals.some((signal) => signal.timing === 'pre_action'),
+        post_reject_observation_completed: consentV2.result.persistence.status !== 'not_applicable',
+        trace_steps: JSON.stringify(trace),
+        max_trace_steps: traceLimit
+      }, consentV2.tracking);
+      merged.cmp_provider = compatibility.cmp_provider;
+      merged.consent_status = compatibility.consent_status;
+      for (const step of compatibility.trace_events) {
+        if (trace.length >= traceLimit) break;
+        trace.push({ step, source: 'consent_v2', timestamp: new Date().toISOString() });
+      }
+    }
     if (finalError !== 'none') {
       merged.overall_status = 'inconclusive';
       merged.overall_confidence = 'low';
@@ -1802,40 +1821,35 @@ export async function runStorefrontAudit(
         const navigation = await navigateFreshConsentContext(consentHomepage, `https://${normalizedDomain}`, { timings: consentTimings });
         const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
         const readiness = consentNavigationReadiness(consentAccess);
-        if (readiness.status !== 'ready') {
-          cmp = {
-            provider: 'Unknown', confidence: 'low', evidence: ['blocked_or_challenged'], banner_visible: null,
-            reason_code: 'BLOCKED_OR_CHALLENGED'
-          };
-          evidence.consent.provider_evidence = cmp.evidence;
-          evidence.consent.banner_visible = null;
-          addTrace('consent_fresh_navigation_blocked_or_challenged', {
-            error_category: consentAccess.category,
-            reason_code: 'BLOCKED_OR_CHALLENGED',
-            access_reason_code: consentAccess.reasonCode
-          });
-        } else {
-          const cmpRaw = await captureCmpRawEvidence(consentHomepage);
-          cmp = detectCMP(cmpRaw);
-          evidence.consent.dom_selectors = cmpRaw.dom_selectors.slice(0, 50);
-          evidence.consent.network_signals = cmpRaw.network_hosts.slice(0, 100);
-          evidence.consent.script_hosts = [...new Set(cmpRaw.script_urls.map((url) => {
-            try { return new URL(url).hostname; } catch { return ''; }
-          }).filter(Boolean))].slice(0, 50);
-          evidence.consent.cookie_names = [...new Set(cmpRaw.cookie_names)].slice(0, 100);
-          evidence.consent.window_globals = cmpRaw.window_globals.slice(0, 50);
-          evidence.consent.iframe_hosts = [...new Set(cmpRaw.iframe_urls.map((url) => {
-            try { return new URL(url).hostname; } catch { return ''; }
-          }).filter(Boolean))].slice(0, 50);
-          evidence.consent.provider_evidence = cmp.evidence;
-          evidence.consent.banner_visible = cmp.banner_visible;
-          addTrace(cmp.provider === 'Not Found' ? 'cmp_not_found' : 'cmp_provider_detected', {
-            provider: cmp.provider,
-            confidence: cmp.confidence,
-            evidence: cmp.evidence,
-            reason_code: cmp.reason_code
-          });
-        }
+        consentV2 = await runConsentV2Session(consentHomepage, {
+          geo,
+          geo_verified: freshConsent.geo.verified,
+          page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
+          timings: consentTimings,
+          access_blocked: readiness.status !== 'ready'
+        });
+        const compatibility = mapConsentV2ToExisting(consentV2.result, {
+          geo,
+          page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
+          tracking_before_interaction: consentV2.tracking.signals.some((signal) => signal.timing === 'pre_action'),
+          post_reject_observation_completed: consentV2.result.persistence.status !== 'not_applicable',
+          max_trace_steps: traceLimit
+        }, consentV2.tracking);
+        cmp = {
+          provider: compatibility.cmp_provider || (readiness.status === 'ready' ? 'Not Found' : 'Unknown'),
+          confidence: compatibility.cmp_provider ? 'high' : 'low',
+          evidence: consentV2.result.reason_codes,
+          banner_visible: consentV2.result.banner.visibility === 'visible',
+          reason_code: consentV2.result.reason_codes[0] || 'DETECTION_INCONCLUSIVE'
+        };
+        evidence.consent.provider_evidence = consentV2.result.reason_codes;
+        evidence.consent.banner_visible = consentV2.result.banner.visibility === 'visible';
+        evidence.consent.cookie_names = consentV2.result.storage_changes.map((change) => change.key_name).slice(0, 100);
+        addTrace(readiness.status !== 'ready' ? 'consent_fresh_navigation_blocked_or_challenged' : compatibility.cmp_provider ? 'cmp_provider_detected' : 'cmp_not_found', {
+          provider: compatibility.cmp_provider,
+          reason_codes: consentV2.result.reason_codes,
+          access_reason_code: readiness.status !== 'ready' ? consentAccess.reasonCode : null
+        });
       } catch (error) {
         cmp = {
           provider: 'Unknown', confidence: 'low', evidence: ['fresh_context_navigation_inconclusive'], banner_visible: null,
@@ -1848,10 +1862,9 @@ export async function runStorefrontAudit(
           error_family: runtimeErrorFamily(error)
         });
       }
-      consentRejectionPending = cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown' && cmp.banner_visible;
-      if (consentRejectionPending && trackingSelected) {
-        addTrace('consent_reject_deferred_until_tracking_completed', { provider: cmp.provider });
-      }
+      // Consent V2 owns its fresh-context interaction, semantic verification,
+      // and same-context reload. Product and Server-Side retain their own page.
+      consentRejectionPending = false;
     } else {
       // Tracking may enable an existing CMP, but this deliberately does not execute a Consent audit.
       const cmpRaw = await captureCmpRawEvidence(homepage!);
