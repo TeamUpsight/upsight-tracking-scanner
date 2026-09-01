@@ -1828,6 +1828,7 @@ export async function runStorefrontAudit(
           timings: consentTimings,
           access_blocked: readiness.status !== 'ready'
         });
+        evidence.runtime.consent_v2 = consentV2.telemetry;
         const compatibility = mapConsentV2ToExisting(consentV2.result, {
           geo,
           page_valid: isValidStorefrontStatus(navigation.response?.status() || null),

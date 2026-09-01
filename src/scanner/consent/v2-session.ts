@@ -1,5 +1,5 @@
 import type { Page, Request } from 'playwright-core';
-import type { TrackingRequestEvidence } from '../../types';
+import type { EvidenceBundle, TrackingRequestEvidence } from '../../types';
 import { consentTimingValues, type ConsentTimingValues } from '../../shared/config';
 import { cmpAdapterRegistry, scoreProviderCandidates, type CmpAdapterProviderId, type ProviderEvidenceSignal } from './adapter-registry';
 import './onetrust-adapter';
@@ -15,6 +15,8 @@ import { GoogleConsentModeObserver } from './google-consent-mode-observer';
 import { verifySameContextReloadPersistence, type PersistenceSnapshot } from './persistence-verification';
 import { verifyRequestedConsentAction, type RejectVerificationSignal } from './reject-verification-engine';
 import { checkTrackingConsistency, type TrackingConsistencyResult } from './tracking-consistency';
+import { buildUnknownCmpFingerprint } from './unknown-cmp-fingerprint';
+import { consentV2ActionsEnabledFor, consentV2RolloutControls, type ConsentV2RolloutControls, type ConsentV2RolloutProvider } from './rollout-controls';
 
 type ProviderId = CmpAdapterProviderId | 'unknown';
 type KnownAction = 'reject_all' | 'only_necessary';
@@ -40,12 +42,17 @@ export interface ConsentV2SessionInput {
   page_valid: boolean | null;
   timings?: ConsentTimingValues;
   access_blocked?: boolean;
+  rollout?: ConsentV2RolloutControls;
+  rollout_key?: string;
 }
+
+export type ConsentV2Telemetry = NonNullable<EvidenceBundle['runtime']['consent_v2']>;
 
 export interface ConsentV2SessionOutput {
   result: FinalConsentAuditResult;
   tracking: TrackingConsistencyResult;
   ledger: ConsentEvidenceLedger;
+  telemetry: ConsentV2Telemetry;
 }
 
 const ROOTS: Record<Exclude<ProviderId, 'unknown'>, string[]> = {
@@ -191,15 +198,69 @@ async function snapshot(page: Page): Promise<SafePageSnapshot> {
   return { ...base, sourcepoint_reject: sourcepointReject, semantic: { ...base.semantic, reject: base.semantic.reject || ucReject } };
 }
 
-async function selectedProvider(snapshot: SafePageSnapshot) {
+async function selectedProvider(snapshot: SafePageSnapshot, controls: ConsentV2RolloutControls) {
   const evidence = providerEvidence(snapshot);
   const candidates = scoreProviderCandidates(evidence);
   for (const candidate of candidates.filter((item) => item.high_confidence)) {
     const provider = candidate.provider_id as CmpAdapterProviderId;
+    if (!controls.providers[provider].detection_enabled) continue;
     const detection = await cmpAdapterRegistry.get(provider)?.detect({ evidence });
     if (detection?.status === 'detected') return provider;
   }
   return undefined;
+}
+
+function rolloutProvider(provider: CmpAdapterProviderId | undefined): ConsentV2RolloutProvider {
+  return provider || 'generic';
+}
+
+function telemetryFor(
+  result: FinalConsentAuditResult,
+  tracking: TrackingConsistencyResult,
+  snapshot: SafePageSnapshot,
+  controls: ConsentV2RolloutControls,
+  provider: CmpAdapterProviderId | undefined,
+  providerConflict: boolean,
+  blocked: boolean,
+  actionsEnabled: boolean
+): ConsentV2Telemetry {
+  const knownProvider = result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates.find((candidate) => candidate.attribution === 'identified');
+  const reject = result.available_actions.find((action) => action.action === 'reject_all');
+  const interaction = result.interactions.find((item) => item.action === 'reject_all' || item.action === 'only_necessary');
+  const generic = result.mechanisms.some((item) => item.mechanism === 'custom' && item.provider?.attribution === 'unknown_candidate');
+  const fingerprint = generic ? buildUnknownCmpFingerprint({
+    mechanism_score: 70,
+    provider_attribution: 'unknown_candidate',
+    geo: null,
+    script_hosts: snapshot.assets,
+    storage_key_names: [...snapshot.cookie_names, ...snapshot.storage_keys],
+    candidate_global_names: snapshot.globals,
+    available_actions: result.available_actions,
+    tcf: { presence: snapshot.frameworks.tcf ? 'present' : 'absent' },
+    gpp: { presence: snapshot.frameworks.gpp ? 'ready' : 'absent' },
+    failure_reason_codes: result.reason_codes
+  })?.fingerprint || null : null;
+  return {
+    enabled: controls.enabled,
+    observation_only: !actionsEnabled,
+    provider: knownProvider?.provider_name || null,
+    provider_confidence: knownProvider?.confidence || null,
+    provider_conflict: providerConflict,
+    banner_visibility: result.banner.visibility,
+    reject_availability: reject?.availability || 'unknown',
+    interaction_outcome: interaction?.outcome || 'not_attempted',
+    verification: result.rejection_verification.status,
+    persistence: result.persistence.status,
+    generic_fallback: generic,
+    selector_or_action_failure: Boolean(interaction && interaction.outcome !== 'executed') || result.rejection_verification.reason_codes.includes(ConsentAuditCodes.ACTION_NOT_EXPOSED),
+    tcf_present: snapshot.frameworks.tcf,
+    gpp_present: snapshot.frameworks.gpp,
+    consent_mode_classification: result.google_consent_mode.evidence[0] || 'unknown',
+    tracking_consistency: tracking.status,
+    unknown_cmp_fingerprint: fingerprint,
+    geo_unverified: result.geo_verified.status !== 'verified',
+    blocked_or_challenged: blocked
+  };
 }
 
 function mechanism(snapshot: SafePageSnapshot, provider: CmpAdapterProviderId | undefined, blocked: boolean): MechanismResult[] {
@@ -283,6 +344,7 @@ async function activate(page: Page, provider: CmpAdapterProviderId | undefined, 
 /** Production-only bridge: no raw page HTML, storage values, consent strings, or query strings leave the browser. */
 export async function runConsentV2Session(page: Page, input: ConsentV2SessionInput): Promise<ConsentV2SessionOutput> {
   const timings = input.timings || consentTimingValues();
+  const rollout = input.rollout || consentV2RolloutControls();
   const ledger = new ConsentEvidenceLedger();
   const trackingRequests: TrackingRequestEvidence[] = [];
   const gcm = new GoogleConsentModeObserver();
@@ -296,15 +358,19 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
     ledger.append({ phase: 'baseline', source: 'page', family: 'semantic', kind: 'presence', specificity: 'generic', stability: 'stable', provenance: 'browser_api', descriptor: { exists: true } });
     const before = await snapshot(page);
     before.consent_commands.forEach((command) => gcm.observeGtagCall('consent', command.command, command.state));
-    const provider = await selectedProvider(before);
-    const mechanisms = mechanism(before, provider, Boolean(input.access_blocked));
+    const candidates = scoreProviderCandidates(providerEvidence(before));
+    const provider = rollout.enabled ? await selectedProvider(before, rollout) : undefined;
+    const detectionSuppressed = !rollout.enabled || candidates.some((candidate) => candidate.high_confidence && !rollout.providers[candidate.provider_id as CmpAdapterProviderId].detection_enabled) || (!rollout.providers.generic.detection_enabled && !provider && before.semantic.visible);
+    const mechanisms = !provider && !rollout.providers.generic.detection_enabled ? [] : mechanism(before, provider, Boolean(input.access_blocked));
     const initialState = state(before);
     const initialBanner = banner(before, provider);
     const available = actions(before, provider);
     ledger.append({ phase: 'detected', source: 'runtime', family: 'global', kind: 'global_name', specificity: provider ? 'provider_specific' : 'generic', stability: 'stable', provenance: 'browser_api', provider_candidate: provider || null, descriptor: { exists: Boolean(provider) } });
-    if (input.access_blocked) {
+    if (!rollout.enabled || input.access_blocked) {
       const result = emptyResult(input, before, [], initialBanner, available, initialState, [ConsentAuditCodes.BLOCKED_OR_CHALLENGED]);
-      return { result, tracking: checkTrackingConsistency({ rejection_verification: result.rejection_verification, reject_timestamp: null, post_reject_observation_completed: false, requests: trackingRequests }), ledger };
+      if (!rollout.enabled) result.reason_codes = [ConsentAuditCodes.DETECTION_INCONCLUSIVE];
+      const tracking = checkTrackingConsistency({ rejection_verification: result.rejection_verification, reject_timestamp: null, post_reject_observation_completed: false, requests: trackingRequests });
+      return { result, tracking, ledger, telemetry: telemetryFor(result, tracking, before, rollout, provider, candidates.filter((item) => item.high_confidence).length > 1, Boolean(input.access_blocked), false) };
     }
     const action: KnownAction | null = available.some((entry) => entry.action === 'reject_all' && (entry.availability === 'direct' || entry.availability === 'api_only'))
       ? 'reject_all'
@@ -315,7 +381,8 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
     let verification: VerificationResult = { status: 'inconclusive', evidence: [], reason_codes: [ConsentAuditCodes.ACTION_INCONCLUSIVE] };
     let after = before;
     let actionTimestamp: number | null = null;
-    if (action) {
+    const actionEnabled = consentV2ActionsEnabledFor(rollout, rolloutProvider(provider), input.rollout_key || page.url());
+    if (action && actionEnabled) {
       const selector = selectorFor(provider, action);
       const strategies: ConsentInteractionStrategy[] = provider && ['onetrust', 'didomi', 'cookieyes'].includes(provider) ? ['documented_provider_api', 'provider_selector', 'semantic_accessibility'] : ['provider_selector', 'semantic_accessibility'];
       const plan = createActionPlan({ action, provider_or_mechanism: provider || 'custom', target: { surface_type: 'banner', target_ref: selector || 'semantic', accessible_control: true, frame_path: ['top'], shadow_mode: 'unknown' }, eligible_strategies: strategies, timeout_ms: timings.postActionSettleMs, stabilization_ms: timings.postActionSettleMs, provider_api_reject_available: strategies.includes('documented_provider_api'), user_facing_reject_available: Boolean(selector || before.semantic.reject || before.semantic.only_necessary) });
@@ -342,9 +409,10 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
       async readPostReloadSnapshot() { const reloaded = await snapshot(page); ledger.append({ phase: 'post_reload', source: 'page', family: 'storage', kind: 'storage_key', specificity: provider ? 'provider_specific' : 'generic', stability: 'tenant_variant', provenance: 'browser_api', provider_candidate: provider || null, descriptor: { exists: storage(reloaded).length > 0 } }); return { semantic_state: { provider: decision(reloaded) }, storage: storage(reloaded) }; }
     });
     const gcmResult = gcm.result();
-    const result: FinalConsentAuditResult = { context_clean: { status: 'verified', evidence: ['fresh_playwright_context'], reason_codes: [] }, geo_verified: { status: input.geo_verified === true ? 'verified' : 'inconclusive', evidence: [], reason_codes: input.geo_verified === true ? [] : [ConsentAuditCodes.GEO_UNVERIFIED] }, mechanisms, banner: initialBanner, available_actions: available, initial_state: initialState, resulting_state: afterState, interactions: attempt ? [attempt] : [], rejection_verification: verification, persistence, frameworks: frameworkState(before), google_consent_mode: { presence: gcmResult.lifecycle === 'not_observed' ? 'not_present' : gcmResult.classification === 'ambiguous' ? 'ambiguous' : 'present', defaults_observed: gcmResult.commands.some((entry) => entry.command === 'default'), updates_observed: gcmResult.commands.some((entry) => entry.command === 'update'), evidence: [gcmResult.classification], reason_codes: gcmResult.reason_codes }, storage_changes: [], network_signals: trackingRequests.slice(0, 100).map((request) => ({ host: request.host, path: request.path, method: request.method, phase: request.phase, signal: request.kind === 'script' ? 'script' : 'tracking' })), reason_codes: [...new Set([...(input.geo_verified === true ? [] : [ConsentAuditCodes.GEO_UNVERIFIED]), ...(mechanisms.length ? [] : [ConsentAuditCodes.NO_CMP_DETECTED]), ...verification.reason_codes, ...persistence.reason_codes])]
+    const result: FinalConsentAuditResult = { context_clean: { status: 'verified', evidence: ['fresh_playwright_context'], reason_codes: [] }, geo_verified: { status: input.geo_verified === true ? 'verified' : 'inconclusive', evidence: [], reason_codes: input.geo_verified === true ? [] : [ConsentAuditCodes.GEO_UNVERIFIED] }, mechanisms, banner: initialBanner, available_actions: available, initial_state: initialState, resulting_state: afterState, interactions: attempt ? [attempt] : [], rejection_verification: verification, persistence, frameworks: frameworkState(before), google_consent_mode: { presence: gcmResult.lifecycle === 'not_observed' ? 'not_present' : gcmResult.classification === 'ambiguous' ? 'ambiguous' : 'present', defaults_observed: gcmResult.commands.some((entry) => entry.command === 'default'), updates_observed: gcmResult.commands.some((entry) => entry.command === 'update'), evidence: [gcmResult.classification], reason_codes: gcmResult.reason_codes }, storage_changes: [], network_signals: trackingRequests.slice(0, 100).map((request) => ({ host: request.host, path: request.path, method: request.method, phase: request.phase, signal: request.kind === 'script' ? 'script' : 'tracking' })), reason_codes: [...new Set([...(input.geo_verified === true ? [] : [ConsentAuditCodes.GEO_UNVERIFIED]), ...(detectionSuppressed ? [ConsentAuditCodes.DETECTION_INCONCLUSIVE] : mechanisms.length ? [] : [ConsentAuditCodes.NO_CMP_DETECTED]), ...verification.reason_codes, ...persistence.reason_codes])]
     };
-    return { result, tracking: checkTrackingConsistency({ rejection_verification: verification, reject_timestamp: actionTimestamp, post_reject_observation_completed: persistence.status !== 'not_applicable', requests: trackingRequests }), ledger };
+    const tracking = checkTrackingConsistency({ rejection_verification: verification, reject_timestamp: actionTimestamp, post_reject_observation_completed: persistence.status !== 'not_applicable', requests: trackingRequests });
+    return { result, tracking, ledger, telemetry: telemetryFor(result, tracking, before, rollout, provider, candidates.filter((item) => item.high_confidence).length > 1, false, actionEnabled) };
   } finally { page.off('request', requestListener); }
 }
 

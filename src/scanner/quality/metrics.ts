@@ -92,6 +92,9 @@ function recommendationFor(code: string) {
 export function buildQualityMetrics(audits: StorefrontAudit[], feedback: QaFeedback[]) {
   const byId = new Map(audits.map((audit) => [String(audit.audit_id), audit]));
   const latestAudits = latestAuditsByWebsite(audits);
+  const consentV2Telemetry = latestAudits
+    .map((audit) => audit.runtime_metrics?.consent_v2 ?? audit.evidence_bundle?.runtime.consent_v2)
+    .filter((value): value is NonNullable<typeof value> => Boolean(value));
   const unresolvedLatestAudits = latestAudits.filter((audit) => audit.qa_review_status !== 'correct');
   const categories: Record<string, Record<Outcome, number>> = {};
   let exactCorrections = 0;
@@ -257,6 +260,28 @@ export function buildQualityMetrics(audits: StorefrontAudit[], feedback: QaFeedb
         retryAttempts.filter((audit) => audit.evidence_bundle?.runtime.proxy_retry_recovered).length,
         retryAttempts.length
       ),
+      consent_v2: {
+        audits: consentV2Telemetry.length,
+        detection_rate: rate(consentV2Telemetry.filter((item) => item.provider !== null || item.generic_fallback).length, consentV2Telemetry.length),
+        providers: countBy(consentV2Telemetry, (item) => item.provider || (item.generic_fallback ? 'unknown_custom' : 'not_detected')),
+        provider_confidence: countBy(consentV2Telemetry, (item) => item.provider_confidence || 'none'),
+        provider_conflict_rate: rate(consentV2Telemetry.filter((item) => item.provider_conflict).length, consentV2Telemetry.length),
+        banner_visible_rate: rate(consentV2Telemetry.filter((item) => item.banner_visibility === 'visible').length, consentV2Telemetry.length),
+        reject_availability: countBy(consentV2Telemetry, (item) => item.reject_availability),
+        interaction_outcomes: countBy(consentV2Telemetry, (item) => item.interaction_outcome),
+        verification: countBy(consentV2Telemetry, (item) => item.verification),
+        persistence: countBy(consentV2Telemetry, (item) => item.persistence),
+        generic_fallback_rate: rate(consentV2Telemetry.filter((item) => item.generic_fallback).length, consentV2Telemetry.length),
+        selector_or_action_failure_rate: rate(consentV2Telemetry.filter((item) => item.selector_or_action_failure).length, consentV2Telemetry.length),
+        tcf_presence_rate: rate(consentV2Telemetry.filter((item) => item.tcf_present).length, consentV2Telemetry.length),
+        gpp_presence_rate: rate(consentV2Telemetry.filter((item) => item.gpp_present).length, consentV2Telemetry.length),
+        consent_mode_classifications: countBy(consentV2Telemetry, (item) => item.consent_mode_classification),
+        tracking_consistency: countBy(consentV2Telemetry, (item) => item.tracking_consistency),
+        tracking_contradiction_rate: rate(consentV2Telemetry.filter((item) => item.tracking_consistency === 'contradiction').length, consentV2Telemetry.length),
+        unknown_cmp_fingerprints: countBy(consentV2Telemetry.filter((item) => item.unknown_cmp_fingerprint), (item) => item.unknown_cmp_fingerprint),
+        geo_unverified_rate: rate(consentV2Telemetry.filter((item) => item.geo_unverified).length, consentV2Telemetry.length),
+        blocked_or_challenged_rate: rate(consentV2Telemetry.filter((item) => item.blocked_or_challenged).length, consentV2Telemetry.length)
+      },
       review_candidates: unresolvedLatestAudits.filter((audit) => (audit.qa_priority || 0) > 0 || audit.overall_confidence === 'low' || (audit.consistency_violations || []).length > 0).length,
       unverified_audits: latestAudits.filter((audit) => !verifiedLatestIds.has(String(audit.audit_id))).length
     },

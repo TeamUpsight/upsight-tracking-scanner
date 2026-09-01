@@ -283,6 +283,27 @@ export interface EvidenceBundle {
       elapsed_ms: number | null;
     };
     module_durations_ms: Record<string, number>;
+    consent_v2?: {
+      enabled: boolean;
+      observation_only: boolean;
+      provider: string | null;
+      provider_confidence: 'high' | 'medium' | 'low' | null;
+      provider_conflict: boolean;
+      banner_visibility: 'visible' | 'not_visible' | 'unknown';
+      reject_availability: 'direct' | 'preferences_only' | 'api_only' | 'not_present' | 'unknown';
+      interaction_outcome: 'executed' | 'not_executed' | 'timeout' | 'unsupported' | 'aborted' | 'not_attempted';
+      verification: 'verified' | 'not_verified' | 'inconclusive';
+      persistence: 'confirmed' | 'not_confirmed' | 'inconclusive' | 'not_applicable';
+      generic_fallback: boolean;
+      selector_or_action_failure: boolean;
+      tcf_present: boolean;
+      gpp_present: boolean;
+      consent_mode_classification: string;
+      tracking_consistency: 'consistent' | 'contradiction' | 'insufficient_evidence' | 'not_applicable';
+      unknown_cmp_fingerprint: string | null;
+      geo_unverified: boolean;
+      blocked_or_challenged: boolean;
+    };
     evidence_size_bytes: number;
     screenshots: ScreenshotEvidence[];
   };

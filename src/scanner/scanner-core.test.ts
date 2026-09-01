@@ -854,6 +854,26 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     expect(metrics.operational).toMatchObject({ total_audits: 1, unique_websites: 1 });
   });
 
+  it('aggregates privacy-safe Consent V2 rollout telemetry without browser evidence', () => {
+    const evidence = baseEvidence('consent-telemetry.example');
+    evidence.runtime.consent_v2 = {
+      enabled: true, observation_only: true, provider: 'onetrust', provider_confidence: 'high', provider_conflict: false,
+      banner_visibility: 'visible', reject_availability: 'direct', interaction_outcome: 'not_attempted', verification: 'inconclusive',
+      persistence: 'not_applicable', generic_fallback: false, selector_or_action_failure: false, tcf_present: true, gpp_present: false,
+      consent_mode_classification: 'advanced_candidate', tracking_consistency: 'not_applicable', unknown_cmp_fingerprint: null,
+      geo_unverified: true, blocked_or_challenged: false
+    };
+    const audit = {
+      audit_id: 'consent-telemetry', domain: 'consent-telemetry.example', group_label: null, scan_started_at: '2026-08-27T00:00:00.000Z', scan_completed_at: null,
+      scan_status: 'completed', error_category: 'none', tested_geos: 'EU', cms_platform_detected: 'Unknown', overall_status: 'inconclusive', overall_confidence: 'low',
+      consent_status: 'inconclusive', cmp_provider: 'OneTrust', product_payload_status: 'not_tested', pdp_url_tested: null, server_side_status: 'not_tested', ss_collection_type: 'not_tested', trace_steps: '[]', evidence_bundle: evidence
+    } satisfies StorefrontAudit;
+    expect(buildQualityMetrics([audit], []).operational.consent_v2).toMatchObject({
+      audits: 1, detection_rate: 1, providers: { onetrust: 1 }, tcf_presence_rate: 1, geo_unverified_rate: 1,
+      interaction_outcomes: { not_attempted: 1 }
+    });
+  });
+
   it('reports access reliability rates from bounded access evidence', () => {
     const makeAudit = (id: string, geo: 'USA' | 'EU' | 'UK', overrides: Partial<EvidenceBundle['access']>, error: StorefrontAudit['error_category'] = 'none') => {
       const evidence = baseEvidence(`${id}.example`);
