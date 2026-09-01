@@ -84,6 +84,8 @@ export interface AdapterDetectionResult {
 
 export interface AdapterOperationInput {
   timestamp?: number;
+  /** Provider adapters may define a runtime bridge without widening persisted contracts. */
+  context?: unknown;
 }
 
 export interface AdapterOperationResult<T> {
