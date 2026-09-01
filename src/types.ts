@@ -68,6 +68,7 @@ export type CmpProvider =
   | 'Didomi'
   | 'Usercentrics'
   | 'CookieYes'
+  | 'Sourcepoint'
   | 'Osano'
   | 'Iubenda'
   | 'TrustArc'
