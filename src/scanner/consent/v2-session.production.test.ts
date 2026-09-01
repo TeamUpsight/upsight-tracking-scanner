@@ -37,7 +37,7 @@ async function audit(html: string, sessionInput = input) {
 }
 
 /** Local page navigation → prepared production capture → session evaluation. */
-async function auditNavigation(html: string, accessBlocked = false) {
+async function auditNavigation(html: string, accessBlocked = false, sessionInput = input) {
   const server = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); response.end(html);
   });
@@ -50,7 +50,7 @@ async function auditNavigation(html: string, accessBlocked = false) {
     capture.markNavigationStarted();
     await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'domcontentloaded' });
     capture.markDOMContentLoaded(); capture.markInitialObservationCompleted();
-    return await runConsentV2Session(page, { ...input, access_blocked: accessBlocked }, capture);
+    return await runConsentV2Session(page, { ...sessionInput, access_blocked: accessBlocked }, capture);
   } finally {
     await page.close(); await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
@@ -97,6 +97,65 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.frameworks.gpp).toBe('stub_present');
     expect(result.result.frameworks.reason_codes).toContain('GPP_STUB_PRESENT');
   });
+
+  it('GPP-02 keeps normalized ready GPP lifecycle fields in framework evidence', async () => {
+    const result = await audit(`<script>window.__gpp=(command, callback) => { const ping={gppVersion:'1.1',cmpStatus:'loaded',cmpDisplayStatus:'hidden',signalStatus:'ready',cmpId:1,supportedAPIs:['usnat'],sectionList:[7],applicableSections:[7,8]}; if(command==='ping') callback(ping,true); if(command==='addEventListener') callback({listenerId:1,pingData:ping},true); };</script>`);
+    expect(result.result.frameworks).toMatchObject({ gpp: 'present' });
+    expect(result.result.frameworks.evidence).toEqual(expect.arrayContaining(['gpp_cmp_status:loaded', 'gpp_cmp_display_status:hidden', 'gpp_signal_status:ready', 'gpp_applicable_sections:7,8']));
+  });
+
+  it('MM-01 preserves Shopify, OneTrust, GPP, and GCM as independent mechanisms', async () => {
+    const result = await audit(`<script>
+      window.dataLayer=[['consent','default',{ad_storage:'denied',analytics_storage:'denied'}]];
+      window.OneTrust={RejectAll(){}};
+      window.__gpp=(command, callback) => { const ping={gppVersion:'1.1',cmpStatus:'loaded',cmpDisplayStatus:'hidden',signalStatus:'ready',cmpId:1,supportedAPIs:[],sectionList:[7],applicableSections:[7]}; if(command==='ping') callback(ping,true); if(command==='addEventListener') callback({listenerId:1,pingData:ping},true); };
+      window.Shopify={customerPrivacy:{currentVisitorConsent(){return {analytics:'no',marketing:'no',preferences:'no',sale_of_data:'no'}},analyticsProcessingAllowed(){return false},marketingAllowed(){return false},preferencesProcessingAllowed(){return false},saleOfDataAllowed(){return false},shouldShowBanner(){return false},getRegion(){return 'EU'}}};
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"></div>`);
+    expect(result.result.mechanisms.map((item) => item.mechanism)).toEqual(expect.arrayContaining(['cmp', 'commerce_privacy_runtime', 'framework', 'consent_mode']));
+    expect(new Set(result.result.mechanisms.map((item) => `${item.mechanism}:${item.provider?.candidates.map((candidate) => candidate.provider_name).join(',') || ''}`)).size).toBe(result.result.mechanisms.length);
+  });
+
+  it('MM-02 reports Shopify alone without inventing an external CMP', async () => {
+    const result = await audit(`<script>window.Shopify={customerPrivacy:{currentVisitorConsent(){return {analytics:'no',marketing:'no',preferences:'no',sale_of_data:'no'}},analyticsProcessingAllowed(){return false},marketingAllowed(){return false},preferencesProcessingAllowed(){return false},saleOfDataAllowed(){return false},shouldShowBanner(){return false},getRegion(){return 'EU'}}};</script>`);
+    expect(result.result.mechanisms.map((item) => item.mechanism)).toContain('commerce_privacy_runtime');
+    expect(result.result.mechanisms.some((item) => item.mechanism === 'cmp' || item.mechanism === 'custom')).toBe(false);
+  });
+
+  it('GCM-01 classifies a denied default with pre-choice measurement as advanced through production wiring', async () => {
+    const result = await auditNavigation(`<head><script>
+      window.dataLayer=[]; function gtag(){window.dataLayer.push(arguments);}
+      gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied'});
+      new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G100';
+      function decline(){window.dataLayer.push(['consent','update',{ad_storage:'denied',analytics_storage:'denied'}]);}
+    </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false}">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
+    expect(result.google_consent_mode).toMatchObject({ classification: 'advanced_candidate', default_issued_late: false, lifecycle: 'default_and_update' });
+    expect(result.result.mechanisms.map((item) => item.mechanism)).toContain('consent_mode');
+  }, 10_000);
+
+  it('GCM-02 requires a full pre-choice window, gated measurement, and a positive update for Basic', async () => {
+    const result = await auditNavigation(`<head><script>
+      window.dataLayer=[]; function gtag(){window.dataLayer.push(arguments);}
+      gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied'});
+      function decline(){window.dataLayer.push(['consent','update',{ad_storage:'granted',analytics_storage:'granted'}]);new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G111';}
+    </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false}">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
+    expect(result.google_consent_mode).toMatchObject({ classification: 'basic_candidate', pre_choice_measurement_window_observed: true, tracking_gated: true });
+  }, 10_000);
+
+  it('GCM-03 keeps gcd-only evidence ambiguous', async () => {
+    const result = await auditNavigation(`<head><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcd=opaque';</script></head><body>fixture</body>`);
+    expect(result.google_consent_mode.classification).toBe('ambiguous');
+  });
+
+  it('GCM-04 captures the post-Reject Consent Mode update and surfaces a contradiction', async () => {
+    const result = await auditNavigation(`<head><script>
+      window.dataLayer=[]; function gtag(){window.dataLayer.push(arguments);}
+      gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied'});
+      function decline(){window.dataLayer.push(['consent','update',{ad_storage:'granted',analytics_storage:'granted'}]);}
+    </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false}">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.google_consent_mode.updates_observed).toBe(true);
+    expect(result.google_consent_mode.commands.some((command) => command.command === 'update')).toBe(true);
+    expect(result.result.reason_codes).toContain('STATE_CONTRADICTION');
+  }, 10_000);
 
   it('does not classify a newsletter dialog as a custom CMP', async () => {
     const result = await audit('<div role="dialog">Newsletter <button>Sign up</button></div>');
