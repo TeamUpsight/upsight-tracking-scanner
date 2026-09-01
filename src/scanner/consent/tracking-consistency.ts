@@ -4,7 +4,7 @@ import type { VerificationResult } from './domain-types';
 export type TrackingConsistencyStatus = 'consistent' | 'contradiction' | 'insufficient_evidence' | 'not_applicable';
 export type TrackingConsistencyVendor = 'google_analytics' | 'google_ads' | 'meta' | 'tiktok' | 'snapchat' | 'pinterest' | 'x' | 'floodlight';
 export type TrackingSignalKind = 'script_load' | 'event_hit' | 'conversion_hit';
-export type TrackingSignalTiming = 'pre_action' | 'post_verified_reject' | 'post_action_unverified' | 'unknown';
+export type TrackingSignalTiming = 'pre_choice' | 'post_verified_reject' | 'post_action_unverified' | 'unknown';
 
 export const TrackingConsistencyCodes = {
   REJECT_NOT_VERIFIED: 'REJECT_NOT_VERIFIED',
@@ -25,7 +25,8 @@ export interface TrackingConsistencySignal {
 export interface TrackingConsistencyInput {
   /** Kept separate from the resulting tracking-consistency status. */
   rejection_verification: VerificationResult;
-  reject_timestamp: number | null;
+  /** The first user consent choice; absent during observation-only sessions. */
+  user_choice_at: number | null;
   post_reject_observation_completed: boolean;
   requests: readonly TrackingRequestEvidence[];
 }
@@ -87,9 +88,28 @@ function signalKind(request: TrackingRequestEvidence): TrackingSignalKind | null
 }
 
 function timingFor(request: TrackingRequestEvidence, input: TrackingConsistencyInput): TrackingSignalTiming {
-  if (!Number.isFinite(request.timestamp) || input.reject_timestamp === null || !Number.isFinite(input.reject_timestamp)) return 'unknown';
-  if (request.timestamp < input.reject_timestamp) return 'pre_action';
+  if (!Number.isFinite(request.timestamp)) return 'unknown';
+  if (input.user_choice_at === null || !Number.isFinite(input.user_choice_at) || request.timestamp < input.user_choice_at) return 'pre_choice';
   return input.rejection_verification.status === 'verified' ? 'post_verified_reject' : 'post_action_unverified';
+}
+
+/** Normalizes request facts for Consent V2 without retaining a raw URL or query string. */
+export function captureConsentTrackingRequest(input: {
+  url: string;
+  resource_type: string;
+  method: string;
+  timestamp?: number;
+}): TrackingRequestEvidence | null {
+  let parsed: URL;
+  try { parsed = new URL(input.url); } catch { return null; }
+  const host = parsed.hostname.toLowerCase();
+  const event = parsed.searchParams.get('en') || parsed.searchParams.get('ev') || undefined;
+  return {
+    vendor: /facebook\.com|connect\.facebook/i.test(host) ? 'meta' : /google-analytics\.com/i.test(host) ? 'ga4' : /googleadservices|doubleclick/i.test(host) ? 'google_ads' : 'unknown',
+    kind: input.resource_type === 'script' ? 'script' : 'collection',
+    collector: 'third_party', host, path: normalizedPath(parsed.pathname), method: input.method,
+    phase: 'consent_v2', timestamp: input.timestamp || Date.now(), event: event?.slice(0, 120)
+  };
 }
 
 /**

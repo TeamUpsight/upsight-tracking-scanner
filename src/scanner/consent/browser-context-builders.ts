@@ -18,7 +18,7 @@ export interface BrowserConsentFacts {
   cookiebot: Record<string, unknown> | null;
   cookieyes: Record<string, unknown> | null;
   shopify: Record<string, unknown> | null;
-  consent_commands: Array<{ command: 'default' | 'update'; state: Record<string, unknown> }>;
+  consent_commands: Array<{ command: 'default' | 'update'; state: Record<string, unknown>; timestamp?: number }>;
   generic: {
     surfaces: Array<{ id: string; surface_type: 'banner' | 'dialog' | 'drawer'; visible: boolean; privacy_or_cookie_semantics: boolean; intent: string }>;
     controls: Array<{ surface_id: string; visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string }>;
@@ -33,9 +33,61 @@ const DOM_SELECTORS = [
   COOKIEYES_STANDARD_ROOT, ...Object.values(COOKIEYES_STABLE_CONTROLS)
 ];
 
+const CONSENT_COMMAND_OBSERVATIONS_KEY = '__upsightConsentCommandObservations';
+
+/**
+ * Installs a narrowly-scoped, pre-navigation dataLayer observer. It only
+ * records consent default/update commands and delegates every array push to
+ * the site's original implementation unchanged.
+ */
+export async function installConsentCommandBootstrap(page: Page) {
+  await page.context().addInitScript((key) => {
+    const w = window as any;
+    const allowedState = (value: unknown) => {
+      if (!value || typeof value !== 'object') return null;
+      const source = value as Record<string, unknown>;
+      const result: Record<string, unknown> = {};
+      for (const name of ['ad_storage', 'analytics_storage', 'ad_user_data', 'ad_personalization', 'functionality_storage', 'personalization_storage', 'security_storage']) {
+        if (typeof source[name] === 'string') result[name] = source[name];
+      }
+      if (typeof source.wait_for_update === 'number' && Number.isFinite(source.wait_for_update)) result.wait_for_update = Math.max(0, Math.min(Math.floor(source.wait_for_update), 60_000));
+      return result;
+    };
+    const observations: Array<{ command: 'default' | 'update'; state: Record<string, unknown>; timestamp: number }> = Array.isArray(w[key]) ? w[key] : [];
+    w[key] = observations;
+    const record = (entry: unknown) => {
+      const command = Array.isArray(entry) ? entry : entry && typeof entry === 'object' && typeof (entry as { length?: unknown }).length === 'number' ? Array.from(entry as ArrayLike<unknown>) : null;
+      if (!command || command[0] !== 'consent' || (command[1] !== 'default' && command[1] !== 'update')) return;
+      const state = allowedState(command[2]);
+      if (!state || observations.length >= 100) return;
+      observations.push({ command: command[1], state, timestamp: Date.now() });
+    };
+    const observeDataLayer = (value: unknown) => {
+      if (!Array.isArray(value) || (value as any).__upsightConsentObserverInstalled) return;
+      value.forEach(record);
+      const originalPush = value.push;
+      Object.defineProperty(value, '__upsightConsentObserverInstalled', { value: true, configurable: false });
+      value.push = function (...entries: unknown[]) {
+        entries.forEach(record);
+        return originalPush.apply(this, entries as any);
+      };
+    };
+    let dataLayer = w.dataLayer;
+    observeDataLayer(dataLayer);
+    const descriptor = Object.getOwnPropertyDescriptor(w, 'dataLayer');
+    if (!descriptor || descriptor.configurable) {
+      Object.defineProperty(w, 'dataLayer', {
+        configurable: true,
+        get: () => dataLayer,
+        set: (value) => { dataLayer = value; observeDataLayer(value); }
+      });
+    }
+  }, CONSENT_COMMAND_OBSERVATIONS_KEY);
+}
+
 /** Captures normalized, bounded browser facts. Provider interpretation remains in adapters. */
 export async function captureBrowserConsentFacts(page: Page): Promise<BrowserConsentFacts> {
-  return page.evaluate(({ globals, selectors }) => {
+  return page.evaluate(({ globals, selectors, consentCommandKey }) => {
     const visible = (element: Element | null) => {
       if (!(element instanceof HTMLElement)) return false;
       const style = getComputedStyle(element); const box = element.getBoundingClientRect();
@@ -59,13 +111,23 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     try { const raw = typeof w.getCkyConsent === 'function' ? w.getCkyConsent() : null; const categories = raw?.categories || raw; cookieyes = categories ? { analytics: typeof categories.analytics === 'boolean' ? categories.analytics : null, advertisement: typeof categories.advertisement === 'boolean' ? categories.advertisement : null, performance: typeof categories.performance === 'boolean' ? categories.performance : null } : null; } catch { /* Runtime access is optional. */ }
     let shopify: Record<string, unknown> | null = null;
     try { const privacy = w.Shopify?.customerPrivacy; if (privacy) { const methods = ['currentVisitorConsent', 'analyticsProcessingAllowed', 'marketingAllowed', 'preferencesProcessingAllowed', 'saleOfDataAllowed', 'shouldShowBanner', 'getRegion'].filter((name) => typeof privacy[name] === 'function'); const consent = typeof privacy.currentVisitorConsent === 'function' ? privacy.currentVisitorConsent() : null; shopify = { shopify_object_present: Boolean(w.Shopify), customer_privacy_object_present: true, runtime_methods: methods, visitor_consent: consent ? { analytics: consent.analytics === 'yes' || consent.analytics === 'no' ? consent.analytics : '', marketing: consent.marketing === 'yes' || consent.marketing === 'no' ? consent.marketing : '', preferences: consent.preferences === 'yes' || consent.preferences === 'no' ? consent.preferences : '', sale_of_data: consent.sale_of_data === 'yes' || consent.sale_of_data === 'no' ? consent.sale_of_data : '' } : null, processing_allowed: { analytics: typeof privacy.analyticsProcessingAllowed === 'function' ? Boolean(privacy.analyticsProcessingAllowed()) : null, marketing: typeof privacy.marketingAllowed === 'function' ? Boolean(privacy.marketingAllowed()) : null, preferences: typeof privacy.preferencesProcessingAllowed === 'function' ? Boolean(privacy.preferencesProcessingAllowed()) : null, sale_of_data: typeof privacy.saleOfDataAllowed === 'function' ? Boolean(privacy.saleOfDataAllowed()) : null }, should_show_banner: typeof privacy.shouldShowBanner === 'function' ? Boolean(privacy.shouldShowBanner()) : null, region_available: typeof privacy.getRegion === 'function' ? Boolean(privacy.getRegion()) : null }; } } catch { /* Runtime access is optional. */ }
-    const commands: Array<{ command: 'default' | 'update'; state: Record<string, unknown> }> = [];
-    for (const entry of Array.isArray(w.dataLayer) ? w.dataLayer.slice(-100) : []) if (Array.isArray(entry) && entry[0] === 'consent' && (entry[1] === 'default' || entry[1] === 'update') && entry[2] && typeof entry[2] === 'object') commands.push({ command: entry[1], state: entry[2] });
+    const commandState = (value: unknown) => {
+      if (!value || typeof value !== 'object') return null;
+      const source = value as Record<string, unknown>; const result: Record<string, unknown> = {};
+      for (const name of ['ad_storage', 'analytics_storage', 'ad_user_data', 'ad_personalization', 'functionality_storage', 'personalization_storage', 'security_storage']) if (typeof source[name] === 'string') result[name] = source[name];
+      if (typeof source.wait_for_update === 'number' && Number.isFinite(source.wait_for_update)) result.wait_for_update = Math.max(0, Math.min(Math.floor(source.wait_for_update), 60_000));
+      return result;
+    };
+    const commands: Array<{ command: 'default' | 'update'; state: Record<string, unknown>; timestamp?: number }> = [];
+    for (const entry of Array.isArray(w[consentCommandKey]) ? w[consentCommandKey].slice(-100) : []) {
+      if (entry && (entry.command === 'default' || entry.command === 'update') && entry.state && typeof entry.state === 'object') commands.push({ command: entry.command, state: entry.state, timestamp: typeof entry.timestamp === 'number' ? entry.timestamp : undefined });
+    }
+    if (!commands.length) for (const entry of Array.isArray(w.dataLayer) ? w.dataLayer.slice(-100) : []) { const command = Array.isArray(entry) ? entry : entry && typeof entry === 'object' && typeof (entry as { length?: unknown }).length === 'number' ? Array.from(entry as ArrayLike<unknown>) : null; if (command && command[0] === 'consent' && (command[1] === 'default' || command[1] === 'update')) { const state = commandState(command[2]); if (state) commands.push({ command: command[1], state }); } }
     let cookieNames: string[] = []; let storageKeys: string[] = [];
     try { cookieNames = document.cookie.split(';').map((part) => part.trim().split('=')[0]).filter(Boolean).slice(0, 100); } catch { /* Opaque origins have no cookie jar. */ }
     try { storageKeys = Object.keys(localStorage).slice(0, 100); } catch { /* Opaque origins have no Web Storage. */ }
     return { globals: globals.filter((name) => Boolean(w[name])), assets: Array.from(document.scripts).map((script) => script.src).filter(Boolean).slice(0, 200), cookie_names: cookieNames, storage_keys: storageKeys, observations: selectors.map((selector) => { const element = document.querySelector(selector) as HTMLButtonElement | null; return element ? { selector, visible: visible(element), enabled: !element.disabled, text: String(element.getAttribute('aria-label') || element.textContent || '').slice(0, 120) } : null; }).filter(Boolean), cookiebot, cookieyes, shopify, consent_commands: commands, generic };
-  }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS }) as Promise<BrowserConsentFacts>;
+  }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS, consentCommandKey: CONSENT_COMMAND_OBSERVATIONS_KEY }) as Promise<BrowserConsentFacts>;
 }
 
 const observation = (facts: BrowserConsentFacts, selector: string) => facts.observations.find((item) => item.selector === selector);

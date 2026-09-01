@@ -28,7 +28,7 @@ import {
   navigateFreshConsentContext
 } from './consent/fresh-context';
 import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
-import { runConsentV2Session, type ConsentV2SessionOutput } from './consent/v2-session';
+import { prepareConsentV2Session, runConsentV2Session, type ConsentV2SessionOutput } from './consent/v2-session';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { isValidStorefrontStatus, resolveAccessDecision, resolveHostnameEvidence, type AccessDecision } from './navigation';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
@@ -1105,7 +1105,7 @@ export async function runStorefrontAudit(
       const compatibility = mapConsentV2ToExisting(consentV2.result, {
         geo,
         page_valid: evidence.page.valid,
-        tracking_before_interaction: consentV2.tracking.signals.some((signal) => signal.timing === 'pre_action'),
+        tracking_before_interaction: consentV2.tracking.signals.some((signal) => signal.timing === 'pre_choice'),
         post_reject_observation_completed: consentV2.result.persistence.status !== 'not_applicable',
         trace_steps: JSON.stringify(trace),
         max_trace_steps: traceLimit
@@ -1803,6 +1803,7 @@ export async function runStorefrontAudit(
     if (consentSelected) {
       evidence.consent.executed = true;
       currentPhase = 'consent_fresh_initial_load';
+      let consentCapture: Awaited<ReturnType<typeof prepareConsentV2Session>> | null = null;
       try {
         const freshConsent = await createFreshConsentContext(browser!, {
           requestedGeo: geo,
@@ -1818,7 +1819,11 @@ export async function runStorefrontAudit(
           geo: freshConsent.geo,
           authorized_access: Boolean(consentAuthorized)
         });
+        consentCapture = await prepareConsentV2Session(consentHomepage);
+        consentCapture.markNavigationStarted();
         const navigation = await navigateFreshConsentContext(consentHomepage, `https://${normalizedDomain}`, { timings: consentTimings });
+        if (navigation.dom_content_loaded) consentCapture.markDOMContentLoaded();
+        consentCapture.markInitialObservationCompleted();
         const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
         const readiness = consentNavigationReadiness(consentAccess);
         consentV2 = await runConsentV2Session(consentHomepage, {
@@ -1827,12 +1832,12 @@ export async function runStorefrontAudit(
           page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
           timings: consentTimings,
           access_blocked: readiness.status !== 'ready'
-        });
+        }, consentCapture);
         evidence.runtime.consent_v2 = consentV2.telemetry;
         const compatibility = mapConsentV2ToExisting(consentV2.result, {
           geo,
           page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
-          tracking_before_interaction: consentV2.tracking.signals.some((signal) => signal.timing === 'pre_action'),
+          tracking_before_interaction: consentV2.tracking.signals.some((signal) => signal.timing === 'pre_choice'),
           post_reject_observation_completed: consentV2.result.persistence.status !== 'not_applicable',
           max_trace_steps: traceLimit
         }, consentV2.tracking);
@@ -1852,6 +1857,7 @@ export async function runStorefrontAudit(
           access_reason_code: readiness.status !== 'ready' ? consentAccess.reasonCode : null
         });
       } catch (error) {
+        consentCapture?.dispose();
         cmp = {
           provider: 'Unknown', confidence: 'low', evidence: ['fresh_context_navigation_inconclusive'], banner_visible: null,
           reason_code: 'DETECTION_INCONCLUSIVE'

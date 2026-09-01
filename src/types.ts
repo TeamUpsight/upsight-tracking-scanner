@@ -303,6 +303,16 @@ export interface EvidenceBundle {
       unknown_cmp_fingerprint: string | null;
       geo_unverified: boolean;
       blocked_or_challenged: boolean;
+      timeline?: {
+        session_started_at: number;
+        navigation_started_at: number | null;
+        dom_content_loaded_at: number | null;
+        initial_observation_completed_at: number | null;
+        user_choice_at: number | null;
+        reject_started_at: number | null;
+        reject_completed_at: number | null;
+        reload_started_at: number | null;
+      };
     };
     evidence_size_bytes: number;
     screenshots: ScreenshotEvidence[];

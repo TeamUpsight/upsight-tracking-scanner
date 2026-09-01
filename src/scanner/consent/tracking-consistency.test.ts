@@ -15,7 +15,7 @@ function request(overrides: Partial<TrackingRequestEvidence> = {}): TrackingRequ
 }
 
 function check(requests: TrackingRequestEvidence[], verification: VerificationResult = rejected, complete = true) {
-  return checkTrackingConsistency({ rejection_verification: verification, reject_timestamp: rejectTimestamp, post_reject_observation_completed: complete, requests });
+  return checkTrackingConsistency({ rejection_verification: verification, user_choice_at: rejectTimestamp, post_reject_observation_completed: complete, requests });
 }
 
 describe('consent versus tracking consistency', () => {
@@ -45,7 +45,7 @@ describe('consent versus tracking consistency', () => {
 
   it('does not treat activity before Reject as leakage after Reject', () => {
     const result = check([request({ timestamp: rejectTimestamp - 1 })]);
-    expect(result).toMatchObject({ status: 'consistent', signals: [{ timing: 'pre_action' }] });
+    expect(result).toMatchObject({ status: 'consistent', signals: [{ timing: 'pre_choice' }] });
   });
 
   it('keeps verified Reject intact while separately reporting a contradiction', () => {
@@ -58,5 +58,10 @@ describe('consent versus tracking consistency', () => {
   it('does not call an unverified Reject plus vendor hit a tracking contradiction', () => {
     const result = check([request({ event: 'Purchase' })], unverified);
     expect(result).toMatchObject({ status: 'not_applicable', reason_codes: [TrackingConsistencyCodes.REJECT_NOT_VERIFIED], signals: [{ timing: 'post_action_unverified' }] });
+  });
+
+  it('classifies observation-only requests as pre-choice without a Reject timestamp', () => {
+    const result = checkTrackingConsistency({ rejection_verification: unverified, user_choice_at: null, post_reject_observation_completed: false, requests: [request()] });
+    expect(result).toMatchObject({ status: 'not_applicable', signals: [{ timing: 'pre_choice' }] });
   });
 });
