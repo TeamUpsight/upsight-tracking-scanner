@@ -16,6 +16,12 @@ const rollout: ConsentV2RolloutControls = {
 };
 
 const input = { geo: 'EU' as const, geo_verified: true, page_valid: true, rollout };
+const actionRollout: ConsentV2RolloutControls = {
+  ...rollout,
+  actions_enabled: true,
+  action_sample_percent: 100,
+  providers: Object.fromEntries(Object.entries(rollout.providers).map(([provider, settings]) => [provider, { ...settings, actions_enabled: true }])) as ConsentV2RolloutControls['providers']
+};
 let browser: Browser;
 
 beforeAll(async () => {
@@ -25,9 +31,9 @@ beforeAll(async () => {
 afterAll(async () => { await browser?.close(); });
 
 /** Local executable fixture/page → production bridge → runConsentV2Session(). */
-async function audit(html: string) {
+async function audit(html: string, sessionInput = input) {
   const page = await browser.newPage();
-  try { await page.setContent(html); return await runConsentV2Session(page, input); } finally { await page.close(); }
+  try { await page.setContent(html); return await runConsentV2Session(page, sessionInput); } finally { await page.close(); }
 }
 
 /** Local page navigation → prepared production capture → session evaluation. */
@@ -51,6 +57,22 @@ async function auditNavigation(html: string, accessBlocked = false) {
 }
 
 describe('Consent V2 production session wiring', () => {
+  it('VER-CB-01 wires Cookiebot runtime rejection through the production verifier', async () => {
+    const result = await audit(`<script>
+      window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};
+      function decline(){Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consented=false;Cookiebot.consent={preferences:false,statistics:false,marketing:false};}
+    </script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline()">Decline</button></div>`, { ...input, rollout: actionRollout });
+    expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
+    expect(result.result.rejection_verification.status).toBe('verified');
+  });
+
+  it('VER-OT-01 prefers the visible OneTrust Reject control over its API capability', async () => {
+    const result = await audit(`<script>
+      window.OneTrust={RejectAll(){window.apiCalled=true;}}; window.OnetrustActiveGroups='C001';
+      function reject(){window.OnetrustActiveGroups='C001';}
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, { ...input, rollout: actionRollout });
+    expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
+  });
   it('uses the OneTrust adapter for provider evidence, state, banner, and actions', async () => {
     const result = await audit(`<script>window.OneTrust={RejectAll(){}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`);
     expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('onetrust');

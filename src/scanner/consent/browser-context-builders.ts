@@ -5,7 +5,8 @@ import { COOKIEBOT_STANDARD_CONTROLS, COOKIEBOT_STANDARD_ROOT } from './cookiebo
 import { USERCENTRICS_STANDARD_ROOT } from './usercentrics-adapter';
 import { DIDOMI_STANDARD_ROOTS } from './didomi-adapter';
 import { COOKIEYES_STANDARD_ROOT, COOKIEYES_STABLE_CONTROLS } from './cookieyes-adapter';
-import { observeConsentFrameworks, type ConsentFrameworkObservations } from './framework-observers';
+import { observeConsentFrameworks, tcfAggregateDecision, type ConsentFrameworkObservations } from './framework-observers';
+import { semanticActionForConsentLabel } from './generic-consent-detector';
 
 type DomObservation = { selector: string; visible: boolean; enabled: boolean; text: string };
 
@@ -17,6 +18,9 @@ export interface BrowserConsentFacts {
   observations: DomObservation[];
   cookiebot: Record<string, unknown> | null;
   cookieyes: Record<string, unknown> | null;
+  onetrust: { active_group_ids: string[]; provider_events: string[] } | null;
+  didomi: Record<string, unknown> | null;
+  provider_events: string[];
   shopify: Record<string, unknown> | null;
   consent_commands: Array<{ command: 'default' | 'update'; state: Record<string, unknown>; timestamp?: number }>;
   generic: {
@@ -34,6 +38,7 @@ const DOM_SELECTORS = [
 ];
 
 const CONSENT_COMMAND_OBSERVATIONS_KEY = '__upsightConsentCommandObservations';
+const PROVIDER_EVENT_OBSERVATIONS_KEY = '__upsightConsentProviderEventObservations';
 
 /**
  * Installs a narrowly-scoped, pre-navigation dataLayer observer. It only
@@ -41,7 +46,7 @@ const CONSENT_COMMAND_OBSERVATIONS_KEY = '__upsightConsentCommandObservations';
  * the site's original implementation unchanged.
  */
 export async function installConsentCommandBootstrap(page: Page) {
-  await page.context().addInitScript((key) => {
+  await page.context().addInitScript(({ key, providerKey }) => {
     const w = window as any;
     const allowedState = (value: unknown) => {
       if (!value || typeof value !== 'object') return null;
@@ -55,6 +60,11 @@ export async function installConsentCommandBootstrap(page: Page) {
     };
     const observations: Array<{ command: 'default' | 'update'; state: Record<string, unknown>; timestamp: number }> = Array.isArray(w[key]) ? w[key] : [];
     w[key] = observations;
+    const providerEvents: string[] = Array.isArray(w[providerKey]) ? w[providerKey] : [];
+    w[providerKey] = providerEvents;
+    for (const eventName of ['OneTrustGroupsUpdated', 'OTConsentApplied', 'consent.changed', 'preferences.clickdisagreetoall', 'notice.clickdisagree']) {
+      window.addEventListener(eventName, () => { if (!providerEvents.includes(eventName) && providerEvents.length < 20) providerEvents.push(eventName); });
+    }
     const record = (entry: unknown) => {
       const command = Array.isArray(entry) ? entry : entry && typeof entry === 'object' && typeof (entry as { length?: unknown }).length === 'number' ? Array.from(entry as ArrayLike<unknown>) : null;
       if (!command || command[0] !== 'consent' || (command[1] !== 'default' && command[1] !== 'update')) return;
@@ -82,12 +92,12 @@ export async function installConsentCommandBootstrap(page: Page) {
         set: (value) => { dataLayer = value; observeDataLayer(value); }
       });
     }
-  }, CONSENT_COMMAND_OBSERVATIONS_KEY);
+  }, { key: CONSENT_COMMAND_OBSERVATIONS_KEY, providerKey: PROVIDER_EVENT_OBSERVATIONS_KEY });
 }
 
 /** Captures normalized, bounded browser facts. Provider interpretation remains in adapters. */
 export async function captureBrowserConsentFacts(page: Page): Promise<BrowserConsentFacts> {
-  return page.evaluate(({ globals, selectors, consentCommandKey }) => {
+  return page.evaluate(({ globals, selectors, consentCommandKey, providerEventKey }) => {
     const visible = (element: Element | null) => {
       if (!(element instanceof HTMLElement)) return false;
       const style = getComputedStyle(element); const box = element.getBoundingClientRect();
@@ -108,7 +118,19 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     const cb = w.Cookiebot;
     const cookiebot = cb ? { has_response: typeof cb.hasResponse === 'boolean' ? cb.hasResponse : null, consented: typeof cb.consented === 'boolean' ? cb.consented : null, declined: typeof cb.declined === 'boolean' ? cb.declined : null, consent: cb.consent ? { preferences: typeof cb.consent.preferences === 'boolean' ? cb.consent.preferences : null, statistics: typeof cb.consent.statistics === 'boolean' ? cb.consent.statistics : null, marketing: typeof cb.consent.marketing === 'boolean' ? cb.consent.marketing : null } : null } : null;
     let cookieyes: Record<string, unknown> | null = null;
-    try { const raw = typeof w.getCkyConsent === 'function' ? w.getCkyConsent() : null; const categories = raw?.categories || raw; cookieyes = categories ? { analytics: typeof categories.analytics === 'boolean' ? categories.analytics : null, advertisement: typeof categories.advertisement === 'boolean' ? categories.advertisement : null, performance: typeof categories.performance === 'boolean' ? categories.performance : null } : null; } catch { /* Runtime access is optional. */ }
+    try { const raw = typeof w.getCkyConsent === 'function' ? w.getCkyConsent() : null; const categories = raw?.categories || raw; cookieyes = categories ? { analytics: typeof categories.analytics === 'boolean' ? categories.analytics : null, advertisement: typeof categories.advertisement === 'boolean' ? categories.advertisement : null, performance: typeof categories.performance === 'boolean' ? categories.performance : null, functional: typeof categories.functional === 'boolean' ? categories.functional : null, is_user_action_completed: typeof raw?.isUserActionCompleted === 'boolean' ? raw.isUserActionCompleted : null } : null; } catch { /* Runtime access is optional. */ }
+    const onetrust = { active_group_ids: typeof w.OnetrustActiveGroups === 'string' ? w.OnetrustActiveGroups.split(',').filter((value: string) => /^[A-Za-z0-9_-]{1,80}$/.test(value)).slice(0, 200) : [], provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => value === 'OneTrustGroupsUpdated' || value === 'OTConsentApplied').slice(0, 20) : [] };
+    const didomiStatus = () => {
+      try {
+        const status = typeof w.Didomi?.getCurrentUserStatus === 'function' ? w.Didomi.getCurrentUserStatus() : null;
+        let enabled = 0; let disabled = 0;
+        const visit = (value: unknown, depth = 0) => { if (depth > 5 || !value) return; if (value === true) { enabled += 1; return; } if (value === false) { disabled += 1; return; } if (typeof value === 'object') Object.values(value as Record<string, unknown>).slice(0, 200).forEach((item) => visit(item, depth + 1)); };
+        visit(status?.purposes || status?.purpose || status);
+        const total = enabled + disabled; const decision = total === 0 ? 'ambiguous' : disabled === total ? 'rejected' : enabled === total ? 'accepted' : 'partial';
+        return { current_user_status: { decision, enabled_purpose_count: Math.min(enabled, 200), disabled_purpose_count: Math.min(disabled, 200) }, notice_visible: typeof w.Didomi?.notice?.isVisible === 'function' ? Boolean(w.Didomi.notice.isVisible()) : null };
+      } catch { return { current_user_status: null, notice_visible: null }; }
+    };
+    const didomi = didomiStatus();
     let shopify: Record<string, unknown> | null = null;
     try { const privacy = w.Shopify?.customerPrivacy; if (privacy) { const methods = ['currentVisitorConsent', 'analyticsProcessingAllowed', 'marketingAllowed', 'preferencesProcessingAllowed', 'saleOfDataAllowed', 'shouldShowBanner', 'getRegion'].filter((name) => typeof privacy[name] === 'function'); const consent = typeof privacy.currentVisitorConsent === 'function' ? privacy.currentVisitorConsent() : null; shopify = { shopify_object_present: Boolean(w.Shopify), customer_privacy_object_present: true, runtime_methods: methods, visitor_consent: consent ? { analytics: consent.analytics === 'yes' || consent.analytics === 'no' ? consent.analytics : '', marketing: consent.marketing === 'yes' || consent.marketing === 'no' ? consent.marketing : '', preferences: consent.preferences === 'yes' || consent.preferences === 'no' ? consent.preferences : '', sale_of_data: consent.sale_of_data === 'yes' || consent.sale_of_data === 'no' ? consent.sale_of_data : '' } : null, processing_allowed: { analytics: typeof privacy.analyticsProcessingAllowed === 'function' ? Boolean(privacy.analyticsProcessingAllowed()) : null, marketing: typeof privacy.marketingAllowed === 'function' ? Boolean(privacy.marketingAllowed()) : null, preferences: typeof privacy.preferencesProcessingAllowed === 'function' ? Boolean(privacy.preferencesProcessingAllowed()) : null, sale_of_data: typeof privacy.saleOfDataAllowed === 'function' ? Boolean(privacy.saleOfDataAllowed()) : null }, should_show_banner: typeof privacy.shouldShowBanner === 'function' ? Boolean(privacy.shouldShowBanner()) : null, region_available: typeof privacy.getRegion === 'function' ? Boolean(privacy.getRegion()) : null }; } } catch { /* Runtime access is optional. */ }
     const commandState = (value: unknown) => {
@@ -126,8 +148,8 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     let cookieNames: string[] = []; let storageKeys: string[] = [];
     try { cookieNames = document.cookie.split(';').map((part) => part.trim().split('=')[0]).filter(Boolean).slice(0, 100); } catch { /* Opaque origins have no cookie jar. */ }
     try { storageKeys = Object.keys(localStorage).slice(0, 100); } catch { /* Opaque origins have no Web Storage. */ }
-    return { globals: globals.filter((name) => Boolean(w[name])), assets: Array.from(document.scripts).map((script) => script.src).filter(Boolean).slice(0, 200), cookie_names: cookieNames, storage_keys: storageKeys, observations: selectors.map((selector) => { const element = document.querySelector(selector) as HTMLButtonElement | null; return element ? { selector, visible: visible(element), enabled: !element.disabled, text: String(element.getAttribute('aria-label') || element.textContent || '').slice(0, 120) } : null; }).filter(Boolean), cookiebot, cookieyes, shopify, consent_commands: commands, generic };
-  }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS, consentCommandKey: CONSENT_COMMAND_OBSERVATIONS_KEY }) as Promise<BrowserConsentFacts>;
+    return { globals: globals.filter((name) => Boolean(w[name])), assets: Array.from(document.scripts).map((script) => script.src).filter(Boolean).slice(0, 200), cookie_names: cookieNames, storage_keys: storageKeys, observations: selectors.map((selector) => { const element = document.querySelector(selector) as HTMLButtonElement | null; return element ? { selector, visible: visible(element), enabled: !element.disabled, text: String(element.getAttribute('aria-label') || element.textContent || '').slice(0, 120) } : null; }).filter(Boolean), cookiebot, cookieyes, onetrust, didomi, provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => typeof value === 'string').slice(0, 20) : [], shopify, consent_commands: commands, generic };
+  }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS, consentCommandKey: CONSENT_COMMAND_OBSERVATIONS_KEY, providerEventKey: PROVIDER_EVENT_OBSERVATIONS_KEY }) as Promise<BrowserConsentFacts>;
 }
 
 const observation = (facts: BrowserConsentFacts, selector: string) => facts.observations.find((item) => item.selector === selector);
@@ -136,15 +158,17 @@ const storage = (facts: BrowserConsentFacts) => [...facts.cookie_names.map((key_
 const click = (page: Page, selector: string) => page.locator(selector).first().click().then(() => true).catch(() => false);
 
 /** Builds transient adapter contexts; the adapters retain all provider semantics. */
-export function buildProviderContexts(page: Page, facts: BrowserConsentFacts, framework: { tcf: boolean; gpp: boolean }) {
-  const common = { asset_urls: facts.assets, cookies: facts.cookie_names.map((name) => ({ name, exists: true })), storage: storage(facts), tcf_active: framework.tcf, gpp_active: framework.gpp };
+export function buildProviderContexts(page: Page, facts: BrowserConsentFacts, framework: ConsentFrameworkObservations) {
+  const common = { asset_urls: facts.assets, cookies: facts.cookie_names.map((name) => ({ name, exists: true })), storage: storage(facts), tcf_active: framework.tcf.lifecycle !== 'absent', gpp_active: framework.gpp.lifecycle !== 'absent' };
+  const tcf = framework.tcf.latest_event;
+  const sourcepointFramework = { tcf_present: framework.tcf.lifecycle !== 'absent', tcf_event_status: tcf?.event_status || undefined, tcf_purpose_decision: tcf ? tcfAggregateDecision(tcf.purpose_consents) : undefined, tcf_vendor_decision: tcf ? tcfAggregateDecision(tcf.vendor_consents) : undefined, gpp_present: framework.gpp.lifecycle !== 'absent' };
   return new Map<CmpAdapterProviderId, unknown>([
-    ['onetrust', { ...common, window_globals: facts.globals, surfaces: ONETRUST_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: Object.values(ONETRUST_DOCUMENTED_CONTROLS).map((selector) => control(facts, selector)), public_methods: ['AllowAll', 'RejectAll', 'ToggleInfoDisplay'].filter((method) => facts.globals.includes('OneTrust') && method === 'RejectAll'), invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).OneTrust; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
+    ['onetrust', { ...common, window_globals: facts.globals, surfaces: ONETRUST_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: Object.values(ONETRUST_DOCUMENTED_CONTROLS).map((selector) => control(facts, selector)), public_methods: ['AllowAll', 'RejectAll', 'ToggleInfoDisplay'].filter((method) => facts.globals.includes('OneTrust') && method === 'RejectAll'), active_group_ids: facts.onetrust?.active_group_ids, provider_events: facts.onetrust?.provider_events, invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).OneTrust; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
     ['cookiebot', { ...common, window_globals: facts.globals, surfaces: [{ selector: COOKIEBOT_STANDARD_ROOT, visible: Boolean(observation(facts, COOKIEBOT_STANDARD_ROOT)?.visible) }], controls: Object.values(COOKIEBOT_STANDARD_CONTROLS).map((selector) => control(facts, selector)), runtime: facts.cookiebot, invoke_control: (selector: string) => click(page, selector) }],
-    ['usercentrics', { ...common, uc_ui_type: facts.globals.includes('UC_UI') ? 'object' : 'undefined', surfaces: [{ selector: USERCENTRICS_STANDARD_ROOT, visible: Boolean(observation(facts, USERCENTRICS_STANDARD_ROOT)?.visible) }], controls: [], legacy_globals: facts.globals, invoke_control: (selector: string) => click(page, selector) }],
-    ['didomi', { ...common, window_globals: facts.globals, surfaces: DIDOMI_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: [], public_methods: facts.globals.includes('Didomi') ? ['setUserDisagreeToAll'] : [], runtime: null, invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).Didomi; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
+    ['usercentrics', { ...common, uc_ui_type: facts.globals.includes('UC_UI') ? 'object' : 'undefined', surfaces: [{ selector: USERCENTRICS_STANDARD_ROOT, visible: Boolean(observation(facts, USERCENTRICS_STANDARD_ROOT)?.visible), shadow_mode: 'unknown' }], controls: facts.generic.controls.filter((item) => item.surface_id && (item.accessible_name || '')).map((item, index) => ({ id: `${USERCENTRICS_STANDARD_ROOT} button:nth-of-type(${index + 1})`, semantic_action: semanticActionForConsentLabel(item.accessible_name) })).filter((item): item is { id: string; semantic_action: 'accept_all' | 'reject_all' | 'open_preferences' } => item.semantic_action === 'accept_all' || item.semantic_action === 'reject_all' || item.semantic_action === 'open_preferences').map((item) => ({ ...item, visible: true, enabled: true, actionable: true, within_confirmed_usercentrics_surface: true, role: 'button' as const })), legacy_globals: facts.globals, invoke_control: (selector: string) => click(page, selector) }],
+    ['didomi', { ...common, window_globals: facts.globals, surfaces: DIDOMI_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: [], public_methods: facts.globals.includes('Didomi') ? ['getCurrentUserStatus', 'setUserDisagreeToAll'] : [], runtime: facts.didomi, provider_events: facts.provider_events, invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).Didomi; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
     ['cookieyes', { ...common, runtime_functions: facts.globals.includes('CookieYes') ? ['performBannerAction', 'getCkyConsent'] : [], surfaces: [{ selector: COOKIEYES_STANDARD_ROOT, visible: Boolean(observation(facts, COOKIEYES_STANDARD_ROOT)?.visible) }], controls: Object.values(COOKIEYES_STABLE_CONTROLS).map((selector) => control(facts, selector)), consent: facts.cookieyes, persistence: storage(facts), invoke_control: (selector: string) => click(page, selector), invoke_public_action: (action: string) => page.evaluate((value) => { const fn = (window as any).performBannerAction; if (typeof fn !== 'function') return false; fn(value); return true; }, action).catch(() => false) }],
-    ['sourcepoint', { ...common, window_globals: facts.globals, surfaces: [], controls: [], active_surface: null, storage: storage(facts) }]
+    ['sourcepoint', { ...common, window_globals: facts.globals, surfaces: [], controls: [], active_surface: null, framework: sourcepointFramework, storage: storage(facts) }]
   ]);
 }
 

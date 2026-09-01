@@ -1,4 +1,4 @@
-import { ConsentAuditCodes, type ConsentAuditCode } from './domain-types';
+import { ConsentAuditCodes, type ConsentAuditCode, type ConsentDecision, type FrameworkState, type MechanismResult } from './domain-types';
 
 /**
  * Provider-neutral observations of the IAB framework APIs. These records are
@@ -73,6 +73,77 @@ export interface ConsentFrameworkObservations {
   tcf: TcfFrameworkObservation;
   gpp: GppFrameworkObservation;
   usp: UspFrameworkObservation;
+}
+
+/**
+ * Merges phase snapshots without interpreting a framework as a CMP.  Browser
+ * bridges may be sampled at baseline, after an action, and after a reload; the
+ * observer remains the single owner of which semantic state survives.
+ */
+export function mergeConsentFrameworkObservations(
+  earlier: ConsentFrameworkObservations,
+  later: ConsentFrameworkObservations
+): ConsentFrameworkObservations {
+  const mergeCodes = (left: ConsentAuditCode[], right: ConsentAuditCode[]) => [...new Set([...left, ...right])];
+  return {
+    tcf: {
+      present: earlier.tcf.present || later.tcf.present,
+      lifecycle: later.tcf.lifecycle === 'absent' ? earlier.tcf.lifecycle : later.tcf.lifecycle,
+      ping: later.tcf.ping || earlier.tcf.ping,
+      latest_event: later.tcf.latest_event || earlier.tcf.latest_event,
+      event_count: earlier.tcf.event_count + later.tcf.event_count,
+      reason_codes: mergeCodes(earlier.tcf.reason_codes, later.tcf.reason_codes)
+    },
+    gpp: {
+      present: earlier.gpp.present || later.gpp.present,
+      lifecycle: later.gpp.lifecycle === 'absent' ? earlier.gpp.lifecycle : later.gpp.lifecycle,
+      ping: later.gpp.ping || earlier.gpp.ping,
+      event_count: earlier.gpp.event_count + later.gpp.event_count,
+      reason_codes: mergeCodes(earlier.gpp.reason_codes, later.gpp.reason_codes)
+    },
+    usp: {
+      present: earlier.usp.present || later.usp.present,
+      mode: later.usp.present ? later.usp.mode : earlier.usp.mode,
+      reason_codes: mergeCodes(earlier.usp.reason_codes, later.usp.reason_codes)
+    }
+  };
+}
+
+/** Converts normalized framework observations into the public V2 summary. */
+export function frameworkStateFromObservations(value: ConsentFrameworkObservations): FrameworkState {
+  const presence = (lifecycle: FrameworkLifecycle) => lifecycle === 'absent' ? 'not_present' as const : lifecycle === 'stub_present' ? 'stub_present' as const : 'present' as const;
+  const gpp = value.gpp.ping;
+  return {
+    tcf: presence(value.tcf.lifecycle),
+    gpp: presence(value.gpp.lifecycle),
+    usp: value.usp.present ? 'present' : 'not_present',
+    evidence: [
+      `tcf:${value.tcf.lifecycle}`,
+      `gpp:${value.gpp.lifecycle}`,
+      ...(gpp ? [`gpp_cmp_status:${gpp.cmp_status}`, `gpp_cmp_display_status:${gpp.cmp_display_status}`, `gpp_signal_status:${gpp.signal_status}`, `gpp_applicable_sections:${gpp.applicable_sections.join(',')}`] : []),
+      ...(value.usp.present ? ['usp:legacy_read_only'] : [])
+    ],
+    reason_codes: [...new Set([...value.tcf.reason_codes, ...value.gpp.reason_codes, ...value.usp.reason_codes])]
+  };
+}
+
+/** Framework presence is one additive mechanism, never provider attribution. */
+export function frameworkMechanisms(value: FrameworkState): MechanismResult[] {
+  return value.tcf === 'not_present' && value.gpp === 'not_present' && value.usp === 'not_present'
+    ? []
+    : [{ mechanism: 'framework', detection: { status: 'verified', evidence: value.evidence, reason_codes: value.reason_codes }, provider: null, adapter_maturity: 'documentation_supported' }];
+}
+
+/**
+ * Turns the already-sanitized aggregate TCF observation into a decision for
+ * consumers such as Sourcepoint.  This deliberately never reads a TC string
+ * or individual purpose/vendor identifiers.
+ */
+export function tcfAggregateDecision(summary: ConsentBooleanSummary): ConsentDecision {
+  if (!summary.known || summary.total_count === 0) return 'ambiguous';
+  if (summary.denied_count === summary.total_count) return 'rejected';
+  if (summary.granted_count === summary.total_count) return 'accepted';
+  return 'partial';
 }
 
 export interface FrameworkObserver<T> {

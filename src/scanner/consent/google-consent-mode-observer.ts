@@ -1,4 +1,4 @@
-import { ConsentAuditCodes, type ConsentAuditCode } from './domain-types';
+import { ConsentAuditCodes, type ConsentAuditCode, type MechanismResult } from './domain-types';
 
 export const GOOGLE_CONSENT_FIELDS = [
   'ad_storage',
@@ -78,6 +78,22 @@ export interface GoogleConsentModeResult {
 export interface GoogleConsentModeObserverOptions {
   max_commands?: number;
   max_network_observations?: number;
+}
+
+/** Produces the additive Consent V2 mechanism owned by the GCM observer. */
+export function googleConsentModeMechanism(result: GoogleConsentModeResult): MechanismResult[] {
+  if (result.lifecycle === 'not_observed' && result.network.length === 0) return [];
+  const lifecycleObserved = result.lifecycle !== 'not_observed';
+  return [{
+    mechanism: 'consent_mode',
+    detection: {
+      status: lifecycleObserved ? 'verified' : 'inconclusive',
+      evidence: [`gcm:${result.classification}`, `gcm_lifecycle:${result.lifecycle}`],
+      reason_codes: result.reason_codes
+    },
+    provider: null,
+    adapter_maturity: 'documentation_supported'
+  }];
 }
 
 type PlainRecord = Record<string, unknown>;

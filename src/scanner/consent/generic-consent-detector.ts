@@ -134,6 +134,11 @@ function normalizedControlAction(control: GenericConsentControl, labels: ReturnT
   return null;
 }
 
+/** Shared localized semantic lexicon for adapters that have a confirmed surface. */
+export function semanticActionForConsentLabel(value: string): Exclude<ConsentActionType, 'set_category' | 'close'> | null {
+  return normalizedControlAction({ surface_id: 'semantic-layer', visible: true, enabled: true, actionable: true, accessible_name: value }, configuredActionLabels(DEFAULT_GENERIC_CONSENT_DETECTOR_CONFIG));
+}
+
 function isActionable(control: GenericConsentControl) {
   return control.visible && control.enabled && control.actionable;
 }

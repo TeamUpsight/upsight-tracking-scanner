@@ -75,6 +75,8 @@ export interface ActionPlannerInput {
   category?: ConsentCategory | null;
   provider_api_reject_available?: boolean;
   user_facing_reject_available?: boolean;
+  /** User-path audits prioritize a stable visible control over a synthetic API. */
+  prefer_user_facing?: boolean;
 }
 
 export interface ActionTargetSnapshot {
@@ -123,8 +125,11 @@ export interface RejectStateMachinePlan {
   reason_codes: ConsentAuditCode[];
 }
 
-function uniqueStrategies(strategies: readonly ConsentInteractionStrategy[]) {
-  return [...new Set(strategies)].sort((left, right) => INTERACTION_STRATEGY_PRIORITY.indexOf(left) - INTERACTION_STRATEGY_PRIORITY.indexOf(right));
+function uniqueStrategies(strategies: readonly ConsentInteractionStrategy[], preferUserFacing = false) {
+  const priority = preferUserFacing
+    ? ['provider_selector', 'semantic_accessibility', 'normalized_localized_label', 'generic_high_confidence', 'keyboard_accessible_control', 'documented_provider_api'] as const
+    : INTERACTION_STRATEGY_PRIORITY;
+  return [...new Set(strategies)].sort((left, right) => priority.indexOf(left) - priority.indexOf(right));
 }
 
 function originFor(strategy: ConsentInteractionStrategy): InteractionOrigin {
@@ -162,7 +167,7 @@ function result(
 
 /** Creates a bounded, strategy-ordered plan. It does not locate or interact with a target. */
 export function createActionPlan(input: ActionPlannerInput): ActionPlan {
-  const eligibleStrategies = uniqueStrategies(input.eligible_strategies).filter(
+  const eligibleStrategies = uniqueStrategies(input.eligible_strategies, input.prefer_user_facing).filter(
     (strategy) => strategy !== 'keyboard_accessible_control' || (input.target.target_ref !== null && input.target.accessible_control)
   );
   return {
