@@ -79,6 +79,6 @@ When architecture, commands, domain ownership, invariants, or known risks change
 
 - After completing a code change, inspect the diff, run the proportionate validation above, and create a Git commit before handoff unless the user explicitly asks not to commit.
 - Stage only files changed for the current task; never include pre-existing or unrelated working-tree changes. Use `git diff --check` before staging.
-- Format every commit with a summary (the subject line) that names the affected domain(s) or the Codex task/chat name, followed by a short description in the commit body explaining the change and its purpose. Keep the summary concise and imperative.
+- Format every commit with a summary (the subject line) and a short description in the body. When the prompt begins with a meaningful heading—such as `Work Package ##...`—use that heading as the summary. Otherwise, use the affected domain(s) or Codex task/chat name followed by a concise description. The body must explain the change and its purpose.
 - Push the new commit to the configured upstream after committing when remote access is available. If a push fails, keep the local commit intact and report the exact blocker plus the command needed to retry.
 - Never amend, rebase, force-push, or commit secrets, generated artifacts, `.env` files, or credentials unless the user explicitly authorizes that action.
