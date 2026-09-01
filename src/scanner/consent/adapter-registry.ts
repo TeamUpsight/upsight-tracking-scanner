@@ -99,6 +99,8 @@ type MaybePromise<T> = T | Promise<T>;
 export interface ConsentProviderAdapter<Id extends string> {
   metadata: ConsentAdapterMetadata<Id>;
   detect(input: AdapterDetectionInput): MaybePromise<AdapterDetectionResult>;
+  /** Converts a transient browser context into provider-owned evidence. */
+  getProviderEvidence?: (context: unknown) => readonly ProviderEvidenceSignal[];
   getState?: (input: AdapterOperationInput) => MaybePromise<AdapterOperationResult<ConsentState>>;
   getBannerState?: (input: AdapterOperationInput) => MaybePromise<AdapterOperationResult<BannerState>>;
   getAvailableActions?: (input: AdapterOperationInput) => MaybePromise<AdapterOperationResult<AvailableAction[]>>;
@@ -237,6 +239,14 @@ export class ConsentAdapterRegistry<Id extends string> {
     const methodName = OPERATION_METHODS[capability];
     const operation = adapter[methodName] as ((value: AdapterOperationInput) => MaybePromise<AdapterOperationResult<T>>) | undefined;
     return operation ? operation(input) : explicitUnsupported<T>(capabilityResult.maturity);
+  }
+
+  collectProviderEvidence(contexts: ReadonlyMap<Id, unknown>): ProviderEvidenceSignal[] {
+    return this.knownIds().flatMap((id) => {
+      const adapter = this.get(id);
+      const context = contexts.get(id);
+      return adapter?.getProviderEvidence && context ? [...adapter.getProviderEvidence(context)] : [];
+    });
   }
 }
 

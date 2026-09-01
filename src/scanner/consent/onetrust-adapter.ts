@@ -310,6 +310,7 @@ export const oneTrustAdapter: ConsentProviderAdapter<'onetrust'> = {
       persistence_evidence: 'supporting_only'
     }
   },
+  getProviderEvidence(context) { return oneTrustProviderEvidence(context as OneTrustAdapterContext); },
   detect(input: AdapterDetectionInput) {
     const candidate = scoreProviderCandidates(input.evidence).find((item) => item.provider_id === 'onetrust');
     if (!candidate) return { status: 'not_detected', evidence: [], reason_codes: [] };

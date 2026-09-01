@@ -339,6 +339,7 @@ export const sourcepointAdapter: ConsentProviderAdapter<'sourcepoint'> = {
       persistence_evidence: 'supporting_only'
     }
   },
+  getProviderEvidence(context) { return sourcepointProviderEvidence(context as SourcepointAdapterContext); },
   detect(input: AdapterDetectionInput) {
     const candidate = scoreProviderCandidates(input.evidence).find((item) => item.provider_id === 'sourcepoint');
     if (!candidate) return { status: 'not_detected', evidence: [], reason_codes: [] };

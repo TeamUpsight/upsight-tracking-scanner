@@ -325,6 +325,7 @@ export const cookiebotAdapter: ConsentProviderAdapter<'cookiebot'> = {
       persistence_evidence: 'supporting_only'
     }
   },
+  getProviderEvidence(context) { return cookiebotProviderEvidence(context as CookiebotAdapterContext); },
   detect(input: AdapterDetectionInput) {
     const candidate = scoreProviderCandidates(input.evidence).find((item) => item.provider_id === 'cookiebot');
     if (!candidate) return { status: 'not_detected', evidence: [], reason_codes: [] };

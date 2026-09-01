@@ -331,6 +331,7 @@ export const didomiAdapter: ConsentProviderAdapter<'didomi'> = {
       persistence_evidence: 'supporting_only'
     }
   },
+  getProviderEvidence(context) { return didomiProviderEvidence(context as DidomiAdapterContext); },
   detect(input: AdapterDetectionInput) {
     const candidate = scoreProviderCandidates(input.evidence).find((item) => item.provider_id === 'didomi');
     if (!candidate) return { status: 'not_detected', evidence: [], reason_codes: [] };

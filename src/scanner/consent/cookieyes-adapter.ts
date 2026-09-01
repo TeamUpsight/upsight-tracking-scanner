@@ -341,6 +341,7 @@ export const cookieYesAdapter: ConsentProviderAdapter<'cookieyes'> = {
       persistence_evidence: 'supporting_only'
     }
   },
+  getProviderEvidence(context) { return cookieYesProviderEvidence(context as CookieYesAdapterContext); },
   detect(input: AdapterDetectionInput) {
     const candidate = scoreProviderCandidates(input.evidence).find((item) => item.provider_id === 'cookieyes');
     if (!candidate) return { status: 'not_detected', evidence: [], reason_codes: [] };

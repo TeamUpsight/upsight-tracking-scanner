@@ -293,6 +293,7 @@ export const usercentricsAdapter: ConsentProviderAdapter<'usercentrics'> = {
       persistence_evidence: 'supporting_only'
     }
   },
+  getProviderEvidence(context) { return usercentricsProviderEvidence(context as UsercentricsAdapterContext); },
   detect(input: AdapterDetectionInput) {
     const candidate = scoreProviderCandidates(input.evidence).find((item) => item.provider_id === 'usercentrics');
     if (!candidate) return { status: 'not_detected', evidence: [], reason_codes: [] };
