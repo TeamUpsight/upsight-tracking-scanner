@@ -17,6 +17,17 @@ describe('Consent V2 rollout controls', () => {
     expect(controls.providers.onetrust.detection_enabled).toBe(true);
   });
 
+  it('disables the V2 session and every action cohort when the global flag is false', () => {
+    const controls = consentV2RolloutControls({
+      CONSENT_V2_ENABLED: 'false',
+      CONSENT_V2_ACTIONS_ENABLED: 'true',
+      CONSENT_ONETRUST_ACTIONS_ENABLED: 'true',
+      CONSENT_V2_ACTION_SAMPLE_PERCENT: '100'
+    });
+    expect(controls.enabled).toBe(false);
+    expect(consentV2ActionsEnabledFor(controls, 'onetrust', 'storefront.example')).toBe(false);
+  });
+
   it('requires global, provider, and sample controls before permitting an action', () => {
     const controls = consentV2RolloutControls({
       CONSENT_V2_ACTIONS_ENABLED: 'true',

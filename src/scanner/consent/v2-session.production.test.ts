@@ -121,6 +121,15 @@ describe('Consent V2 production session wiring', () => {
     expect(mapConsentV2ToExisting(result.result, { geo: 'EU', page_valid: true, tracking_before_interaction: false })).toMatchObject({ cmp_provider: 'OneTrust' });
   });
 
+  it('does not execute an interaction when the V2 rollout is disabled', async () => {
+    const result = await audit(`<script>window.OneTrust={RejectAll(){window.apiCalled=true;}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`, {
+      ...input,
+      rollout: { ...actionRollout, enabled: false }
+    });
+    expect(result.telemetry.enabled).toBe(false);
+    expect(result.result.interactions).toEqual([]);
+  });
+
   it('OT-05 treats close as dismissal rather than a Reject action', async () => {
     const result = await audit(`<script>window.OneTrust={RejectAll(){}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button aria-label="Close">×</button></div>`);
     expect(result.result.interactions).toEqual([]);

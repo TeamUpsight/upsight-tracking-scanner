@@ -21,13 +21,14 @@ import { createBrowserQlHandoff } from './browserless-bql';
 import { attachAuthorizedAccessHeader } from './authorized-access';
 import { decideAccessTransition, type AccessIdentity } from './access-state-machine';
 import { detectCMP, type CmpRawEvidence } from './consent/detect-cmp';
-import { verifyConsentAcceptance, verifyConsentRejection, type ConsentStateSnapshot } from './consent/consent-state';
+import { verifyConsentAcceptance, type ConsentStateSnapshot } from './consent/consent-state';
 import {
   consentNavigationReadiness,
   createFreshConsentContext,
   navigateFreshConsentContext
 } from './consent/fresh-context';
 import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
+import { consentV2RolloutControls } from './consent/rollout-controls';
 import { prepareConsentV2Session, runConsentV2Session, type ConsentV2SessionOutput } from './consent/v2-session';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { isValidStorefrontStatus, resolveAccessDecision, resolveHostnameEvidence, type AccessDecision } from './navigation';
@@ -914,6 +915,7 @@ export async function runStorefrontAudit(
   const proxyPortOffset = reserveProxyPortOffset(geo);
   const selectedModules = selectedAuditModules(params.selected_modules);
   const consentSelected = selectedModules.includes('consent');
+  const consentV2Enabled = consentV2RolloutControls().enabled;
   const trackingSelected = selectedModules.includes('tracking');
   const serverSelected = selectedModules.includes('server_side');
   const evidenceCollector = new EvidenceCollector({
@@ -1799,8 +1801,7 @@ export async function runStorefrontAudit(
 
     let cmp: ReturnType<typeof detectCMP>;
     const consentStarted = Date.now();
-    let consentRejectionPending = false;
-    if (consentSelected) {
+    if (consentSelected && consentV2Enabled) {
       evidence.consent.executed = true;
       currentPhase = 'consent_fresh_initial_load';
       let consentCapture: Awaited<ReturnType<typeof prepareConsentV2Session>> | null = null;
@@ -1869,15 +1870,18 @@ export async function runStorefrontAudit(
           error_family: runtimeErrorFamily(error)
         });
       }
-      // Consent V2 owns its fresh-context interaction, semantic verification,
-      // and same-context reload. Product and Server-Side retain their own page.
-      consentRejectionPending = false;
     } else {
-      // Tracking may enable an existing CMP, but this deliberately does not execute a Consent audit.
+      // The legacy detector remains the feature-disabled fallback. Its interaction
+      // branch was removed, so this cannot run alongside Consent V2 actions.
       const cmpRaw = await captureCmpRawEvidence(homepage!);
       cmpRaw.network_hosts = [...cmpNetworkSignals];
       cmp = detectCMP(cmpRaw);
-      addTrace('consent_module_skipped');
+      if (consentSelected) {
+        evidence.consent.executed = true;
+        addTrace('consent_v2_disabled_legacy_fallback');
+      } else {
+        addTrace('consent_module_skipped');
+      }
     }
 
     const productStarted = Date.now();
@@ -2338,51 +2342,6 @@ export async function runStorefrontAudit(
       addTrace('tracking_module_skipped');
     }
 
-    // Reject interaction is deliberately after Tracking so it cannot erase the
-    // initial product/tracking evidence when both modules are selected.
-    if (consentRejectionPending) {
-      currentPhase = 'consent_reject';
-      evidence.consent.interaction_attempted = true;
-      try {
-        const before = await withinPhaseBudget('consent_reject_state', productConsentBudgetMs, () => captureConsentState(consentHomepage!));
-        const actionTaken = await withinPhaseBudget(
-          'consent_reject_action',
-          productConsentBudgetMs,
-          async () => clickConsentChoice(consentHomepage!, 'reject') || await callConsentApi(consentHomepage!, cmp.provider, 'reject')
-        );
-        if (actionTaken) {
-          await wait(consentTimings.postActionSettleMs, consentHomepage);
-          const after = await withinPhaseBudget('consent_reject_state', productConsentBudgetMs, () => captureConsentState(consentHomepage!));
-          const verified = verifyConsentRejection(cmp.provider, before, after);
-          evidence.consent.rejection_verified = verified.verified;
-          addTrace(verified.verified ? 'reject_action_verified' : 'reject_action_not_verified', { evidence: verified.evidence });
-        } else {
-          addTrace('reject_action_not_available', { provider: cmp.provider });
-        }
-      } catch (error) {
-        if (error instanceof ScanTermination) throw error;
-        finalStatus = 'partial';
-        evidence.runtime.failed_phase ||= 'consent_reject';
-        addTrace('consent_reject_inconclusive', {
-          reason_code: isPhaseTimeout(error) ? 'CONSENT_REJECT_TIMEOUT' : 'CONSENT_REJECT_FAILED',
-          error_family: runtimeErrorFamily(error)
-        });
-      }
-      if (evidence.consent.rejection_verified) {
-        currentPhase = 'consent_post_reject';
-        try {
-          const postRejectResponse = await consentHomepage!.reload({ waitUntil: 'commit', timeout: 15_000 });
-          await waitForDomContentSoft(consentHomepage!, 'consent_post_reject', consentTimings.providerReadinessMs);
-          if (!isValidStorefrontStatus(postRejectResponse?.status() || null)) throw new Error('Post-reject reload did not return a valid storefront');
-          await wait(consentTimings.reloadSettleMs, consentHomepage);
-          evidence.consent.post_reject_observation_completed = true;
-        } catch (error) {
-          if (error instanceof ScanTermination) throw error;
-          finalStatus = 'partial';
-          addTrace('post_reject_observation_failed', { error_family: runtimeErrorFamily(error) });
-        }
-      }
-    }
     evidence.runtime.module_durations_ms.consent = Date.now() - consentStarted;
 
     const serverStarted = Date.now();
