@@ -68,7 +68,7 @@ The `CONSENT_V2_ENABLED=false` fallback uses the legacy detector only; it must n
 | persistence verifier | `persistence-verification.ts` | `v2-session.ts` | production session cases invoke same-context reload; no dedicated asserted browser case | incomplete |
 | tracking consistency | `tracking-consistency.ts` | `v2-session.ts` | pre-choice and GCM contradiction cases | complete |
 | unknown fingerprinting | `unknown-cmp-fingerprint.ts` | `v2-session.ts` telemetry | custom-banner case does not assert fingerprint | incomplete |
-| compatibility mapper | `compatibility-mapper.ts` | `audit-runner.ts` finalization | OneTrust mapper assertion | complete |
-| rollout controls | `rollout-controls.ts` | `audit-runner.ts` and `v2-session.ts` | disabled-rollout production-session case | complete |
+| compatibility mapper | `compatibility-mapper.ts` | `audit-runner.ts` finalization | OneTrust mapper assertion exercises the same mapper, but not full runner finalization | incomplete for full runner E2E |
+| rollout controls | `rollout-controls.ts` | `audit-runner.ts` and `v2-session.ts` | disabled-rollout production-session case; legacy runner fallback is not browser-exercised | incomplete for full runner E2E |
 
-The remaining incomplete rows are release gates: do not enable actions until they have direct production-session browser assertions.
+The remaining incomplete rows are release gates: do not enable actions until they have direct production-session browser assertions. The two full-runner rows also need a safe, approved Browserless integration fixture before they can be called end-to-end covered.
