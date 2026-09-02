@@ -59,7 +59,7 @@ async function auditNavigation(html: string, accessBlocked = false, sessionInput
   }
 }
 
-async function auditSourcepoint(preferences = false) {
+async function auditSourcepoint(preferences = false, contradictory = false) {
   const iframe = createServer((_request, response) => response.end(`<!doctype html>${preferences
     ? '<button class="sp_choice_type_12" onclick="document.body.innerHTML=\'<button class=&quot;sp_choice_type_REJECT_ALL&quot; onclick=&quot;parent.postMessage(\\\'sourcepoint-reject\\\', \\\'*\\\')&quot;>Reject all</button>\'">Preferences</button>'
     : '<button class="sp_choice_type_13" onclick="parent.postMessage(\'sourcepoint-reject\', \'*\')">Reject</button>'}`));
@@ -67,12 +67,12 @@ async function auditSourcepoint(preferences = false) {
   const iframeAddress = iframe.address();
   if (!iframeAddress || typeof iframeAddress === 'string') throw new Error('Sourcepoint frame server did not expose a TCP port.');
   const top = createServer((_request, response) => response.end(`<!doctype html><script>
-    window._sp_={}; window._sp_queue=[]; let rejected=false;
-    window.addEventListener('message', (event) => { if (event.data === 'sourcepoint-reject') rejected=true; });
+    window._sp_={}; window._sp_queue=[]; let listener; const contradictory=${contradictory};
+    const state=()=>{const rejected=localStorage.getItem('sourcepoint-rejected')==='true'; const granted=contradictory||!rejected; return {listenerId:1,eventStatus:rejected?'useractioncomplete':'tcloaded',cmpLoaded:true,apiVersion:'2.2',gdprApplies:true,purpose:{consents:{1:granted,2:granted}},vendor:{consents:{1:granted,2:granted}}};};
+    window.addEventListener('message', (event) => { if (event.data === 'sourcepoint-reject') { localStorage.setItem('sourcepoint-rejected','true'); setTimeout(()=>listener?.(state(),true),0); } });
     window.__tcfapi=(command, version, callback) => {
-      const state={eventStatus:rejected?'useractioncomplete':'tcloaded',cmpLoaded:true,apiVersion:'2.2',gdprApplies:true,purpose:{consents:{1:!rejected,2:!rejected}},vendor:{consents:{1:!rejected,2:!rejected}}};
       if(command==='ping') callback({cmpLoaded:true,apiVersion:'2.2',gdprApplies:true},true);
-      if(command==='addEventListener') callback(state,true);
+      if(command==='addEventListener') { listener=callback; callback(state(),true); }
     };
   </script><iframe id="sp_message_iframe_test" src="http://127.0.0.1:${iframeAddress.port}/"></iframe>`));
   await new Promise<void>((resolve) => top.listen(0, '127.0.0.1', resolve));
@@ -148,15 +148,17 @@ describe('Consent V2 production session wiring', () => {
       expect(semanticActionForConsentLabel('Alle ablehnen')).toBe('reject_all');
     } finally { await page.close(); }
   });
-  it('VER-CB-01 wires Cookiebot runtime rejection through the production verifier', async () => {
-    const result = await audit(`<script>
-      window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};
-      function decline(){Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consented=false;Cookiebot.consent={preferences:false,statistics:false,marketing:false};}
-    </script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline()">Decline</button></div>`, { ...input, rollout: actionRollout });
+  it('VER-CB-01 verifies Cookiebot Reject and preserves its semantic state after reload', async () => {
+    const result = await auditNavigation(`<script>
+      const rejected=document.cookie.includes('CookieConsent=present');
+      window.Cookiebot={hasResponse:rejected,consented:false,declined:rejected,consent:{preferences:rejected?false:null,statistics:rejected?false:null,marketing:rejected?false:null}};
+      function decline(){localStorage.setItem('cookiebot-rejected','true');document.cookie='CookieConsent=present; path=/';Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consented=false;Cookiebot.consent={preferences:false,statistics:false,marketing:false};}
+    </script><script type="application/json" src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline()">Decline</button></div>`, false, { ...input, rollout: actionRollout });
     expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
     expect(result.result.rejection_verification.status).toBe('verified');
+    expect(result.result.persistence).toMatchObject({ status: 'confirmed', post_reload_observation_completed: true, semantic_channels: { provider: 'persisted' } });
     expect(result.telemetry.timeline?.user_choice_at).not.toBeNull();
-  });
+  }, 20_000);
 
   it('VER-OT-01 prefers the visible OneTrust Reject control over its API capability', async () => {
     const result = await audit(`<script>
@@ -165,6 +167,27 @@ describe('Consent V2 production session wiring', () => {
     </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, { ...input, rollout: actionRollout });
     expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
   });
+
+  it('VER-OT-02 verifies OneTrust Reject only with an emitted transition and TCF rejection', async () => {
+    const result = await auditNavigation(`<script>
+      let listener; const rejected=()=>localStorage.getItem('onetrust-rejected')==='true';
+      const state=()=>({listenerId:1,eventStatus:rejected()?'useractioncomplete':'tcloaded',purpose:{consents:{1:!rejected(),2:!rejected()}},vendor:{consents:{1:!rejected(),2:!rejected()}}});
+      window.__tcfapi=(command, version, callback)=>{if(command==='ping')callback({cmpLoaded:true,apiVersion:'2.2',gdprApplies:true},true);if(command==='addEventListener'){listener=callback;callback(state(),true);}};
+      window.OneTrust={RejectAll(){}}; window.OnetrustActiveGroups='C001';
+      function reject(){localStorage.setItem('onetrust-rejected','true');document.cookie='OptanonConsent=present; path=/';window.dispatchEvent(new Event('OTConsentApplied'));setTimeout(()=>listener?.(state(),true),0);}
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.rejection_verification.status).toBe('verified');
+    expect(result.result.rejection_verification.evidence).toEqual(expect.arrayContaining(['strong:framework_tcf:matches_requested', 'supporting:provider_event:matches_requested']));
+  }, 20_000);
+
+  it('VER-OT-03 keeps OneTrust Reject inconclusive without authoritative semantic evidence', async () => {
+    const result = await auditNavigation(`<script>
+      window.OneTrust={RejectAll(){}}; window.OnetrustActiveGroups='C001';
+      function reject(){window.dispatchEvent(new Event('OTConsentApplied'));}
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.interactions[0]).toMatchObject({ outcome: 'executed' });
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+  }, 20_000);
   it('uses the OneTrust adapter for provider evidence, state, banner, and actions', async () => {
     const result = await audit(`<script>window.OneTrust={RejectAll(){}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`);
     expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('onetrust');
@@ -189,42 +212,63 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.rejection_verification.status).toBe('inconclusive');
   });
 
-  it('UC-03 traverses an open Usercentrics shadow root and recognizes a German Reject control', async () => {
-    const result = await audit(`<script>window.UC_UI={};</script><script src="https://web.cmp.usercentrics.eu/ui/loader.js"></script><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>
+  it('UC-04 executes localized Usercentrics Reject, observes reload storage, and remains inconclusive', async () => {
+    const result = await auditNavigation(`<script>window.UC_UI={};</script><script type="application/json" src="https://web.cmp.usercentrics.eu/ui/loader.js"></script><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>
+      function reject(){localStorage.setItem('ucData','present');localStorage.setItem('ucString','present');}
       const root=document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'open'});
-      root.innerHTML='<button onclick="this.dataset.rejected=\'true\'">Alle ablehnen</button>';
-    </script>`);
+      root.innerHTML='<button id="uc-reject">Alle ablehnen</button>';
+      root.querySelector('#uc-reject').addEventListener('click',reject);
+    </script>`, false, { ...input, rollout: actionRollout });
     expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('usercentrics');
     expect(result.result.banner).toMatchObject({ visibility: 'visible' });
-  });
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('direct');
+    expect(result.result.interactions[0]).toMatchObject({ outcome: 'executed' });
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+    expect(result.result.persistence).toMatchObject({ status: 'inconclusive', post_reload_observation_completed: true, storage_continuity: 'matching' });
+  }, 20_000);
 
-  it("DI-02 captures Didomi's documented runtime state through the production adapter", async () => {
-    const result = await audit(`<script>
-      let denied=false; window.Didomi={
-        getCurrentUserStatus(){return {purposes:{a:!denied,b:!denied}};},
-        setUserDisagreeToAll(){denied=true;document.dispatchEvent(new Event('consent.changed'));},
+  it("DI-03 verifies Didomi's fresh rejected state after consent.changed and persists it", async () => {
+    const result = await auditNavigation(`<script>
+      let rejected=localStorage.getItem('didomi-rejected')==='true'; window.Didomi={
+        getCurrentUserStatus(){return {purposes:{a:!rejected,b:!rejected}};},
+        setUserDisagreeToAll(){rejected=true;localStorage.setItem('didomi-rejected','true');localStorage.setItem('didomi_token','present');window.dispatchEvent(new Event('consent.changed'));},
         notice:{isVisible(){return true;}}
       };
-    </script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-host"></div>`);
+    </script><script type="application/json" src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-host" style="display:block;width:320px;height:120px"></div>`, false, { ...input, rollout: actionRollout });
     expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('didomi');
     expect(result.result.initial_state.decision).toBe('accepted');
-  });
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('api_only');
+    expect(result.result.interactions[0]).toMatchObject({ outcome: 'executed' });
+    expect(result.result.rejection_verification.evidence).toEqual(expect.arrayContaining(['strong:provider_state:matches_requested', 'supporting:provider_event:matches_requested']));
+    expect(result.result.rejection_verification.status).toBe('verified');
+    expect(result.result.persistence).toMatchObject({ status: 'confirmed', post_reload_observation_completed: true, semantic_channels: { provider: 'persisted' } });
+  }, 20_000);
 
-  it('CY-02 invokes CookieYes Reject and observes the runtime state transition', async () => {
-    const result = await audit(`<script>
-      let rejected=false; window.getCkyConsent=()=>({categories:{analytics:!rejected,advertisement:!rejected,performance:!rejected,functional:!rejected},isUserActionCompleted:rejected});
-      window.performBannerAction=()=>{rejected=true;}; window.CookieYes={};
-    </script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div class="cky-consent-container"><button class="cky-btn-reject" onclick="performBannerAction('reject')">Reject</button></div>`, { ...input, rollout: actionRollout });
+  it('CY-03 verifies CookieYes optional categories with completed action and persistence', async () => {
+    const result = await auditNavigation(`<script>
+      const rejected=()=>localStorage.getItem('cookieyes-rejected')==='true';
+      window.getCkyConsent=()=>({categories:{analytics:!rejected(),advertisement:!rejected(),performance:!rejected(),functional:!rejected()},isUserActionCompleted:rejected()});
+      window.performBannerAction=()=>{localStorage.setItem('cookieyes-rejected','true');localStorage.setItem('cookieyes-consent','present');}; window.CookieYes={};
+    </script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div class="cky-consent-container"><button class="cky-btn-reject" onclick="performBannerAction('reject')">Reject</button></div>`, false, { ...input, rollout: actionRollout });
     expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
     expect(result.result.resulting_state?.decision).toBe('rejected');
-  });
+    expect(result.result.rejection_verification.status).toBe('verified');
+    expect(result.result.persistence).toMatchObject({ status: 'confirmed', post_reload_observation_completed: true, semantic_channels: { provider: 'persisted' } });
+  }, 10_000);
 
-  it('SP-03 uses a real cross-origin Sourcepoint frame through the production session bridge', async () => {
+  it('SP-04 verifies asynchronous Sourcepoint TCF rejection through the production session bridge', async () => {
     const result = await auditSourcepoint();
     expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('sourcepoint');
     expect(result.result.banner).toMatchObject({ surface: 'dialog', visibility: 'visible' });
     expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
-    expect(result.result.rejection_verification.status).toBe('inconclusive');
+    expect(result.result.rejection_verification.status).toBe('verified');
+  }, 15_000);
+
+  it('SP-05 rejects a contradictory Sourcepoint TCF useractioncomplete state', async () => {
+    const result = await auditSourcepoint(false, true);
+    expect(result.result.interactions[0]).toMatchObject({ outcome: 'executed' });
+    expect(result.result.rejection_verification).toMatchObject({ status: 'not_verified' });
+    expect(result.result.rejection_verification.reason_codes).toContain('STATE_CONTRADICTION');
   }, 15_000);
 
   it('PREF-SP-01 re-discovers the privacy-manager Reject in its real cross-origin iframe', async () => {

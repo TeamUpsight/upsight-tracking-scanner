@@ -222,7 +222,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       try {
         const status = typeof w.Didomi?.getCurrentUserStatus === 'function' ? w.Didomi.getCurrentUserStatus() : null;
         let enabled = 0; let disabled = 0;
-        const visit = (value: unknown, depth = 0) => { if (depth > 5 || !value) return; if (value === true) { enabled += 1; return; } if (value === false) { disabled += 1; return; } if (typeof value === 'object') Object.values(value as Record<string, unknown>).slice(0, 200).forEach((item) => visit(item, depth + 1)); };
+        const visit = (value: unknown, depth = 0) => { if (depth > 5 || value === null || value === undefined) return; if (value === true) { enabled += 1; return; } if (value === false) { disabled += 1; return; } if (typeof value === 'object') Object.values(value as Record<string, unknown>).slice(0, 200).forEach((item) => visit(item, depth + 1)); };
         visit(status?.purposes || status?.purpose || status);
         const total = enabled + disabled; const decision = total === 0 ? 'ambiguous' : disabled === total ? 'rejected' : enabled === total ? 'accepted' : 'partial';
         return { current_user_status: { decision, enabled_purpose_count: Math.min(enabled, 200), disabled_purpose_count: Math.min(disabled, 200) }, notice_visible: typeof w.Didomi?.notice?.isVisible === 'function' ? Boolean(w.Didomi.notice.isVisible()) : null, public_methods: ['getCurrentUserStatus', 'setUserAgreeToAll', 'setUserDisagreeToAll'].filter((name) => typeof w.Didomi?.[name] === 'function') };
@@ -259,7 +259,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       visible,
       shadow_mode: 'open' as const,
       controls: Array.from(shadow.querySelectorAll('button, [role="button"], a')).slice(0, 30).map((element, index) => ({
-        id: `${rootSelector} button >> nth=${index}`,
+        id: `${rootSelector} button:nth-of-type(${index + 1})`,
         accessible_name: String((element as HTMLElement).getAttribute('aria-label') || element.textContent || '').slice(0, 120),
         visible: true,
         enabled: !(element as HTMLButtonElement).disabled
