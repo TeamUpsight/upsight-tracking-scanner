@@ -24,8 +24,6 @@ export interface TcfPingSummary {
 }
 
 export interface TcfSemanticSummary {
-  cmp_id: number | null;
-  cmp_version: number | null;
   event_status: TcfEventStatus | null;
   gdpr_applies: boolean | null;
   purpose_consents: ConsentBooleanSummary;
@@ -49,7 +47,6 @@ export interface GppPingSummary {
   cmp_status: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown';
   cmp_display_status: GppDisplayStatus;
   signal_status: GppSignalStatus;
-  cmp_id: number | null;
   supported_apis: string[];
   section_list: number[];
   applicable_sections: number[];
@@ -146,6 +143,11 @@ export function tcfAggregateDecision(summary: ConsentBooleanSummary): ConsentDec
   return 'partial';
 }
 
+/** Framework-owned conversion for persistence orchestration; no caller reads purpose aggregates itself. */
+export function tcfObservationDecision(value: TcfFrameworkObservation): ConsentDecision | 'unavailable' {
+  return value.latest_event ? tcfAggregateDecision(value.latest_event.purpose_consents) : 'unavailable';
+}
+
 export interface FrameworkObserver<T> {
   readonly state: T;
   stop(): void;
@@ -187,6 +189,14 @@ function readBoolean(value: unknown): boolean | null {
 function consentSummary(value: unknown): ConsentBooleanSummary {
   const values = recordOf(value);
   if (!values) return EMPTY_CONSENT_SUMMARY;
+  // Persistent browser bridges provide this already-sanitized aggregate. The
+  // observer remains responsible for validating its shape before use.
+  const total = boundedInteger(values.total_count);
+  const grantedAggregate = boundedInteger(values.granted_count);
+  const deniedAggregate = boundedInteger(values.denied_count);
+  if (total !== null && grantedAggregate !== null && deniedAggregate !== null && total === grantedAggregate + deniedAggregate) {
+    return { known: true, total_count: total, granted_count: grantedAggregate, denied_count: deniedAggregate };
+  }
   let granted = 0;
   let denied = 0;
   for (const decision of Object.values(values)) {
@@ -222,8 +232,6 @@ function tcfSemanticSummary(payload: unknown): TcfSemanticSummary | null {
   const purpose = recordOf(source.purpose);
   const vendor = recordOf(source.vendor);
   return {
-    cmp_id: boundedInteger(source.cmpId),
-    cmp_version: boundedInteger(source.cmpVersion),
     event_status: tcfEventStatus(source.eventStatus),
     gdpr_applies: readBoolean(source.gdprApplies),
     purpose_consents: consentSummary(purpose?.consents),
@@ -267,7 +275,6 @@ function gppPingSummary(payload: unknown): GppPingSummary | null {
       ? displayStatus
       : 'unknown',
     signal_status: signalStatus === 'ready' ? 'ready' : signalStatus === 'not ready' ? 'not_ready' : 'unknown',
-    cmp_id: boundedInteger(source.cmpId),
     supported_apis: safeStringList(source.supportedAPIs),
     section_list: safeSectionList(source.sectionList),
     applicable_sections: safeSectionList(source.applicableSections)

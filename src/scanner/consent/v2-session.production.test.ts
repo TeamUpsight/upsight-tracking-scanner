@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ConsentV2RolloutControls } from './rollout-controls';
 import { prepareConsentV2Session, runConsentV2Session } from './v2-session';
 import { mapConsentV2ToExisting } from './compatibility-mapper';
-import { captureBrowserConsentFacts } from './browser-context-builders';
+import { captureBrowserConsentFacts, observeConsentFrameworksInPage } from './browser-context-builders';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
 
 const chromeExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || [
@@ -89,6 +89,55 @@ async function auditSourcepoint() {
 }
 
 describe('Consent V2 production session wiring', () => {
+  it('FW-ASYNC-TCF-01 buffers delayed TCF callbacks from the pre-navigation bridge', async () => {
+    const page = await browser.newPage();
+    try {
+      const capture = await prepareConsentV2Session(page);
+      await page.goto(`data:text/html,<script>window.__tcfapi=(c,v,cb)=>setTimeout(()=>cb(c==='ping'?{cmpLoaded:true,apiVersion:'2.2',gdprApplies:true}:{listenerId:1,eventStatus:'tcloaded',purpose:{consents:{1:true}},vendor:{consents:{2:true}}},true),150)</script>`);
+      const observed = await observeConsentFrameworksInPage(page);
+      expect(observed.tcf).toMatchObject({ lifecycle: 'ready', event_count: 1, latest_event: { event_status: 'tcloaded' } });
+      capture.dispose();
+    } finally { await page.close(); }
+  });
+
+  it('FW-ASYNC-TCF-02 retains a delayed useractioncomplete lifecycle update', async () => {
+    const page = await browser.newPage();
+    try {
+      const capture = await prepareConsentV2Session(page);
+      await page.goto(`data:text/html,<script>window.__tcfapi=(c,v,cb)=>{if(c==='ping')cb({cmpLoaded:true,apiVersion:'2.2'},true);if(c==='addEventListener'){cb({listenerId:1,eventStatus:'tcloaded',purpose:{consents:{1:true}},vendor:{consents:{2:true}}},true);setTimeout(()=>cb({listenerId:1,eventStatus:'useractioncomplete',purpose:{consents:{1:false}},vendor:{consents:{2:false}}},true),150)}}</script>`);
+      await page.waitForTimeout(220);
+      expect(await observeConsentFrameworksInPage(page)).toMatchObject({ tcf: { event_count: 2, latest_event: { event_status: 'useractioncomplete', purpose_consents: { denied_count: 1 } } } });
+      capture.dispose();
+    } finally { await page.close(); }
+  });
+
+  it('FW-ASYNC-GPP-01 and USP-E2E-01 preserve asynchronous GPP and legacy USP independently', async () => {
+    const result = await auditNavigation(`<script>
+      window.__uspapi=()=>{};
+      window.__gpp=(c,cb)=>setTimeout(()=>{const p={gppVersion:'1.1',cmpStatus:'loaded',cmpDisplayStatus:'hidden',signalStatus:'ready',supportedAPIs:['uspv1'],sectionList:[7],applicableSections:[7]};cb(c==='ping'?p:{listenerId:1,pingData:p},true)},150);
+    </script>`);
+    expect(result.result.frameworks).toMatchObject({ gpp: 'present', usp: 'present' });
+    expect(result.result.frameworks.evidence).toContain('usp:legacy_read_only');
+  });
+
+  it('POST-GA4-01 observes a POST conversion and safe Consent Mode descriptors without retaining the body', async () => {
+    const result = await auditNavigation(`<script>fetch('https://www.google-analytics.com/g/collect',{method:'POST',body:'en=purchase&gcs=G100&gcd=opaque&dma=1'}).catch(()=>{});</script>`);
+    expect(result.tracking.signals).toEqual(expect.arrayContaining([expect.objectContaining({ vendor: 'google_analytics', kind: 'conversion_hit', timing: 'pre_choice' })]));
+    expect(result.google_consent_mode.network.some((item) => item.parameters.gcs?.present && item.parameters.gcd?.present && item.parameters.dma?.present)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('en=purchase');
+  });
+
+  it.each([
+    ['TikTok', 'https://analytics.tiktok.com/api/v1/pixel/track', 'event=CompletePayment', 'tiktok'],
+    ['Snapchat', 'https://tr.snapchat.com/p', 'event_type=PURCHASE', 'snapchat'],
+    ['Pinterest', 'https://ct.pinterest.com/v3/event', 'event_name=checkout', 'pinterest'],
+    ['X', 'https://analytics.twitter.com/i/adsct', 'event=registration', 'x']
+  ] as const)('POST-VENDOR captures %s event evidence through the production session', async (_name, url, body, vendor) => {
+    const result = await auditNavigation(`<script>fetch('${url}',{method:'POST',body:'${body}'}).catch(()=>{});</script>`);
+    expect(result.tracking.signals).toEqual(expect.arrayContaining([expect.objectContaining({ vendor, timing: 'pre_choice' })]));
+    expect(JSON.stringify(result)).not.toContain(body);
+  });
+
   it('captures Usercentrics open-shadow controls as bounded browser facts', async () => {
     const page = await browser.newPage();
     try {
@@ -104,6 +153,7 @@ describe('Consent V2 production session wiring', () => {
     </script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline()">Decline</button></div>`, { ...input, rollout: actionRollout });
     expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
     expect(result.result.rejection_verification.status).toBe('verified');
+    expect(result.telemetry.timeline?.user_choice_at).not.toBeNull();
   });
 
   it('VER-OT-01 prefers the visible OneTrust Reject control over its API capability', async () => {

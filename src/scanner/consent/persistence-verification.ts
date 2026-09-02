@@ -55,6 +55,10 @@ export interface SameContextPersistenceResult extends PersistenceResult {
   scope: 'same_context_same_origin' | 'not_tested';
   semantic_channels: Partial<Record<PersistenceSemanticChannel, PersistenceChannelComparison>>;
   storage_continuity: 'matching' | 'mismatched' | 'unknown';
+  /** Explicit lifecycle facts; persistence status alone never implies observation completion. */
+  reload_attempted: boolean;
+  reload_succeeded: boolean;
+  post_reload_observation_completed: boolean;
 }
 
 function boundedSettleTimeout(timeoutMs: number | undefined) {
@@ -116,7 +120,8 @@ function result(
   reasonCodes: ConsentAuditCode[],
   scope: SameContextPersistenceResult['scope'],
   semanticChannels: SameContextPersistenceResult['semantic_channels'] = {},
-  storageContinuity: SameContextPersistenceResult['storage_continuity'] = 'unknown'
+  storageContinuity: SameContextPersistenceResult['storage_continuity'] = 'unknown',
+  lifecycle: Pick<SameContextPersistenceResult, 'reload_attempted' | 'reload_succeeded' | 'post_reload_observation_completed'> = { reload_attempted: false, reload_succeeded: false, post_reload_observation_completed: false }
 ): SameContextPersistenceResult {
   return {
     status,
@@ -124,7 +129,8 @@ function result(
     reason_codes: reasonCodes,
     scope,
     semantic_channels: semanticChannels,
-    storage_continuity: storageContinuity
+    storage_continuity: storageContinuity,
+    ...lifecycle
   };
 }
 
@@ -142,12 +148,12 @@ export function compareSameContextPersistence(input: PersistenceVerificationInpu
   ];
 
   if (channelValues.includes('persisted') && !channelValues.includes('reset')) {
-    return result('confirmed', evidence, [ConsentAuditCodes.PERSISTENCE_CONFIRMED], 'same_context_same_origin', semanticChannels, storageContinuity);
+    return result('confirmed', evidence, [ConsentAuditCodes.PERSISTENCE_CONFIRMED], 'same_context_same_origin', semanticChannels, storageContinuity, { reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: true });
   }
   if (channelValues.includes('reset') && !channelValues.includes('persisted')) {
-    return result('not_confirmed', evidence, [ConsentAuditCodes.PERSISTENCE_NOT_CONFIRMED], 'same_context_same_origin', semanticChannels, storageContinuity);
+    return result('not_confirmed', evidence, [ConsentAuditCodes.PERSISTENCE_NOT_CONFIRMED], 'same_context_same_origin', semanticChannels, storageContinuity, { reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: true });
   }
-  return result('inconclusive', evidence, [ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin', semanticChannels, storageContinuity);
+  return result('inconclusive', evidence, [ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin', semanticChannels, storageContinuity, { reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: true });
 }
 
 /**
@@ -167,31 +173,31 @@ export async function verifySameContextReloadPersistence(
   try {
     reload = await bridge.reloadSameContext();
   } catch {
-    return result('inconclusive', [], [ConsentAuditCodes.NAVIGATION_INTERRUPTED, ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'not_tested');
+    return result('inconclusive', [], [ConsentAuditCodes.NAVIGATION_INTERRUPTED, ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'not_tested', {}, 'unknown', { reload_attempted: true, reload_succeeded: false, post_reload_observation_completed: false });
   }
   if (!reload.reloaded || reload.navigation_interrupted) {
-    return result('inconclusive', [], [ConsentAuditCodes.NAVIGATION_INTERRUPTED, ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'not_tested');
+    return result('inconclusive', [], [ConsentAuditCodes.NAVIGATION_INTERRUPTED, ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'not_tested', {}, 'unknown', { reload_attempted: true, reload_succeeded: false, post_reload_observation_completed: false });
   }
   if (!reload.same_context || !sameOrigin(reload.origin_before, reload.origin_after)) {
-    return result('not_applicable', [], [ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE], 'not_tested');
+    return result('not_applicable', [], [ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE], 'not_tested', {}, 'unknown', { reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: false });
   }
   let settled: 'settled' | 'timeout';
   try {
     settled = await bridge.waitForSettle(boundedSettleTimeout(input.settle_timeout_ms));
   } catch {
-    return result('inconclusive', [], [ConsentAuditCodes.INTERACTION_TIMEOUT, ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin');
+    return result('inconclusive', [], [ConsentAuditCodes.INTERACTION_TIMEOUT, ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin', {}, 'unknown', { reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: false });
   }
   if (settled === 'timeout') {
-    return result('inconclusive', [], [ConsentAuditCodes.INTERACTION_TIMEOUT, ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin');
+    return result('inconclusive', [], [ConsentAuditCodes.INTERACTION_TIMEOUT, ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin', {}, 'unknown', { reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: false });
   }
   let postReload: PersistenceSnapshot | null;
   try {
     postReload = await bridge.readPostReloadSnapshot();
   } catch {
-    return result('inconclusive', [], [ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin');
+    return result('inconclusive', [], [ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin', {}, 'unknown', { reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: false });
   }
   if (!postReload) {
-    return result('inconclusive', [], [ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin');
+    return result('inconclusive', [], [ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE], 'same_context_same_origin', {}, 'unknown', { reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: false });
   }
   return compareSameContextPersistence(input, postReload);
 }

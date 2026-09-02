@@ -98,18 +98,56 @@ export function captureConsentTrackingRequest(input: {
   url: string;
   resource_type: string;
   method: string;
+  /** Read by the browser bridge only; never included in returned evidence. */
+  post_data?: string | null;
   timestamp?: number;
 }): TrackingRequestEvidence | null {
   let parsed: URL;
   try { parsed = new URL(input.url); } catch { return null; }
   const host = parsed.hostname.toLowerCase();
-  const event = parsed.searchParams.get('en') || parsed.searchParams.get('ev') || undefined;
+  const bodyFields = safePostFields(input.post_data);
+  const event = safeEventName(
+    parsed.searchParams.get('en') || parsed.searchParams.get('ev') || parsed.searchParams.get('event') || parsed.searchParams.get('event_name') ||
+    bodyFields.en || bodyFields.ev || bodyFields.event || bodyFields.event_name || bodyFields.eventName || bodyFields.event_type || bodyFields.eventType
+  );
   return {
-    vendor: /facebook\.com|connect\.facebook/i.test(host) ? 'meta' : /google-analytics\.com/i.test(host) ? 'ga4' : /googleadservices|doubleclick/i.test(host) ? 'google_ads' : 'unknown',
+    vendor: /facebook\.com|connect\.facebook/i.test(host) ? 'meta' : /google-analytics\.com/i.test(host) ? 'ga4' : /googleadservices|doubleclick/i.test(host) ? 'google_ads' : /tiktok\.com/i.test(host) ? 'tiktok' : /snapchat\.com/i.test(host) ? 'snapchat' : /pinterest\.com/i.test(host) ? 'pinterest' : /twitter\.com|x\.com/i.test(host) ? 'x' : /doubleclick\.net/i.test(host) && /activity/i.test(parsed.pathname) ? 'floodlight' : 'unknown',
     kind: input.resource_type === 'script' ? 'script' : 'collection',
     collector: 'third_party', host, path: normalizedPath(parsed.pathname), method: input.method,
-    phase: 'consent_v2', timestamp: input.timestamp || Date.now(), event: event?.slice(0, 120)
+    phase: 'consent_v2', timestamp: input.timestamp || Date.now(), event
   };
+}
+
+const POST_BODY_MAX_BYTES = 4_096;
+const POST_FIELD_MAX_COUNT = 24;
+const SAFE_POST_EVENT_FIELDS = new Set(['en', 'ev', 'event', 'event_name', 'eventName', 'event_type', 'eventType']);
+
+/**
+ * Accepts only a short, shallow allowlist from form or JSON POST payloads.
+ * It intentionally returns no body and never traverses nested structures.
+ */
+function safePostFields(value: string | null | undefined): Record<string, string> {
+  if (!value || value.length > POST_BODY_MAX_BYTES) return {};
+  const result: Record<string, string> = {};
+  const accept = (key: string, candidate: unknown) => {
+    if (Object.keys(result).length >= POST_FIELD_MAX_COUNT || !SAFE_POST_EVENT_FIELDS.has(key) || typeof candidate !== 'string') return;
+    if (/^[A-Za-z0-9 _:.\-/]{1,120}$/.test(candidate)) result[key] = candidate;
+  };
+  try {
+    if (value.trimStart().startsWith('{')) {
+      const parsed = JSON.parse(value);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return result;
+      for (const [key, candidate] of Object.entries(parsed as Record<string, unknown>)) accept(key, candidate);
+      return result;
+    }
+    const params = new URLSearchParams(value.replace(/^\?/, ''));
+    for (const [key, candidate] of params) accept(key, candidate);
+  } catch { /* Malformed or unsupported payloads simply yield no evidence. */ }
+  return result;
+}
+
+function safeEventName(value: string | null | undefined) {
+  return typeof value === 'string' && /^[A-Za-z0-9 _:.\-/]{1,120}$/.test(value) ? value : undefined;
 }
 
 /**

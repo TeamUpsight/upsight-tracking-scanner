@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TrackingRequestEvidence } from '../../types';
 import type { VerificationResult } from './domain-types';
-import { checkTrackingConsistency, TrackingConsistencyCodes } from './tracking-consistency';
+import { captureConsentTrackingRequest, checkTrackingConsistency, TrackingConsistencyCodes } from './tracking-consistency';
 
 const rejected = { status: 'verified' as const, evidence: ['semantic:provider:persisted'], reason_codes: ['ACTION_VERIFIED' as const] };
 const unverified = { status: 'inconclusive' as const, evidence: [], reason_codes: ['ACTION_INCONCLUSIVE' as const] };
@@ -63,5 +63,24 @@ describe('consent versus tracking consistency', () => {
   it('classifies observation-only requests as pre-choice without a Reject timestamp', () => {
     const result = checkTrackingConsistency({ rejection_verification: unverified, user_choice_at: null, post_reject_observation_completed: false, requests: [request()] });
     expect(result).toMatchObject({ status: 'not_applicable', signals: [{ timing: 'pre_choice' }] });
+  });
+
+  it.each([
+    ['GA4', 'https://www.google-analytics.com/g/collect', 'en=purchase', 'ga4'],
+    ['Meta', 'https://www.facebook.com/tr/', 'event_name=Purchase', 'meta'],
+    ['TikTok', 'https://analytics.tiktok.com/api/v1/pixel/track', 'event=CompletePayment', 'tiktok'],
+    ['Snapchat', 'https://tr.snapchat.com/p', 'event_type=PURCHASE', 'snapchat'],
+    ['Pinterest', 'https://ct.pinterest.com/v3/event', 'event_name=checkout', 'pinterest'],
+    ['X', 'https://analytics.twitter.com/i/adsct', 'event=registration', 'x']
+  ] as const)('extracts only a normalized %s POST event', (_name, url, postData, vendor) => {
+    const captured = captureConsentTrackingRequest({ url, resource_type: 'fetch', method: 'POST', post_data: postData, timestamp: 10 });
+    expect(captured).toMatchObject({ vendor, event: expect.any(String), method: 'POST' });
+    expect(JSON.stringify(captured)).not.toContain(postData);
+  });
+
+  it('ignores oversized, malformed, and nested POST bodies', () => {
+    expect(captureConsentTrackingRequest({ url: 'https://www.google-analytics.com/g/collect', resource_type: 'fetch', method: 'POST', post_data: `en=${'x'.repeat(5_000)}` })?.event).toBeUndefined();
+    expect(captureConsentTrackingRequest({ url: 'https://analytics.tiktok.com/api/v1/pixel/track', resource_type: 'fetch', method: 'POST', post_data: '{bad' })?.event).toBeUndefined();
+    expect(captureConsentTrackingRequest({ url: 'https://analytics.tiktok.com/api/v1/pixel/track', resource_type: 'fetch', method: 'POST', post_data: '{"data":{"event":"Purchase"}}' })?.event).toBeUndefined();
   });
 });

@@ -63,6 +63,7 @@ describe('same-context persistence verification', () => {
   it('keeps navigation failure inconclusive', async () => {
     const result = await verifySameContextReloadPersistence(input(snapshot({ provider: 'rejected' })), bridge({ reloadSameContext: async () => ({ reloaded: false, same_context: true, origin_before: 'https://store.example', origin_after: null, navigation_interrupted: true }) }));
     expect(result).toMatchObject({ status: 'inconclusive', reason_codes: [ConsentAuditCodes.NAVIGATION_INTERRUPTED, ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE] });
+    expect(result.post_reload_observation_completed).toBe(false);
   });
 
   it('maps a reload bridge exception to an inconclusive navigation result', async () => {
@@ -75,5 +76,11 @@ describe('same-context persistence verification', () => {
     const result = await verifySameContextReloadPersistence(input(snapshot({ provider: 'rejected' }), false), bridge({ reloadSameContext: async () => { reloaded = true; return { reloaded: true, same_context: true, origin_before: 'https://store.example', origin_after: 'https://store.example', navigation_interrupted: false }; } }));
     expect(result).toMatchObject({ status: 'not_applicable', reason_codes: [ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE] });
     expect(reloaded).toBe(false);
+    expect(result).toMatchObject({ reload_attempted: false, reload_succeeded: false, post_reload_observation_completed: false });
+  });
+
+  it('records completion only after a post-reload snapshot is successfully read', async () => {
+    const result = await verifySameContextReloadPersistence(input(snapshot({ provider: 'rejected' })), bridge());
+    expect(result).toMatchObject({ reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: true });
   });
 });

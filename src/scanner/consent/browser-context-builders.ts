@@ -44,6 +44,7 @@ const DOM_SELECTORS = [
 
 const CONSENT_COMMAND_OBSERVATIONS_KEY = '__upsightConsentCommandObservations';
 const PROVIDER_EVENT_OBSERVATIONS_KEY = '__upsightConsentProviderEventObservations';
+const FRAMEWORK_OBSERVATIONS_KEY = '__upsightConsentFrameworkObservations';
 
 /**
  * Installs a narrowly-scoped, pre-navigation dataLayer observer. It only
@@ -51,7 +52,7 @@ const PROVIDER_EVENT_OBSERVATIONS_KEY = '__upsightConsentProviderEventObservatio
  * the site's original implementation unchanged.
  */
 export async function installConsentCommandBootstrap(page: Page) {
-  await page.context().addInitScript(({ key, providerKey }) => {
+  await page.context().addInitScript(({ key, providerKey, frameworkKey }) => {
     const w = window as any;
     const allowedState = (value: unknown) => {
       if (!value || typeof value !== 'object') return null;
@@ -97,7 +98,64 @@ export async function installConsentCommandBootstrap(page: Page) {
         set: (value) => { dataLayer = value; observeDataLayer(value); }
       });
     }
-  }, { key: CONSENT_COMMAND_OBSERVATIONS_KEY, providerKey: PROVIDER_EVENT_OBSERVATIONS_KEY });
+    // This page-lifetime bridge deliberately keeps only normalized framework
+    // aggregates. It is installed before navigation so delayed CMP callbacks
+    // are buffered instead of being sampled by a single evaluate call.
+    const countBooleans = (value: unknown) => {
+      const entries = value && typeof value === 'object' ? Object.values(value as Record<string, unknown>) : [];
+      const granted = entries.filter((item) => item === true).length;
+      const denied = entries.filter((item) => item === false).length;
+      return { total_count: granted + denied, granted_count: granted, denied_count: denied };
+    };
+    const framework = w[frameworkKey] && typeof w[frameworkKey] === 'object' ? w[frameworkKey] : {
+      tcf: { present: false, ping: null, latest_event: null, event_count: 0, listener_id: null, registered: false },
+      gpp: { present: false, ping: null, latest_event: null, event_count: 0, listener_id: null, registered: false },
+      usp_present: false
+    };
+    w[frameworkKey] = framework;
+    const tcfPing = (value: any) => value && typeof value === 'object' ? { cmpLoaded: value.cmpLoaded === true ? true : value.cmpLoaded === false ? false : null, apiVersion: typeof value.apiVersion === 'string' ? value.apiVersion.slice(0, 16) : null, gdprApplies: value.gdprApplies === true ? true : value.gdprApplies === false ? false : null } : null;
+    const tcfEvent = (value: any) => value && typeof value === 'object' ? { eventStatus: typeof value.eventStatus === 'string' ? value.eventStatus.slice(0, 32) : null, gdprApplies: value.gdprApplies === true ? true : value.gdprApplies === false ? false : null, purpose: { consents: countBooleans(value.purpose?.consents) }, vendor: { consents: countBooleans(value.vendor?.consents) } } : null;
+    const gppPing = (value: any) => value && typeof value === 'object' ? { gppVersion: typeof value.gppVersion === 'string' ? value.gppVersion.slice(0, 16) : null, cmpStatus: typeof value.cmpStatus === 'string' ? value.cmpStatus.slice(0, 32) : null, cmpDisplayStatus: typeof value.cmpDisplayStatus === 'string' ? value.cmpDisplayStatus.slice(0, 32) : null, signalStatus: typeof value.signalStatus === 'string' ? value.signalStatus.slice(0, 32) : null, supportedAPIs: Array.isArray(value.supportedAPIs) ? value.supportedAPIs.filter((item: unknown) => typeof item === 'string').slice(0, 50) : [], sectionList: Array.isArray(value.sectionList) ? value.sectionList.filter((item: unknown) => Number.isInteger(item)).slice(0, 50) : [], applicableSections: Array.isArray(value.applicableSections) ? value.applicableSections.filter((item: unknown) => Number.isInteger(item)).slice(0, 50) : [] } : null;
+    const installFrameworkListeners = () => {
+      framework.usp_present ||= typeof w.__uspapi === 'function';
+      if (typeof w.__tcfapi === 'function' && !framework.tcf.registered) {
+        framework.tcf.present = true;
+        try {
+          w.__tcfapi('ping', 2, (value: any) => { framework.tcf.ping = tcfPing(value); });
+          w.__tcfapi('addEventListener', 2, (value: any) => {
+            if (!value || typeof value !== 'object') return;
+            framework.tcf.listener_id ??= typeof value.listenerId === 'number' || typeof value.listenerId === 'string' ? value.listenerId : null;
+            const event = tcfEvent(value); if (!event) return;
+            framework.tcf.latest_event = event;
+            framework.tcf.event_count = Math.min(100, framework.tcf.event_count + 1);
+          });
+          framework.tcf.registered = true;
+        } catch { framework.tcf.present = true; }
+      }
+      if (typeof w.__gpp === 'function' && !framework.gpp.registered) {
+        framework.gpp.present = true;
+        try {
+          w.__gpp('ping', (value: any) => { framework.gpp.ping = gppPing(value); });
+          w.__gpp('addEventListener', (value: any) => {
+            if (!value || typeof value !== 'object') return;
+            framework.gpp.listener_id ??= typeof value.listenerId === 'number' || typeof value.listenerId === 'string' ? value.listenerId : null;
+            const ping = gppPing(value.pingData); if (!ping) return;
+            framework.gpp.latest_event = ping; framework.gpp.ping = ping;
+            framework.gpp.event_count = Math.min(100, framework.gpp.event_count + 1);
+          });
+          framework.gpp.registered = true;
+        } catch { framework.gpp.present = true; }
+      }
+    };
+    const poll = window.setInterval(installFrameworkListeners, 50);
+    window.setTimeout(() => window.clearInterval(poll), 10_000);
+    window.addEventListener('pagehide', () => {
+      try { if (framework.tcf.listener_id !== null && typeof w.__tcfapi === 'function') w.__tcfapi('removeEventListener', 2, () => {}, framework.tcf.listener_id); } catch { /* Best effort cleanup. */ }
+      try { if (framework.gpp.listener_id !== null && typeof w.__gpp === 'function') w.__gpp('removeEventListener', () => {}, framework.gpp.listener_id); } catch { /* Best effort cleanup. */ }
+      window.clearInterval(poll);
+    }, { once: true });
+    installFrameworkListeners();
+  }, { key: CONSENT_COMMAND_OBSERVATIONS_KEY, providerKey: PROVIDER_EVENT_OBSERVATIONS_KEY, frameworkKey: FRAMEWORK_OBSERVATIONS_KEY });
 }
 
 /** Captures normalized, bounded browser facts. Provider interpretation remains in adapters. */
@@ -243,33 +301,36 @@ export function buildShopifyCustomerPrivacyContext(facts: BrowserConsentFacts) {
  * framework lifecycle interpretation remains in framework-observers.ts.
  */
 export async function observeConsentFrameworksInPage(page: Page): Promise<ConsentFrameworkObservations> {
-  const captured = await page.evaluate(() => {
+  const readBridge = () => page.evaluate((frameworkKey) => {
     const w = window as any;
-    const booleanSummary = (value: unknown) => {
-      const entries = value && typeof value === 'object' ? Object.values(value as Record<string, unknown>) : [];
-      return { total: entries.filter((item) => item === true || item === false).length, granted: entries.filter((item) => item === true).length, denied: entries.filter((item) => item === false).length };
-    };
-    const tcf = { present: typeof w.__tcfapi === 'function', ping: null as Record<string, unknown> | null, event: null as Record<string, unknown> | null };
-    const gpp = { present: typeof w.__gpp === 'function', ping: null as Record<string, unknown> | null, event: null as Record<string, unknown> | null };
-    try { if (tcf.present) w.__tcfapi('ping', 2, (value: any) => { tcf.ping = value && typeof value === 'object' ? { cmpLoaded: value.cmpLoaded, apiVersion: value.apiVersion, gdprApplies: value.gdprApplies } : null; }); } catch { /* Observer maps failures conservatively. */ }
-    try { if (tcf.present) w.__tcfapi('addEventListener', 2, (value: any) => { tcf.event = value && typeof value === 'object' ? { listenerId: value.listenerId, eventStatus: value.eventStatus, cmpId: value.cmpId, cmpVersion: value.cmpVersion, gdprApplies: value.gdprApplies, purpose: { consents: booleanSummary(value.purpose?.consents) }, vendor: { consents: booleanSummary(value.vendor?.consents) } } : null; }); } catch { /* Observer maps failures conservatively. */ }
-    try { if (gpp.present) w.__gpp('ping', (value: any) => { gpp.ping = value && typeof value === 'object' ? { gppVersion: value.gppVersion, cmpStatus: value.cmpStatus, cmpDisplayStatus: value.cmpDisplayStatus, signalStatus: value.signalStatus, cmpId: value.cmpId, supportedAPIs: value.supportedAPIs, sectionList: value.sectionList, applicableSections: value.applicableSections } : null; }); } catch { /* Observer maps failures conservatively. */ }
-    try { if (gpp.present) w.__gpp('addEventListener', (value: any) => { const ping = value?.pingData; gpp.event = ping && typeof ping === 'object' ? { pingData: { gppVersion: ping.gppVersion, cmpStatus: ping.cmpStatus, cmpDisplayStatus: ping.cmpDisplayStatus, signalStatus: ping.signalStatus, cmpId: ping.cmpId, supportedAPIs: ping.supportedAPIs, sectionList: ping.sectionList, applicableSections: ping.applicableSections }, listenerId: value.listenerId } : null; }); } catch { /* Observer maps failures conservatively. */ }
-    return { tcf, gpp, usp: typeof w.__uspapi === 'function' };
-  });
+    const state = w[frameworkKey] && typeof w[frameworkKey] === 'object' ? w[frameworkKey] : null;
+    return state ? { tcf: { ...state.tcf, present: state.tcf?.present === true || typeof w.__tcfapi === 'function' }, gpp: { ...state.gpp, present: state.gpp?.present === true || typeof w.__gpp === 'function' }, usp: state.usp_present === true || typeof w.__uspapi === 'function' } : { tcf: { present: typeof w.__tcfapi === 'function', ping: null, latest_event: null, event_count: 0 }, gpp: { present: typeof w.__gpp === 'function', ping: null, latest_event: null, event_count: 0 }, usp: typeof w.__uspapi === 'function' };
+  }, FRAMEWORK_OBSERVATIONS_KEY);
+  let captured = await readBridge();
+  // The bridge is already observing for the page lifetime. Only a framework
+  // that is present but has not replied gets this short bounded chance to
+  // deliver its delayed ping/listener callback.
+  const awaitingCallback = (captured.tcf.present && !captured.tcf.ping && !captured.tcf.latest_event) || (captured.gpp.present && !captured.gpp.ping && !captured.gpp.latest_event);
+  if (awaitingCallback) {
+    await page.waitForFunction((frameworkKey) => {
+      const state = (window as any)[frameworkKey];
+      return Boolean(state && ((state.tcf?.ping || state.tcf?.latest_event) || (state.gpp?.ping || state.gpp?.latest_event)));
+    }, FRAMEWORK_OBSERVATIONS_KEY, { timeout: 350 }).catch(() => undefined);
+    captured = await readBridge();
+  }
   const runtime = {
     __tcfapi: captured.tcf.present ? ((command: string, _version: number, callback: (payload: unknown, success?: boolean) => void) => {
       if (command === 'ping') callback(captured.tcf.ping, Boolean(captured.tcf.ping));
-      if (command === 'addEventListener' && captured.tcf.event) callback(captured.tcf.event, true);
+      if (command === 'addEventListener' && captured.tcf.latest_event) callback(captured.tcf.latest_event, true);
     }) : undefined,
     __gpp: captured.gpp.present ? ((command: string, callback: (payload: unknown, success?: boolean) => void) => {
       if (command === 'ping') callback(captured.gpp.ping, Boolean(captured.gpp.ping));
-      if (command === 'addEventListener' && captured.gpp.event) callback(captured.gpp.event, true);
+      if (command === 'addEventListener' && captured.gpp.latest_event) callback({ pingData: captured.gpp.latest_event }, true);
     }) : undefined,
     __uspapi: captured.usp ? (() => undefined) : undefined
   };
   const observers = observeConsentFrameworks(runtime);
-  const result = { tcf: observers.tcf.state, gpp: observers.gpp.state, usp: observers.usp };
+  const result = { tcf: { ...observers.tcf.state, event_count: Math.max(0, Number(captured.tcf?.event_count) || 0) }, gpp: { ...observers.gpp.state, event_count: Math.max(0, Number(captured.gpp?.event_count) || 0) }, usp: observers.usp };
   observers.tcf.stop(); observers.gpp.stop();
   return result;
 }

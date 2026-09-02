@@ -111,7 +111,8 @@ function v2TraceEvents(result: FinalConsentAuditResult, tracking: TrackingConsis
   if (result.frameworks.gpp === 'present') events.add('gpp_detected');
   if (result.frameworks.gpp === 'stub_present') events.add('gpp_stub_detected');
   if (result.google_consent_mode.presence === 'present') events.add('consent_mode_detected');
-  if (result.persistence.status !== 'not_applicable') events.add('consent_persistence_reload_started');
+  const reload = result.persistence as typeof result.persistence & { reload_attempted?: boolean; reload_succeeded?: boolean; post_reload_observation_completed?: boolean };
+  if (reload.reload_attempted) events.add('consent_persistence_reload_started');
   if (result.persistence.status === 'confirmed') events.add('consent_persistence_confirmed');
   if (tracking?.status === 'contradiction') events.add('consent_tracking_contradiction');
   events.add('consent_audit_completed');
@@ -136,6 +137,7 @@ export function mapConsentV2ToExisting(
     codes.has(ConsentAuditCodes.INTERACTION_UNSUPPORTED);
   const cmp_provider = mapLegacyProvider(result, blockedOrInconclusive, codes);
   const rejection_attempted = result.interactions.some((attempt) => attempt.action === 'reject_all' || attempt.action === 'only_necessary');
+  const persistenceLifecycle = result.persistence as typeof result.persistence & { post_reload_observation_completed?: boolean };
   const technicalStatus = resolveConsentStatus({
     executed: true,
     page_valid: blockedOrInconclusive ? false : context.page_valid,
@@ -144,7 +146,9 @@ export function mapConsentV2ToExisting(
     tracking_before_interaction: context.tracking_before_interaction,
     rejection_attempted,
     rejection_verified: result.rejection_verification.status === 'verified',
-    post_reject_observation_completed: context.post_reject_observation_completed,
+    // The production persistence bridge is authoritative. The context field
+    // remains only for legacy callers that do not yet supply V2 lifecycle facts.
+    post_reject_observation_completed: persistenceLifecycle.post_reload_observation_completed ?? context.post_reject_observation_completed,
     tracking_after_verified_rejection: trackingConsistency?.status === 'contradiction'
   });
   const trace_events = v2TraceEvents(result, trackingConsistency);

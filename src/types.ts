@@ -91,7 +91,7 @@ export interface FindingConfidence {
 }
 
 export interface TrackingRequestEvidence {
-  vendor: 'ga4' | 'meta' | 'google_ads' | 'unknown';
+  vendor: 'ga4' | 'meta' | 'google_ads' | 'tiktok' | 'snapchat' | 'pinterest' | 'x' | 'floodlight' | 'unknown';
   kind: 'script' | 'collection' | 'data_layer';
   collector: 'third_party' | 'first_party' | 'same_origin';
   host: string;
