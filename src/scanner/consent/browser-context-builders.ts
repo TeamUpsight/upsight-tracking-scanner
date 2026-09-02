@@ -8,6 +8,27 @@ import { COOKIEYES_STANDARD_ROOT, COOKIEYES_STABLE_CONTROLS } from './cookieyes-
 import { observeConsentFrameworks, tcfAggregateDecision, type ConsentFrameworkObservations } from './framework-observers';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
 
+export interface BrowserActionTarget {
+  action: string;
+  category: string | null;
+  target_ref: string | null;
+  surface_type: 'banner' | 'dialog' | 'drawer' | 'preference_center';
+  frame_path: string[];
+  shadow_mode: 'none' | 'open' | 'closed' | 'unknown';
+  accessible_control: boolean;
+  attached: boolean;
+  visible: boolean;
+  enabled: boolean;
+}
+
+type TargetContext = { action_targets?: readonly BrowserActionTarget[] };
+
+/** Transient target descriptors are browser-bridge facts, never persisted selectors. */
+export function actionTargetFor(context: unknown, action: string, category: string | null = null) {
+  const targets = (context && typeof context === 'object' ? context as TargetContext : {}).action_targets || [];
+  return targets.find((target) => target.action === action && target.category === category) || null;
+}
+
 type DomObservation = { selector: string; visible: boolean; enabled: boolean; text: string };
 
 export interface BrowserConsentFacts {
@@ -19,6 +40,8 @@ export interface BrowserConsentFacts {
   cookiebot: Record<string, unknown> | null;
   cookieyes: Record<string, unknown> | null;
   onetrust: { active_group_ids: string[]; provider_events: string[] } | null;
+  onetrust_public_methods: string[];
+  cookieyes_runtime_functions: string[];
   didomi: Record<string, unknown> | null;
   provider_events: string[];
   shopify: Record<string, unknown> | null;
@@ -175,14 +198,26 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     const genericSurfaces = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i]')).slice(0, 30);
     const generic = { surfaces: genericSurfaces.map((surface, index) => {
       const text = normal(String((surface as HTMLElement).innerText || surface.textContent || '').slice(0, 1200));
-      const negative = /newsletter|sign in|log in|create account|age|country|location|currency/.test(text);
-      return { id: `surface-${index}`, surface_type: surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' ? 'dialog' : 'banner', visible: visible(surface), privacy_or_cookie_semantics: /cookie|consent|privacy|tracking/.test(text), intent: negative ? 'unknown' : 'consent' };
+      const intent = /newsletter/.test(text) ? 'newsletter'
+        : /email (?:address|updates|signup|sign up)|subscribe/.test(text) ? 'email_capture'
+          : /sign in|log in/.test(text) ? 'login'
+            : /create account|register/.test(text) ? 'account_creation'
+              : /age gate|confirm (?:your )?age|are you (?:18|21)/.test(text) ? 'age_gate'
+                : /country|region selector/.test(text) ? 'country_selector'
+                  : /location selector|choose (?:your )?location/.test(text) ? 'location_selector'
+                    : /currency selector|choose (?:your )?currency/.test(text) ? 'currency_selector'
+                      : /privacy policy/.test(text) && !/reject|decline|manage preferences|cookie settings/.test(text) ? 'privacy_policy_only'
+                        : /privacy notice|we value your privacy/.test(text) && !/reject|decline|manage preferences|cookie settings/.test(text) ? 'ordinary_notice'
+                          : /cookie|consent|privacy|tracking/.test(text) ? 'consent' : 'unknown';
+      return { id: `surface-${index}`, surface_type: surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' ? 'dialog' : 'banner', visible: visible(surface), privacy_or_cookie_semantics: /cookie|consent|privacy|tracking/.test(text), intent };
     }), controls: genericSurfaces.flatMap((surface, index) => controls(surface).map((control) => ({ ...control, surface_id: `surface-${index}` }))) };
     const cb = w.Cookiebot;
     const cookiebot = cb ? { has_response: typeof cb.hasResponse === 'boolean' ? cb.hasResponse : null, consented: typeof cb.consented === 'boolean' ? cb.consented : null, declined: typeof cb.declined === 'boolean' ? cb.declined : null, consent: cb.consent ? { preferences: typeof cb.consent.preferences === 'boolean' ? cb.consent.preferences : null, statistics: typeof cb.consent.statistics === 'boolean' ? cb.consent.statistics : null, marketing: typeof cb.consent.marketing === 'boolean' ? cb.consent.marketing : null } : null } : null;
     let cookieyes: Record<string, unknown> | null = null;
     try { const raw = typeof w.getCkyConsent === 'function' ? w.getCkyConsent() : null; const categories = raw?.categories || raw; cookieyes = categories ? { categories: { analytics: typeof categories.analytics === 'boolean' ? categories.analytics : null, advertisement: typeof categories.advertisement === 'boolean' ? categories.advertisement : null, performance: typeof categories.performance === 'boolean' ? categories.performance : null, functional: typeof categories.functional === 'boolean' ? categories.functional : null }, is_user_action_completed: typeof raw?.isUserActionCompleted === 'boolean' ? raw.isUserActionCompleted : null } : null; } catch { /* Runtime access is optional. */ }
     const onetrust = { active_group_ids: typeof w.OnetrustActiveGroups === 'string' ? w.OnetrustActiveGroups.split(',').filter((value: string) => /^[A-Za-z0-9_-]{1,80}$/.test(value)).slice(0, 200) : [], provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => value === 'OneTrustGroupsUpdated' || value === 'OTConsentApplied').slice(0, 20) : [] };
+    const onetrust_public_methods = ['AllowAll', 'RejectAll', 'ToggleInfoDisplay'].filter((name) => typeof w.OneTrust?.[name] === 'function');
+    const cookieyes_runtime_functions = ['performBannerAction', 'getCkyConsent'].filter((name) => typeof w[name] === 'function');
     const didomiStatus = () => {
       try {
         const status = typeof w.Didomi?.getCurrentUserStatus === 'function' ? w.Didomi.getCurrentUserStatus() : null;
@@ -211,7 +246,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     let cookieNames: string[] = []; let storageKeys: string[] = [];
     try { cookieNames = document.cookie.split(';').map((part) => part.trim().split('=')[0]).filter(Boolean).slice(0, 100); } catch { /* Opaque origins have no cookie jar. */ }
     try { storageKeys = Object.keys(localStorage).slice(0, 100); } catch { /* Opaque origins have no Web Storage. */ }
-    return { globals: globals.filter((name) => Boolean(w[name])), assets: Array.from(document.scripts).map((script) => script.src).filter(Boolean).slice(0, 200), cookie_names: cookieNames, storage_keys: storageKeys, observations: selectors.map((selector) => { const element = document.querySelector(selector) as HTMLButtonElement | null; return element ? { selector, visible: visible(element), enabled: !element.disabled, text: String(element.getAttribute('aria-label') || element.textContent || '').slice(0, 120) } : null; }).filter(Boolean), cookiebot, cookieyes, onetrust, didomi, provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => typeof value === 'string').slice(0, 20) : [], shopify, consent_commands: commands, generic };
+    return { globals: globals.filter((name) => Boolean(w[name])), assets: Array.from(document.scripts).map((script) => script.src).filter(Boolean).slice(0, 200), cookie_names: cookieNames, storage_keys: storageKeys, observations: selectors.map((selector) => { const element = document.querySelector(selector) as HTMLButtonElement | null; return element ? { selector, visible: visible(element), enabled: !element.disabled, text: String(element.getAttribute('aria-label') || element.textContent || '').slice(0, 120) } : null; }).filter(Boolean), cookiebot, cookieyes, onetrust, onetrust_public_methods, cookieyes_runtime_functions, didomi, provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => typeof value === 'string').slice(0, 20) : [], shopify, consent_commands: commands, generic };
   }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS, consentCommandKey: CONSENT_COMMAND_OBSERVATIONS_KEY, providerEventKey: PROVIDER_EVENT_OBSERVATIONS_KEY }) as Omit<BrowserConsentFacts, 'usercentrics'>;
   const usercentrics = await page.evaluate((rootSelector) => {
     const root = document.querySelector(rootSelector) as HTMLElement | null;
@@ -238,6 +273,8 @@ const observation = (facts: BrowserConsentFacts, selector: string) => facts.obse
 const control = (facts: BrowserConsentFacts, selector: string, within = true) => ({ selector, id: selector, visible: Boolean(observation(facts, selector)?.visible), enabled: Boolean(observation(facts, selector)?.enabled), actionable: Boolean(observation(facts, selector)?.visible && observation(facts, selector)?.enabled), within_confirmed_cookiebot_surface: within, within_confirmed_cookieyes_surface: within, within_confirmed_usercentrics_surface: within });
 const storage = (facts: BrowserConsentFacts) => [...facts.cookie_names.map((key_name) => ({ key_name, name: key_name, storage_type: 'cookie' as const, exists: true })), ...facts.storage_keys.map((key_name) => ({ key_name, name: key_name, storage_type: 'local_storage' as const, exists: true }))];
 const click = (page: Page, selector: string) => page.locator(selector).first().click().then(() => true).catch(() => false);
+const documentTarget = (action: string, selector: string, item: ReturnType<typeof control>, surface_type: BrowserActionTarget['surface_type'] = 'banner'): BrowserActionTarget => ({ action, category: null, target_ref: `dom:${selector}`, surface_type, frame_path: ['top'], shadow_mode: 'none', accessible_control: true, attached: true, visible: item.visible, enabled: item.enabled });
+const sourcepointAction = (actionClass: string) => actionClass === 'sp_choice_type_13' || actionClass === 'sp_choice_type_REJECT_ALL' ? 'reject_all' : actionClass === 'sp_choice_type_12' ? 'open_preferences' : actionClass === 'sp_choice_type_SAVE_AND_EXIT' ? 'save_preferences' : actionClass.includes('ACCEPT') || actionClass === 'sp_choice_type_11' ? 'accept_all' : null;
 
 type SourcepointFrameFacts = {
   surfaces: Array<{ selector: string; surface: 'first_layer' | 'privacy_manager'; frame_path: string[]; frame_attached: boolean; visible: boolean }>;
@@ -250,11 +287,13 @@ async function captureSourcepointFrameFacts(page: Page): Promise<SourcepointFram
   const surfaces: SourcepointFrameFacts['surfaces'] = [];
   const controls: SourcepointFrameFacts['controls'] = [];
   const frames = page.frames().filter((frame) => frame !== page.mainFrame());
+  const frameByPath = new Map<string, typeof frames[number]>();
   for (const [index, frame] of frames.entries()) {
-    const framePath = [`sourcepoint-frame-${index}`];
     const frameElement = await frame.frameElement().catch(() => null);
     const id = frameElement ? await frameElement.getAttribute('id').catch(() => null) : null;
     if (!id || !/^sp_message_(?:container|iframe)_[A-Za-z0-9_-]+$/i.test(id)) continue;
+    const framePath = ['top', `iframe#${id}`];
+    frameByPath.set(framePath.join('>'), frame);
     const visible = frameElement ? await frameElement.isVisible().catch(() => false) : false;
     const hasPrivacyManager = await frame.locator('.sp_choice_type_REJECT_ALL, .sp_choice_type_SAVE_AND_EXIT').count().then(Boolean).catch(() => false);
     const surface = hasPrivacyManager ? 'privacy_manager' as const : 'first_layer' as const;
@@ -270,8 +309,7 @@ async function captureSourcepointFrameFacts(page: Page): Promise<SourcepointFram
     surfaces,
     controls,
     async invoke(actionClass, framePath) {
-      const index = Number(framePath[0]?.replace('sourcepoint-frame-', ''));
-      const frame = Number.isInteger(index) ? frames[index] : undefined;
+       const frame = frameByPath.get([...framePath].join('>'));
       if (!frame) return false;
       return frame.locator(`.${actionClass}`).first().click().then(() => true).catch(() => false);
     }
@@ -285,12 +323,12 @@ export async function buildProviderContexts(page: Page, facts: BrowserConsentFac
   const sourcepointFramework = { tcf_present: framework.tcf.lifecycle !== 'absent', tcf_event_status: tcf?.event_status || undefined, tcf_purpose_decision: tcf ? tcfAggregateDecision(tcf.purpose_consents) : undefined, tcf_vendor_decision: tcf ? tcfAggregateDecision(tcf.vendor_consents) : undefined, gpp_present: framework.gpp.lifecycle !== 'absent' };
   const sourcepoint = await captureSourcepointFrameFacts(page);
   return new Map<CmpAdapterProviderId, unknown>([
-    ['onetrust', { ...common, window_globals: facts.globals, surfaces: ONETRUST_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: Object.values(ONETRUST_DOCUMENTED_CONTROLS).map((selector) => control(facts, selector)), public_methods: ['AllowAll', 'RejectAll', 'ToggleInfoDisplay'].filter((method) => facts.globals.includes('OneTrust') && method === 'RejectAll'), active_group_ids: facts.onetrust?.active_group_ids, provider_events: facts.onetrust?.provider_events, invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).OneTrust; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
-    ['cookiebot', { ...common, window_globals: facts.globals, surfaces: [{ selector: COOKIEBOT_STANDARD_ROOT, visible: Boolean(observation(facts, COOKIEBOT_STANDARD_ROOT)?.visible) }], controls: Object.values(COOKIEBOT_STANDARD_CONTROLS).map((selector) => control(facts, selector)), runtime: facts.cookiebot, invoke_control: (selector: string) => click(page, selector) }],
-    ['usercentrics', { ...common, uc_ui_type: facts.globals.includes('UC_UI') ? 'object' : 'undefined', surfaces: [{ selector: USERCENTRICS_STANDARD_ROOT, visible: facts.usercentrics.visible, shadow_mode: facts.usercentrics.shadow_mode }], controls: facts.usercentrics.controls.map((item) => ({ id: item.id, semantic_action: semanticActionForConsentLabel(item.accessible_name), visible: item.visible, enabled: item.enabled, actionable: item.visible && item.enabled, within_confirmed_usercentrics_surface: true, role: 'button' as const })).filter((item): item is { id: string; semantic_action: 'accept_all' | 'reject_all' | 'open_preferences'; visible: boolean; enabled: boolean; actionable: boolean; within_confirmed_usercentrics_surface: true; role: 'button' } => item.semantic_action === 'accept_all' || item.semantic_action === 'reject_all' || item.semantic_action === 'open_preferences'), legacy_globals: facts.globals, invoke_control: (selector: string) => click(page, selector) }],
+    ['onetrust', { ...common, window_globals: facts.globals, surfaces: ONETRUST_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: Object.values(ONETRUST_DOCUMENTED_CONTROLS).map((selector) => control(facts, selector)), action_targets: [documentTarget('accept_all', ONETRUST_DOCUMENTED_CONTROLS.accept, control(facts, ONETRUST_DOCUMENTED_CONTROLS.accept)), documentTarget('reject_all', ONETRUST_DOCUMENTED_CONTROLS.reject, control(facts, ONETRUST_DOCUMENTED_CONTROLS.reject)), documentTarget('open_preferences', ONETRUST_DOCUMENTED_CONTROLS.preferences, control(facts, ONETRUST_DOCUMENTED_CONTROLS.preferences))], public_methods: facts.onetrust_public_methods, active_group_ids: facts.onetrust?.active_group_ids, provider_events: facts.onetrust?.provider_events, invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).OneTrust; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
+    ['cookiebot', { ...common, window_globals: facts.globals, surfaces: [{ selector: COOKIEBOT_STANDARD_ROOT, visible: Boolean(observation(facts, COOKIEBOT_STANDARD_ROOT)?.visible) }], controls: Object.values(COOKIEBOT_STANDARD_CONTROLS).map((selector) => control(facts, selector)), action_targets: [documentTarget('accept_all', COOKIEBOT_STANDARD_CONTROLS.accept, control(facts, COOKIEBOT_STANDARD_CONTROLS.accept)), documentTarget('reject_all', COOKIEBOT_STANDARD_CONTROLS.decline, control(facts, COOKIEBOT_STANDARD_CONTROLS.decline)), documentTarget('reject_all', COOKIEBOT_STANDARD_CONTROLS.level_decline_all, control(facts, COOKIEBOT_STANDARD_CONTROLS.level_decline_all), 'preference_center'), documentTarget('open_preferences', COOKIEBOT_STANDARD_CONTROLS.preferences, control(facts, COOKIEBOT_STANDARD_CONTROLS.preferences))], runtime: facts.cookiebot, invoke_control: (selector: string) => click(page, selector) }],
+    ['usercentrics', { ...common, uc_ui_type: facts.globals.includes('UC_UI') ? 'object' : 'undefined', surfaces: [{ selector: USERCENTRICS_STANDARD_ROOT, visible: facts.usercentrics.visible, shadow_mode: facts.usercentrics.shadow_mode }], controls: facts.usercentrics.controls.map((item) => ({ id: item.id, semantic_action: semanticActionForConsentLabel(item.accessible_name), visible: item.visible, enabled: item.enabled, actionable: item.visible && item.enabled, within_confirmed_usercentrics_surface: true, role: 'button' as const })).filter((item): item is { id: string; semantic_action: 'accept_all' | 'reject_all' | 'open_preferences'; visible: boolean; enabled: boolean; actionable: boolean; within_confirmed_usercentrics_surface: true; role: 'button' } => item.semantic_action === 'accept_all' || item.semantic_action === 'reject_all' || item.semantic_action === 'open_preferences'), action_targets: facts.usercentrics.controls.flatMap((item) => { const action = semanticActionForConsentLabel(item.accessible_name); return action ? [{ action: action as string, category: null, target_ref: `shadow:${item.id}`, surface_type: 'dialog' as const, frame_path: ['top'], shadow_mode: facts.usercentrics.shadow_mode, accessible_control: true, attached: facts.usercentrics.shadow_mode === 'open', visible: item.visible, enabled: item.enabled } satisfies BrowserActionTarget] : []; }), legacy_globals: facts.globals, invoke_control: (selector: string) => click(page, selector) }],
     ['didomi', { ...common, window_globals: facts.globals, surfaces: DIDOMI_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: [], public_methods: Array.isArray(facts.didomi?.public_methods) ? facts.didomi.public_methods : [], runtime: facts.didomi, provider_events: facts.provider_events, invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).Didomi; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
-    ['cookieyes', { ...common, runtime_functions: facts.globals.includes('CookieYes') ? ['performBannerAction', 'getCkyConsent'] : [], surfaces: [{ selector: COOKIEYES_STANDARD_ROOT, visible: Boolean(observation(facts, COOKIEYES_STANDARD_ROOT)?.visible) }], controls: Object.values(COOKIEYES_STABLE_CONTROLS).map((selector) => control(facts, selector)), consent: facts.cookieyes, persistence: storage(facts), invoke_control: (selector: string) => click(page, selector), invoke_public_action: (action: string) => page.evaluate((value) => { const fn = (window as any).performBannerAction; if (typeof fn !== 'function') return false; fn(value); return true; }, action).catch(() => false) }],
-    ['sourcepoint', { ...common, window_globals: facts.globals, surfaces: sourcepoint.surfaces, controls: sourcepoint.controls, active_surface: sourcepoint.surfaces.find((item) => item.visible)?.surface || null, framework: sourcepointFramework, storage: storage(facts), invoke_control: sourcepoint.invoke }]
+    ['cookieyes', { ...common, runtime_functions: facts.cookieyes_runtime_functions, surfaces: [{ selector: COOKIEYES_STANDARD_ROOT, visible: Boolean(observation(facts, COOKIEYES_STANDARD_ROOT)?.visible) }], controls: Object.values(COOKIEYES_STABLE_CONTROLS).map((selector) => control(facts, selector)), action_targets: [documentTarget('accept_all', COOKIEYES_STABLE_CONTROLS.accept, control(facts, COOKIEYES_STABLE_CONTROLS.accept)), documentTarget('reject_all', COOKIEYES_STABLE_CONTROLS.reject, control(facts, COOKIEYES_STABLE_CONTROLS.reject)), documentTarget('open_preferences', COOKIEYES_STABLE_CONTROLS.customize, control(facts, COOKIEYES_STABLE_CONTROLS.customize))], consent: facts.cookieyes, persistence: storage(facts), invoke_control: (selector: string) => click(page, selector), invoke_public_action: (action: string) => page.evaluate((value) => { const fn = (window as any).performBannerAction; if (typeof fn !== 'function') return false; fn(value); return true; }, action).catch(() => false) }],
+    ['sourcepoint', { ...common, window_globals: facts.globals, surfaces: sourcepoint.surfaces, controls: sourcepoint.controls, action_targets: sourcepoint.controls.flatMap((control) => { const action = sourcepointAction(control.action_class); return action ? [{ action, category: null, target_ref: `frame:${control.frame_path.join('>')}:${control.action_class}`, surface_type: control.surface === 'privacy_manager' ? 'preference_center' as const : 'dialog' as const, frame_path: [...control.frame_path], shadow_mode: 'none' as const, accessible_control: true, attached: control.frame_attached, visible: control.visible, enabled: control.enabled }] : []; }), active_surface: sourcepoint.surfaces.find((item) => item.visible)?.surface || null, framework: sourcepointFramework, storage: storage(facts), invoke_control: sourcepoint.invoke }]
   ]);
 }
 

@@ -59,8 +59,10 @@ async function auditNavigation(html: string, accessBlocked = false, sessionInput
   }
 }
 
-async function auditSourcepoint() {
-  const iframe = createServer((_request, response) => response.end(`<!doctype html><button class="sp_choice_type_13" onclick="parent.postMessage('sourcepoint-reject', '*')">Reject</button>`));
+async function auditSourcepoint(preferences = false) {
+  const iframe = createServer((_request, response) => response.end(`<!doctype html>${preferences
+    ? '<button class="sp_choice_type_12" onclick="document.body.innerHTML=\'<button class=&quot;sp_choice_type_REJECT_ALL&quot; onclick=&quot;parent.postMessage(\\\'sourcepoint-reject\\\', \\\'*\\\')&quot;>Reject all</button>\'">Preferences</button>'
+    : '<button class="sp_choice_type_13" onclick="parent.postMessage(\'sourcepoint-reject\', \'*\')">Reject</button>'}`));
   await new Promise<void>((resolve) => iframe.listen(0, '127.0.0.1', resolve));
   const iframeAddress = iframe.address();
   if (!iframeAddress || typeof iframeAddress === 'string') throw new Error('Sourcepoint frame server did not expose a TCP port.');
@@ -225,6 +227,11 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.rejection_verification.status).toBe('inconclusive');
   }, 15_000);
 
+  it('PREF-SP-01 re-discovers the privacy-manager Reject in its real cross-origin iframe', async () => {
+    const result = await auditSourcepoint(true);
+    expect(result.result.interactions.map((item) => item.action)).toEqual(['open_preferences', 'reject_all']);
+  }, 15_000);
+
   it('keeps Shopify Customer Privacy as a separate commerce privacy runtime beside OneTrust', async () => {
     const result = await audit(`<script>
       window.OneTrust={RejectAll(){}};
@@ -305,6 +312,72 @@ describe('Consent V2 production session wiring', () => {
   it('does not classify a newsletter dialog as a custom CMP', async () => {
     const result = await audit('<div role="dialog">Newsletter <button>Sign up</button></div>');
     expect(result.result.mechanisms.some((item) => item.mechanism === 'custom')).toBe(false);
+  });
+
+  it.each([
+    ['NEGATIVE-01', 'Newsletter — privacy policy and cookies', 'Sign up'],
+    ['NEGATIVE-02', 'Login — cookie notice and privacy policy', 'Log in'],
+    ['NEGATIVE-03', 'Age gate — cookie text and privacy policy', 'Confirm age'],
+    ['NEGATIVE-04', 'Country selector — privacy text and cookies', 'Choose country'],
+    ['NEGATIVE-05', 'Privacy notice — cookies', 'Accept'],
+    ['NEGATIVE-06', 'Email updates — cookie wording and privacy policy', 'Subscribe']
+  ])('%s keeps difficult non-CMP dialog intent out of the custom detector', async (_name, text, button) => {
+    const result = await audit(`<div role="dialog">${text}<button>${button}</button></div>`);
+    expect(result.result.mechanisms.some((item) => item.mechanism === 'custom')).toBe(false);
+  });
+
+  it('PREF-OT-01 runs Preferences then re-discovers the preference-center Reject', async () => {
+    const result = await audit(`<script>
+      window.OneTrust={ToggleInfoDisplay(){document.querySelector('#onetrust-banner-sdk').innerHTML='<div id="onetrust-pc-sdk"><button id="onetrust-reject-all-handler" onclick="window.rejected=true">Reject all</button></div>';}};
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-pc-btn-handler" onclick="OneTrust.ToggleInfoDisplay()">Preferences</button></div>`, { ...input, rollout: actionRollout });
+    expect(result.result.interactions.map((item) => item.action)).toEqual(['open_preferences', 'reject_all']);
+    expect(result.result.interactions.every((item) => item.outcome === 'executed')).toBe(true);
+  }, 10_000);
+
+  it('PREF-AMB-01 leaves ambiguous preference categories untouched', async () => {
+    const result = await audit(`<script>window.OneTrust={ToggleInfoDisplay(){document.querySelector('#onetrust-banner-sdk').innerHTML='<div id="onetrust-pc-sdk"><button>Toggle</button><button>Save preferences</button></div>';}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-pc-btn-handler" onclick="OneTrust.ToggleInfoDisplay()">Preferences</button></div>`, { ...input, rollout: actionRollout });
+    expect(result.result.interactions.map((item) => item.action)).toEqual(['open_preferences']);
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+  });
+
+  it('UC-SHADOW-01 and UC-SHADOW-02 preserve open and closed shadow topology', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'open'}).innerHTML='<button>Reject all</button>';</script>`);
+      const { buildProviderContexts, actionTargetFor } = await import('./browser-context-builders');
+      const contexts = await buildProviderContexts(page, await captureBrowserConsentFacts(page), await observeConsentFrameworksInPage(page));
+      expect(actionTargetFor(contexts.get('usercentrics'), 'reject_all')).toMatchObject({ frame_path: ['top'], shadow_mode: 'open', accessible_control: true });
+      await page.setContent(`<aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'closed'});</script>`);
+      expect((await captureBrowserConsentFacts(page)).usercentrics.shadow_mode).toBe('closed');
+    } finally { await page.close(); }
+  });
+
+  it('API-01 and API-02 probe functions rather than provider-object presence', async () => {
+    const oneTrust = await audit(`<script>window.OneTrust={AllowAll(){}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"></div>`);
+    expect(oneTrust.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('not_present');
+    const cookieYes = await audit(`<script>window.performBannerAction=()=>{};window.getCkyConsent=()=>({categories:{analytics:false}});</script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div class="cky-consent-container"></div>`);
+    expect(cookieYes.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('cookieyes');
+    expect(cookieYes.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('api_only');
+  });
+
+  it('CONFLICT-01 selects the visible OneTrust surface over a stale CookieYes library', async () => {
+    const result = await audit(`<script>window.OneTrust={RejectAll(){}};window.CookieYes={};window.performBannerAction=()=>{};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div><div class="cky-consent-container" style="display:none"></div>`);
+    expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('onetrust');
+    expect(result.telemetry.provider_conflict).toBe(true);
+  });
+
+  it('CONFLICT-02 leaves two active CMP surfaces inconclusive and takes no action', async () => {
+    const result = await audit(`<script>window.OneTrust={RejectAll(){}};window.CookieYes={};window.performBannerAction=()=>{};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div><div class="cky-consent-container"><button class="cky-btn-reject">Reject</button></div>`, { ...input, rollout: actionRollout });
+    expect(result.result.reason_codes).toContain('PROVIDER_CONFLICT');
+    expect(result.result.interactions).toEqual([]);
+  });
+
+  it('MULTI-01 keeps visible OneTrust as the primary user surface while preserving Shopify separately', async () => {
+    const result = await audit(`<script>window.OneTrust={RejectAll(){}};window.Shopify={customerPrivacy:{currentVisitorConsent(){return {analytics:'no',marketing:'no',preferences:'no',sale_of_data:'no'}},analyticsProcessingAllowed(){return false},marketingAllowed(){return false},preferencesProcessingAllowed(){return false},saleOfDataAllowed(){return false},shouldShowBanner(){return false},getRegion(){return 'EU'}}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`);
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('direct');
+    expect(result.result.initial_state.decision).toBe('ambiguous');
+    expect(result.result.mechanisms.map((item) => item.mechanism)).toEqual(expect.arrayContaining(['cmp', 'commerce_privacy_runtime']));
   });
 
   it('routes an unknown custom consent banner through the generic detector', async () => {

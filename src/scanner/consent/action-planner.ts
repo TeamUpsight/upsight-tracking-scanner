@@ -117,6 +117,8 @@ export interface RejectStateMachineInput {
   open_preferences?: ActionPlan;
   deny_optional_categories?: ActionPlan[];
   save_preferences?: ActionPlan;
+  /** A visible preference center may expose a direct Reject only after opening. */
+  rediscover_after_preferences?: boolean;
 }
 
 export interface RejectStateMachinePlan {
@@ -267,6 +269,9 @@ export function buildRejectStateMachine(input: RejectStateMachineInput): RejectS
   const optionalCategories = (input.deny_optional_categories || []).filter((plan) => plan.action === 'set_category');
   if (input.open_preferences?.action === 'open_preferences' && optionalCategories.length && input.save_preferences?.action === 'save_preferences') {
     return { status: 'ready', steps: [input.open_preferences, ...optionalCategories, input.save_preferences], reason_codes: [] };
+  }
+  if (input.open_preferences?.action === 'open_preferences' && input.rediscover_after_preferences) {
+    return { status: 'ready', steps: [input.open_preferences], reason_codes: [] };
   }
   return { status: 'unsupported', steps: [], reason_codes: [ConsentAuditCodes.INTERACTION_UNSUPPORTED, ConsentAuditCodes.ACTION_NOT_EXPOSED] };
 }
