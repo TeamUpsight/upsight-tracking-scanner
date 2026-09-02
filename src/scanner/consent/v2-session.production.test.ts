@@ -4,6 +4,9 @@ import { chromium, type Browser } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ConsentV2RolloutControls } from './rollout-controls';
 import { prepareConsentV2Session, runConsentV2Session } from './v2-session';
+import { mapConsentV2ToExisting } from './compatibility-mapper';
+import { captureBrowserConsentFacts } from './browser-context-builders';
+import { semanticActionForConsentLabel } from './generic-consent-detector';
 
 const chromeExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -56,7 +59,44 @@ async function auditNavigation(html: string, accessBlocked = false, sessionInput
   }
 }
 
+async function auditSourcepoint() {
+  const iframe = createServer((_request, response) => response.end(`<!doctype html><button class="sp_choice_type_13" onclick="parent.postMessage('sourcepoint-reject', '*')">Reject</button>`));
+  await new Promise<void>((resolve) => iframe.listen(0, '127.0.0.1', resolve));
+  const iframeAddress = iframe.address();
+  if (!iframeAddress || typeof iframeAddress === 'string') throw new Error('Sourcepoint frame server did not expose a TCP port.');
+  const top = createServer((_request, response) => response.end(`<!doctype html><script>
+    window._sp_={}; window._sp_queue=[]; let rejected=false;
+    window.addEventListener('message', (event) => { if (event.data === 'sourcepoint-reject') rejected=true; });
+    window.__tcfapi=(command, version, callback) => {
+      const state={eventStatus:rejected?'useractioncomplete':'tcloaded',cmpLoaded:true,apiVersion:'2.2',gdprApplies:true,purpose:{consents:{1:!rejected,2:!rejected}},vendor:{consents:{1:!rejected,2:!rejected}}};
+      if(command==='ping') callback({cmpLoaded:true,apiVersion:'2.2',gdprApplies:true},true);
+      if(command==='addEventListener') callback(state,true);
+    };
+  </script><iframe id="sp_message_iframe_test" src="http://127.0.0.1:${iframeAddress.port}/"></iframe>`));
+  await new Promise<void>((resolve) => top.listen(0, '127.0.0.1', resolve));
+  const topAddress = top.address();
+  if (!topAddress || typeof topAddress === 'string') throw new Error('Sourcepoint top server did not expose a TCP port.');
+  const page = await browser.newPage();
+  try {
+    const capture = await prepareConsentV2Session(page); capture.markNavigationStarted();
+    await page.goto(`http://127.0.0.1:${topAddress.port}/`, { waitUntil: 'domcontentloaded' }); capture.markDOMContentLoaded();
+    return await runConsentV2Session(page, { ...input, rollout: actionRollout }, capture);
+  } finally {
+    await page.close();
+    await new Promise<void>((resolve, reject) => top.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => iframe.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
 describe('Consent V2 production session wiring', () => {
+  it('captures Usercentrics open-shadow controls as bounded browser facts', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'open'}).innerHTML='<button>Alle ablehnen</button>';</script>`);
+      expect((await captureBrowserConsentFacts(page)).usercentrics.controls.map((item) => item.accessible_name)).toContain('Alle ablehnen');
+      expect(semanticActionForConsentLabel('Alle ablehnen')).toBe('reject_all');
+    } finally { await page.close(); }
+  });
   it('VER-CB-01 wires Cookiebot runtime rejection through the production verifier', async () => {
     const result = await audit(`<script>
       window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};
@@ -78,7 +118,53 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('onetrust');
     expect(result.result.banner.visibility).toBe('visible');
     expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('direct');
+    expect(mapConsentV2ToExisting(result.result, { geo: 'EU', page_valid: true, tracking_before_interaction: false })).toMatchObject({ cmp_provider: 'OneTrust' });
   });
+
+  it('OT-05 treats close as dismissal rather than a Reject action', async () => {
+    const result = await audit(`<script>window.OneTrust={RejectAll(){}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button aria-label="Close">×</button></div>`);
+    expect(result.result.interactions).toEqual([]);
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('api_only');
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+  });
+
+  it('UC-03 traverses an open Usercentrics shadow root and recognizes a German Reject control', async () => {
+    const result = await audit(`<script>window.UC_UI={};</script><script src="https://web.cmp.usercentrics.eu/ui/loader.js"></script><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>
+      const root=document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'open'});
+      root.innerHTML='<button onclick="this.dataset.rejected=\'true\'">Alle ablehnen</button>';
+    </script>`);
+    expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('usercentrics');
+    expect(result.result.banner).toMatchObject({ visibility: 'visible' });
+  });
+
+  it("DI-02 captures Didomi's documented runtime state through the production adapter", async () => {
+    const result = await audit(`<script>
+      let denied=false; window.Didomi={
+        getCurrentUserStatus(){return {purposes:{a:!denied,b:!denied}};},
+        setUserDisagreeToAll(){denied=true;document.dispatchEvent(new Event('consent.changed'));},
+        notice:{isVisible(){return true;}}
+      };
+    </script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-host"></div>`);
+    expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('didomi');
+    expect(result.result.initial_state.decision).toBe('accepted');
+  });
+
+  it('CY-02 invokes CookieYes Reject and observes the runtime state transition', async () => {
+    const result = await audit(`<script>
+      let rejected=false; window.getCkyConsent=()=>({categories:{analytics:!rejected,advertisement:!rejected,performance:!rejected,functional:!rejected},isUserActionCompleted:rejected});
+      window.performBannerAction=()=>{rejected=true;}; window.CookieYes={};
+    </script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div class="cky-consent-container"><button class="cky-btn-reject" onclick="performBannerAction('reject')">Reject</button></div>`, { ...input, rollout: actionRollout });
+    expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
+    expect(result.result.resulting_state?.decision).toBe('rejected');
+  });
+
+  it('SP-03 uses a real cross-origin Sourcepoint frame through the production session bridge', async () => {
+    const result = await auditSourcepoint();
+    expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('sourcepoint');
+    expect(result.result.banner).toMatchObject({ surface: 'dialog', visibility: 'visible' });
+    expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+  }, 15_000);
 
   it('keeps Shopify Customer Privacy as a separate commerce privacy runtime beside OneTrust', async () => {
     const result = await audit(`<script>

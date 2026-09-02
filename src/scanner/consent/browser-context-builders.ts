@@ -27,6 +27,11 @@ export interface BrowserConsentFacts {
     surfaces: Array<{ id: string; surface_type: 'banner' | 'dialog' | 'drawer'; visible: boolean; privacy_or_cookie_semantics: boolean; intent: string }>;
     controls: Array<{ surface_id: string; visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string }>;
   };
+  usercentrics: {
+    visible: boolean;
+    shadow_mode: 'open' | 'closed' | 'none';
+    controls: Array<{ id: string; accessible_name: string; visible: boolean; enabled: boolean }>;
+  };
 }
 
 const PROVIDER_GLOBALS = ['OneTrust', 'Optanon', 'Cookiebot', 'UC_UI', 'Didomi', 'CookieYes', '_sp_', '_sp_queue', '__tcfapi', '__gpp', '__uspapi'];
@@ -97,7 +102,7 @@ export async function installConsentCommandBootstrap(page: Page) {
 
 /** Captures normalized, bounded browser facts. Provider interpretation remains in adapters. */
 export async function captureBrowserConsentFacts(page: Page): Promise<BrowserConsentFacts> {
-  return page.evaluate(({ globals, selectors, consentCommandKey, providerEventKey }) => {
+  const facts = await page.evaluate(({ globals, selectors, consentCommandKey, providerEventKey }) => {
     const visible = (element: Element | null) => {
       if (!(element instanceof HTMLElement)) return false;
       const style = getComputedStyle(element); const box = element.getBoundingClientRect();
@@ -118,7 +123,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     const cb = w.Cookiebot;
     const cookiebot = cb ? { has_response: typeof cb.hasResponse === 'boolean' ? cb.hasResponse : null, consented: typeof cb.consented === 'boolean' ? cb.consented : null, declined: typeof cb.declined === 'boolean' ? cb.declined : null, consent: cb.consent ? { preferences: typeof cb.consent.preferences === 'boolean' ? cb.consent.preferences : null, statistics: typeof cb.consent.statistics === 'boolean' ? cb.consent.statistics : null, marketing: typeof cb.consent.marketing === 'boolean' ? cb.consent.marketing : null } : null } : null;
     let cookieyes: Record<string, unknown> | null = null;
-    try { const raw = typeof w.getCkyConsent === 'function' ? w.getCkyConsent() : null; const categories = raw?.categories || raw; cookieyes = categories ? { analytics: typeof categories.analytics === 'boolean' ? categories.analytics : null, advertisement: typeof categories.advertisement === 'boolean' ? categories.advertisement : null, performance: typeof categories.performance === 'boolean' ? categories.performance : null, functional: typeof categories.functional === 'boolean' ? categories.functional : null, is_user_action_completed: typeof raw?.isUserActionCompleted === 'boolean' ? raw.isUserActionCompleted : null } : null; } catch { /* Runtime access is optional. */ }
+    try { const raw = typeof w.getCkyConsent === 'function' ? w.getCkyConsent() : null; const categories = raw?.categories || raw; cookieyes = categories ? { categories: { analytics: typeof categories.analytics === 'boolean' ? categories.analytics : null, advertisement: typeof categories.advertisement === 'boolean' ? categories.advertisement : null, performance: typeof categories.performance === 'boolean' ? categories.performance : null, functional: typeof categories.functional === 'boolean' ? categories.functional : null }, is_user_action_completed: typeof raw?.isUserActionCompleted === 'boolean' ? raw.isUserActionCompleted : null } : null; } catch { /* Runtime access is optional. */ }
     const onetrust = { active_group_ids: typeof w.OnetrustActiveGroups === 'string' ? w.OnetrustActiveGroups.split(',').filter((value: string) => /^[A-Za-z0-9_-]{1,80}$/.test(value)).slice(0, 200) : [], provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => value === 'OneTrustGroupsUpdated' || value === 'OTConsentApplied').slice(0, 20) : [] };
     const didomiStatus = () => {
       try {
@@ -127,8 +132,8 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         const visit = (value: unknown, depth = 0) => { if (depth > 5 || !value) return; if (value === true) { enabled += 1; return; } if (value === false) { disabled += 1; return; } if (typeof value === 'object') Object.values(value as Record<string, unknown>).slice(0, 200).forEach((item) => visit(item, depth + 1)); };
         visit(status?.purposes || status?.purpose || status);
         const total = enabled + disabled; const decision = total === 0 ? 'ambiguous' : disabled === total ? 'rejected' : enabled === total ? 'accepted' : 'partial';
-        return { current_user_status: { decision, enabled_purpose_count: Math.min(enabled, 200), disabled_purpose_count: Math.min(disabled, 200) }, notice_visible: typeof w.Didomi?.notice?.isVisible === 'function' ? Boolean(w.Didomi.notice.isVisible()) : null };
-      } catch { return { current_user_status: null, notice_visible: null }; }
+        return { current_user_status: { decision, enabled_purpose_count: Math.min(enabled, 200), disabled_purpose_count: Math.min(disabled, 200) }, notice_visible: typeof w.Didomi?.notice?.isVisible === 'function' ? Boolean(w.Didomi.notice.isVisible()) : null, public_methods: ['getCurrentUserStatus', 'setUserAgreeToAll', 'setUserDisagreeToAll'].filter((name) => typeof w.Didomi?.[name] === 'function') };
+      } catch { return { current_user_status: null, notice_visible: null, public_methods: [] }; }
     };
     const didomi = didomiStatus();
     let shopify: Record<string, unknown> | null = null;
@@ -149,7 +154,26 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     try { cookieNames = document.cookie.split(';').map((part) => part.trim().split('=')[0]).filter(Boolean).slice(0, 100); } catch { /* Opaque origins have no cookie jar. */ }
     try { storageKeys = Object.keys(localStorage).slice(0, 100); } catch { /* Opaque origins have no Web Storage. */ }
     return { globals: globals.filter((name) => Boolean(w[name])), assets: Array.from(document.scripts).map((script) => script.src).filter(Boolean).slice(0, 200), cookie_names: cookieNames, storage_keys: storageKeys, observations: selectors.map((selector) => { const element = document.querySelector(selector) as HTMLButtonElement | null; return element ? { selector, visible: visible(element), enabled: !element.disabled, text: String(element.getAttribute('aria-label') || element.textContent || '').slice(0, 120) } : null; }).filter(Boolean), cookiebot, cookieyes, onetrust, didomi, provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => typeof value === 'string').slice(0, 20) : [], shopify, consent_commands: commands, generic };
-  }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS, consentCommandKey: CONSENT_COMMAND_OBSERVATIONS_KEY, providerEventKey: PROVIDER_EVENT_OBSERVATIONS_KEY }) as Promise<BrowserConsentFacts>;
+  }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS, consentCommandKey: CONSENT_COMMAND_OBSERVATIONS_KEY, providerEventKey: PROVIDER_EVENT_OBSERVATIONS_KEY }) as Omit<BrowserConsentFacts, 'usercentrics'>;
+  const usercentrics = await page.evaluate((rootSelector) => {
+    const root = document.querySelector(rootSelector) as HTMLElement | null;
+    if (!root) return { visible: false, shadow_mode: 'none' as const, controls: [] };
+    const style = getComputedStyle(root); const box = root.getBoundingClientRect();
+    const visible = style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+    const shadow = root.shadowRoot;
+    if (!shadow) return { visible, shadow_mode: 'closed' as const, controls: [] };
+    return {
+      visible,
+      shadow_mode: 'open' as const,
+      controls: Array.from(shadow.querySelectorAll('button, [role="button"], a')).slice(0, 30).map((element, index) => ({
+        id: `${rootSelector} button >> nth=${index}`,
+        accessible_name: String((element as HTMLElement).getAttribute('aria-label') || element.textContent || '').slice(0, 120),
+        visible: true,
+        enabled: !(element as HTMLButtonElement).disabled
+      }))
+    };
+  }, USERCENTRICS_STANDARD_ROOT);
+  return { ...facts, usercentrics };
 }
 
 const observation = (facts: BrowserConsentFacts, selector: string) => facts.observations.find((item) => item.selector === selector);
@@ -157,18 +181,58 @@ const control = (facts: BrowserConsentFacts, selector: string, within = true) =>
 const storage = (facts: BrowserConsentFacts) => [...facts.cookie_names.map((key_name) => ({ key_name, name: key_name, storage_type: 'cookie' as const, exists: true })), ...facts.storage_keys.map((key_name) => ({ key_name, name: key_name, storage_type: 'local_storage' as const, exists: true }))];
 const click = (page: Page, selector: string) => page.locator(selector).first().click().then(() => true).catch(() => false);
 
+type SourcepointFrameFacts = {
+  surfaces: Array<{ selector: string; surface: 'first_layer' | 'privacy_manager'; frame_path: string[]; frame_attached: boolean; visible: boolean }>;
+  controls: Array<{ action_class: 'sp_choice_type_11' | 'sp_choice_type_12' | 'sp_choice_type_13' | 'sp_choice_type_ACCEPT_ALL' | 'sp_choice_type_REJECT_ALL' | 'sp_choice_type_SAVE_AND_EXIT'; surface: 'first_layer' | 'privacy_manager'; frame_path: string[]; frame_attached: boolean; visible: boolean; enabled: boolean; actionable: boolean; within_confirmed_sourcepoint_surface: boolean }>;
+  invoke(actionClass: string, framePath: readonly string[]): Promise<boolean>;
+};
+
+/** Reads Sourcepoint's public iframe surface through Playwright, including cross-origin frames. */
+async function captureSourcepointFrameFacts(page: Page): Promise<SourcepointFrameFacts> {
+  const surfaces: SourcepointFrameFacts['surfaces'] = [];
+  const controls: SourcepointFrameFacts['controls'] = [];
+  const frames = page.frames().filter((frame) => frame !== page.mainFrame());
+  for (const [index, frame] of frames.entries()) {
+    const framePath = [`sourcepoint-frame-${index}`];
+    const frameElement = await frame.frameElement().catch(() => null);
+    const id = frameElement ? await frameElement.getAttribute('id').catch(() => null) : null;
+    if (!id || !/^sp_message_(?:container|iframe)_[A-Za-z0-9_-]+$/i.test(id)) continue;
+    const visible = frameElement ? await frameElement.isVisible().catch(() => false) : false;
+    const hasPrivacyManager = await frame.locator('.sp_choice_type_REJECT_ALL, .sp_choice_type_SAVE_AND_EXIT').count().then(Boolean).catch(() => false);
+    const surface = hasPrivacyManager ? 'privacy_manager' as const : 'first_layer' as const;
+    surfaces.push({ selector: `#${id}`, surface, frame_path: framePath, frame_attached: true, visible });
+    for (const actionClass of ['sp_choice_type_11', 'sp_choice_type_12', 'sp_choice_type_13', 'sp_choice_type_ACCEPT_ALL', 'sp_choice_type_REJECT_ALL', 'sp_choice_type_SAVE_AND_EXIT'] as const) {
+      const target = frame.locator(`.${actionClass}`).first();
+      if (!await target.count()) continue;
+      const controlSurface = actionClass.includes('REJECT_ALL') || actionClass.includes('ACCEPT_ALL') || actionClass.includes('SAVE_AND_EXIT') ? 'privacy_manager' as const : 'first_layer' as const;
+      controls.push({ action_class: actionClass, surface: controlSurface, frame_path: framePath, frame_attached: true, visible: await target.isVisible().catch(() => false), enabled: await target.isEnabled().catch(() => false), actionable: true, within_confirmed_sourcepoint_surface: true });
+    }
+  }
+  return {
+    surfaces,
+    controls,
+    async invoke(actionClass, framePath) {
+      const index = Number(framePath[0]?.replace('sourcepoint-frame-', ''));
+      const frame = Number.isInteger(index) ? frames[index] : undefined;
+      if (!frame) return false;
+      return frame.locator(`.${actionClass}`).first().click().then(() => true).catch(() => false);
+    }
+  };
+}
+
 /** Builds transient adapter contexts; the adapters retain all provider semantics. */
-export function buildProviderContexts(page: Page, facts: BrowserConsentFacts, framework: ConsentFrameworkObservations) {
+export async function buildProviderContexts(page: Page, facts: BrowserConsentFacts, framework: ConsentFrameworkObservations) {
   const common = { asset_urls: facts.assets, cookies: facts.cookie_names.map((name) => ({ name, exists: true })), storage: storage(facts), tcf_active: framework.tcf.lifecycle !== 'absent', gpp_active: framework.gpp.lifecycle !== 'absent' };
   const tcf = framework.tcf.latest_event;
   const sourcepointFramework = { tcf_present: framework.tcf.lifecycle !== 'absent', tcf_event_status: tcf?.event_status || undefined, tcf_purpose_decision: tcf ? tcfAggregateDecision(tcf.purpose_consents) : undefined, tcf_vendor_decision: tcf ? tcfAggregateDecision(tcf.vendor_consents) : undefined, gpp_present: framework.gpp.lifecycle !== 'absent' };
+  const sourcepoint = await captureSourcepointFrameFacts(page);
   return new Map<CmpAdapterProviderId, unknown>([
     ['onetrust', { ...common, window_globals: facts.globals, surfaces: ONETRUST_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: Object.values(ONETRUST_DOCUMENTED_CONTROLS).map((selector) => control(facts, selector)), public_methods: ['AllowAll', 'RejectAll', 'ToggleInfoDisplay'].filter((method) => facts.globals.includes('OneTrust') && method === 'RejectAll'), active_group_ids: facts.onetrust?.active_group_ids, provider_events: facts.onetrust?.provider_events, invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).OneTrust; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
     ['cookiebot', { ...common, window_globals: facts.globals, surfaces: [{ selector: COOKIEBOT_STANDARD_ROOT, visible: Boolean(observation(facts, COOKIEBOT_STANDARD_ROOT)?.visible) }], controls: Object.values(COOKIEBOT_STANDARD_CONTROLS).map((selector) => control(facts, selector)), runtime: facts.cookiebot, invoke_control: (selector: string) => click(page, selector) }],
-    ['usercentrics', { ...common, uc_ui_type: facts.globals.includes('UC_UI') ? 'object' : 'undefined', surfaces: [{ selector: USERCENTRICS_STANDARD_ROOT, visible: Boolean(observation(facts, USERCENTRICS_STANDARD_ROOT)?.visible), shadow_mode: 'unknown' }], controls: facts.generic.controls.filter((item) => item.surface_id && (item.accessible_name || '')).map((item, index) => ({ id: `${USERCENTRICS_STANDARD_ROOT} button:nth-of-type(${index + 1})`, semantic_action: semanticActionForConsentLabel(item.accessible_name) })).filter((item): item is { id: string; semantic_action: 'accept_all' | 'reject_all' | 'open_preferences' } => item.semantic_action === 'accept_all' || item.semantic_action === 'reject_all' || item.semantic_action === 'open_preferences').map((item) => ({ ...item, visible: true, enabled: true, actionable: true, within_confirmed_usercentrics_surface: true, role: 'button' as const })), legacy_globals: facts.globals, invoke_control: (selector: string) => click(page, selector) }],
-    ['didomi', { ...common, window_globals: facts.globals, surfaces: DIDOMI_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: [], public_methods: facts.globals.includes('Didomi') ? ['getCurrentUserStatus', 'setUserDisagreeToAll'] : [], runtime: facts.didomi, provider_events: facts.provider_events, invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).Didomi; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
+    ['usercentrics', { ...common, uc_ui_type: facts.globals.includes('UC_UI') ? 'object' : 'undefined', surfaces: [{ selector: USERCENTRICS_STANDARD_ROOT, visible: facts.usercentrics.visible, shadow_mode: facts.usercentrics.shadow_mode }], controls: facts.usercentrics.controls.map((item) => ({ id: item.id, semantic_action: semanticActionForConsentLabel(item.accessible_name), visible: item.visible, enabled: item.enabled, actionable: item.visible && item.enabled, within_confirmed_usercentrics_surface: true, role: 'button' as const })).filter((item): item is { id: string; semantic_action: 'accept_all' | 'reject_all' | 'open_preferences'; visible: boolean; enabled: boolean; actionable: boolean; within_confirmed_usercentrics_surface: true; role: 'button' } => item.semantic_action === 'accept_all' || item.semantic_action === 'reject_all' || item.semantic_action === 'open_preferences'), legacy_globals: facts.globals, invoke_control: (selector: string) => click(page, selector) }],
+    ['didomi', { ...common, window_globals: facts.globals, surfaces: DIDOMI_STANDARD_ROOTS.map((selector) => ({ selector, visible: Boolean(observation(facts, selector)?.visible) })), controls: [], public_methods: Array.isArray(facts.didomi?.public_methods) ? facts.didomi.public_methods : [], runtime: facts.didomi, provider_events: facts.provider_events, invoke_control: (selector: string) => click(page, selector), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).Didomi; if (typeof api?.[name] !== 'function') return false; api[name](); return true; }, method).catch(() => false) }],
     ['cookieyes', { ...common, runtime_functions: facts.globals.includes('CookieYes') ? ['performBannerAction', 'getCkyConsent'] : [], surfaces: [{ selector: COOKIEYES_STANDARD_ROOT, visible: Boolean(observation(facts, COOKIEYES_STANDARD_ROOT)?.visible) }], controls: Object.values(COOKIEYES_STABLE_CONTROLS).map((selector) => control(facts, selector)), consent: facts.cookieyes, persistence: storage(facts), invoke_control: (selector: string) => click(page, selector), invoke_public_action: (action: string) => page.evaluate((value) => { const fn = (window as any).performBannerAction; if (typeof fn !== 'function') return false; fn(value); return true; }, action).catch(() => false) }],
-    ['sourcepoint', { ...common, window_globals: facts.globals, surfaces: [], controls: [], active_surface: null, framework: sourcepointFramework, storage: storage(facts) }]
+    ['sourcepoint', { ...common, window_globals: facts.globals, surfaces: sourcepoint.surfaces, controls: sourcepoint.controls, active_surface: sourcepoint.surfaces.find((item) => item.visible)?.surface || null, framework: sourcepointFramework, storage: storage(facts), invoke_control: sourcepoint.invoke }]
   ]);
 }
 
