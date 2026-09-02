@@ -345,10 +345,30 @@ export async function observeConsentFrameworksInPage(page: Page): Promise<Consen
     return state ? { tcf: { ...state.tcf, present: state.tcf?.present === true || typeof w.__tcfapi === 'function' }, gpp: { ...state.gpp, present: state.gpp?.present === true || typeof w.__gpp === 'function' }, usp: state.usp_present === true || typeof w.__uspapi === 'function' } : { tcf: { present: typeof w.__tcfapi === 'function', ping: null, latest_event: null, event_count: 0 }, gpp: { present: typeof w.__gpp === 'function', ping: null, latest_event: null, event_count: 0 }, usp: typeof w.__uspapi === 'function' };
   }, FRAMEWORK_OBSERVATIONS_KEY);
   let captured = await readBridge();
+  // `addInitScript` observes navigations. A same-document fixture or a page
+  // reached before the bootstrap was installed can still expose a real public
+  // framework API, so probe only its lifecycle ping as a bounded fallback.
+  if ((captured.tcf.present && !captured.tcf.ping) || (captured.gpp.present && !captured.gpp.ping)) {
+    const direct = await page.evaluate(async () => {
+      const call = (invoke: (callback: (payload: unknown, success?: boolean) => void) => void) => new Promise<unknown>((resolve) => {
+        let settled = false;
+        const finish = (value: unknown) => { if (!settled) { settled = true; resolve(value); } };
+        try { invoke((payload, success) => finish(success === false ? null : payload)); } catch { finish(null); }
+        setTimeout(() => finish(null), 250);
+      });
+      const w = window as any;
+      return {
+        tcf: typeof w.__tcfapi === 'function' ? await call((callback) => w.__tcfapi('ping', 2, callback)) : null,
+        gpp: typeof w.__gpp === 'function' ? await call((callback) => w.__gpp('ping', callback)) : null
+      };
+    });
+    if (!captured.tcf.ping && direct.tcf) captured.tcf.ping = direct.tcf as any;
+    if (!captured.gpp.ping && direct.gpp) captured.gpp.ping = direct.gpp as any;
+  }
   // The bridge is already observing for the page lifetime. Only a framework
   // that is present but has not replied gets this short bounded chance to
   // deliver its delayed ping/listener callback.
-  const awaitingCallback = (captured.tcf.present && !captured.tcf.ping && !captured.tcf.latest_event) || (captured.gpp.present && !captured.gpp.ping && !captured.gpp.latest_event);
+  const awaitingCallback = (captured.tcf.present && !captured.tcf.latest_event) || (captured.gpp.present && !captured.gpp.ping && !captured.gpp.latest_event);
   if (awaitingCallback) {
     await page.waitForFunction((frameworkKey) => {
       const state = (window as any)[frameworkKey];

@@ -860,6 +860,7 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
       enabled: true, observation_only: true, provider: 'onetrust', provider_confidence: 'high', provider_conflict: false,
       banner_visibility: 'visible', reject_availability: 'direct', interaction_outcome: 'not_attempted', verification: 'inconclusive',
       persistence: 'not_applicable', generic_fallback: false, selector_or_action_failure: false, tcf_present: true, gpp_present: false,
+      tcf_lifecycle: 'ready', gpp_lifecycle: 'absent', usp_present: false, action_status: 'not_attempted',
       consent_mode_classification: 'advanced_candidate', tracking_consistency: 'not_applicable', unknown_cmp_fingerprint: null,
       geo_unverified: true, blocked_or_challenged: false
     };

@@ -55,20 +55,20 @@ The `CONSENT_V2_ENABLED=false` fallback uses the legacy detector only; it must n
 
 ## Production audit map
 
-| Requirement | Owning module | Production caller | Executable E2E test | Status |
-| --- | --- | --- | --- | --- |
-| provider scoring | `adapter-registry.ts` | `v2-session.ts` | provider fixture cases in `v2-session.production.test.ts` | complete |
-| P0 adapters | six `*-adapter.ts` modules | adapter registry via `v2-session.ts` | OneTrust, Cookiebot, Usercentrics, Didomi, CookieYes, Sourcepoint cases | complete |
-| Shopify runtime | `shopify-customer-privacy-runtime.ts` | platform registry via `v2-session.ts` | Shopify and multi-mechanism cases | complete |
-| TCF, GPP, USP | `framework-observers.ts` | `v2-session.ts` | Sourcepoint and GPP cases; USP remains unit-covered only | incomplete for USP E2E |
-| Google Consent Mode | `google-consent-mode-observer.ts` | prepared session and `v2-session.ts` | GCM-01 through GCM-04 | complete |
-| generic detector | `generic-consent-detector.ts` | `v2-session.ts` | custom-banner and newsletter cases | complete |
-| action planner | `action-planner.ts` | `v2-session.ts` | OneTrust/Cookiebot/CookieYes/Sourcepoint action cases | complete |
-| Reject verifier | `reject-verification-engine.ts` | `v2-session.ts` | VER-CB-01 | complete |
-| persistence verifier | `persistence-verification.ts` | `v2-session.ts` | production session cases invoke same-context reload; no dedicated asserted browser case | incomplete |
-| tracking consistency | `tracking-consistency.ts` | `v2-session.ts` | pre-choice and GCM contradiction cases | complete |
-| unknown fingerprinting | `unknown-cmp-fingerprint.ts` | `v2-session.ts` telemetry | custom-banner case does not assert fingerprint | incomplete |
-| compatibility mapper | `compatibility-mapper.ts` | `audit-runner.ts` finalization | OneTrust mapper assertion exercises the same mapper, but not full runner finalization | incomplete for full runner E2E |
-| rollout controls | `rollout-controls.ts` | `audit-runner.ts` and `v2-session.ts` | disabled-rollout production-session case; legacy runner fallback is not browser-exercised | incomplete for full runner E2E |
+| Requirement | Owning module | Production caller | Production browser fixture | Full-runner coverage | Status |
+| --- | --- | --- | --- | --- | --- |
+| provider scoring and P0 adapters | `adapter-registry.ts`, provider adapters | `v2-session.ts` | provider cases in `v2-session.production.test.ts` | RUNNER-V2-01 uses OneTrust through `audit-runner.ts` | complete |
+| Shopify runtime | `shopify-customer-privacy-runtime.ts` | `v2-session.ts` | Shopify and multi-mechanism cases | not applicable to runner acceptance | complete |
+| TCF, GPP, USP lifecycle | `framework-observers.ts` | `v2-session.ts` | async TCF, GPP-02, USP-E2E-01 | not required for the runner fields | complete |
+| Google Consent Mode | `google-consent-mode-observer.ts` | prepared session and `v2-session.ts` | GCM-01 through GCM-04 | not required for the runner fields | complete |
+| generic detector and unknown fingerprint | `generic-consent-detector.ts`, `unknown-cmp-fingerprint.ts` | `v2-session.ts` telemetry | TELEM-UNKNOWN-01 stable/drift fixture | Consent V2 result persists telemetry through the runner | complete |
+| provider-conflict telemetry | `adapter-registry.ts`, `v2-session.ts` | `v2-session.ts` telemetry | TELEM-CONFLICT-01 | not required for compatibility fields | complete |
+| action planner and verification | `action-planner.ts`, `reject-verification-engine.ts` | `v2-session.ts` | OneTrust/Cookiebot/CookieYes/Sourcepoint and VER-CB-01 | observation-only runner fixture does not enable actions | complete for observation mode |
+| persistence verifier | `persistence-verification.ts` | `v2-session.ts` | provider cases assert same-context reload | not required when observation-only | complete for observation mode |
+| tracking consistency | `tracking-consistency.ts` | `v2-session.ts` | pre-choice and GCM contradiction cases | RUNNER-V2-02 final status assertion | complete |
+| compatibility mapper | `compatibility-mapper.ts` | `audit-runner.ts` finalization | mapper unit cases | RUNNER-V2-01 and RUNNER-V2-02 | complete |
+| rollout controls / legacy fallback | `rollout-controls.ts` | `audit-runner.ts` and `v2-session.ts` | disabled production-session case | RUNNER-DISABLED-01 | complete |
+| blocked access semantics | `fresh-context.ts`, `audit-runner.ts` | access finalization | PRE-05 | RUNNER-BLOCKED-01 | complete |
+| Linux CI browser gate | `.github/workflows/consent-v2.yml` | GitHub Actions | Playwright-managed Chromium | runs full Consent V2 and full-runner browser suites | complete |
 
-The remaining incomplete rows are release gates: do not enable actions until they have direct production-session browser assertions. The two full-runner rows also need a safe, approved Browserless integration fixture before they can be called end-to-end covered.
+Action readiness remains **NOT READY**. These local deterministic browser fixtures prove production wiring; Completion WP05 still requires reviewed non-production Browserless/Decodo live validation.

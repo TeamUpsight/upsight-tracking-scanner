@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { chromium, type Browser } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -7,11 +6,6 @@ import { prepareConsentV2Session, runConsentV2Session } from './v2-session';
 import { mapConsentV2ToExisting } from './compatibility-mapper';
 import { captureBrowserConsentFacts, observeConsentFrameworksInPage } from './browser-context-builders';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
-
-const chromeExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || [
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
-].find(existsSync);
 
 const rollout: ConsentV2RolloutControls = {
   enabled: true, actions_enabled: false, action_sample_percent: 0,
@@ -28,8 +22,10 @@ const actionRollout: ConsentV2RolloutControls = {
 let browser: Browser;
 
 beforeAll(async () => {
-  if (!chromeExecutable) throw new Error('Set PLAYWRIGHT_CHROMIUM_EXECUTABLE to run Consent V2 browser fixture tests.');
-  browser = await chromium.launch({ executablePath: chromeExecutable, headless: true });
+  browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
+    headless: true
+  });
 });
 afterAll(async () => { await browser?.close(); });
 
@@ -298,6 +294,7 @@ describe('Consent V2 production session wiring', () => {
     const result = await audit(`<script>window.__gpp=(command, callback) => { const ping={gppVersion:'1.1',cmpStatus:'loaded',cmpDisplayStatus:'hidden',signalStatus:'ready',cmpId:1,supportedAPIs:['usnat'],sectionList:[7],applicableSections:[7,8]}; if(command==='ping') callback(ping,true); if(command==='addEventListener') callback({listenerId:1,pingData:ping},true); };</script>`);
     expect(result.result.frameworks).toMatchObject({ gpp: 'present' });
     expect(result.result.frameworks.evidence).toEqual(expect.arrayContaining(['gpp_cmp_status:loaded', 'gpp_cmp_display_status:hidden', 'gpp_signal_status:ready', 'gpp_applicable_sections:7,8']));
+    expect(result.telemetry).toMatchObject({ gpp_present: true, gpp_lifecycle: 'ready', usp_present: false });
   });
 
   it('MM-01 preserves Shopify, OneTrust, GPP, and GCM as independent mechanisms', async () => {
@@ -407,7 +404,7 @@ describe('Consent V2 production session wiring', () => {
   it('CONFLICT-01 selects the visible OneTrust surface over a stale CookieYes library', async () => {
     const result = await audit(`<script>window.OneTrust={RejectAll(){}};window.CookieYes={};window.performBannerAction=()=>{};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div><div class="cky-consent-container" style="display:none"></div>`);
     expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('onetrust');
-    expect(result.telemetry.provider_conflict).toBe(true);
+    expect(result.telemetry).toMatchObject({ provider: 'onetrust', provider_conflict: true });
   });
 
   it('CONFLICT-02 leaves two active CMP surfaces inconclusive and takes no action', async () => {
@@ -427,6 +424,22 @@ describe('Consent V2 production session wiring', () => {
   it('routes an unknown custom consent banner through the generic detector', async () => {
     const result = await audit('<div id="cookie-notice">We use cookies.<button>Accept all</button><button>Reject all</button></div>');
     expect(result.result.mechanisms.find((item) => item.mechanism === 'custom')?.provider?.reason_codes).toContain('CMP_PROVIDER_UNKNOWN');
+  });
+
+  it('TELEM-UNKNOWN-01 fingerprints the actual generic detector result stably and without raw values', async () => {
+    const fixture = (host: string) => `<script src="https://${host}/consent.js"></script><div role="dialog">We use cookies.<button>Accept all</button><button>Reject all</button></div>`;
+    const first = await audit(fixture('cmp-one.example'));
+    const second = await audit(fixture('cmp-one.example'));
+    const changed = await audit(fixture('cmp-two.example'));
+    expect(first.result.mechanisms.find((item) => item.mechanism === 'custom')?.provider?.attribution).toBe('unknown_candidate');
+    expect(first.telemetry).toMatchObject({ provider: 'generic', unknown_cmp_fingerprint: expect.stringMatching(/^ucmp:v1:/), action_status: 'not_attempted' });
+    expect(first.telemetry.unknown_cmp_fingerprint).toBe(second.telemetry.unknown_cmp_fingerprint);
+    expect(changed.telemetry.unknown_cmp_fingerprint).not.toBe(first.telemetry.unknown_cmp_fingerprint);
+  });
+
+  it('TELEM-CONFLICT-01 records provider conflict independently from final provider attribution', async () => {
+    const result = await audit(`<script>window.OneTrust={RejectAll(){}};window.CookieYes={};window.performBannerAction=()=>{};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div><div class="cky-consent-container" style="display:none"></div>`);
+    expect(result.telemetry).toMatchObject({ provider: 'onetrust', provider_conflict: true });
   });
 
   it('PRE-01 captures a GA4 head event before DOMContentLoaded as pre-choice', async () => {

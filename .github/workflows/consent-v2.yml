@@ -1,0 +1,29 @@
+name: Consent V2 integration gate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  consent-v2:
+    name: Consent V2 browser integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Provision reproducible Chromium
+        run: npx playwright-core install --with-deps chromium
+      - run: npm run lint
+      - run: npm test -- src/scanner/consent
+      - run: npm run test:consent-browser
+      - run: npm run test:regression
+      - run: npm run build
+      - name: Check whitespace errors
+        run: git diff --check HEAD^

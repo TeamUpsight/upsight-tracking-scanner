@@ -298,6 +298,10 @@ export interface EvidenceBundle {
       selector_or_action_failure: boolean;
       tcf_present: boolean;
       gpp_present: boolean;
+      tcf_lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error';
+      gpp_lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error';
+      usp_present: boolean;
+      action_status: 'not_attempted' | 'unsupported' | 'not_executed' | 'executed' | 'verified' | 'inconclusive';
       consent_mode_classification: string;
       tracking_consistency: 'consistent' | 'contradiction' | 'insufficient_evidence' | 'not_applicable';
       unknown_cmp_fingerprint: string | null;

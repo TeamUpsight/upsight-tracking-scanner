@@ -80,6 +80,17 @@ export const activeScansRegistry = {
   }
 };
 
+/**
+ * Test seams for deterministic full-runner browser fixtures. Production callers
+ * omit these and retain the Browserless/local-launch and DNS behavior below.
+ */
+export interface AuditRunnerDependencies {
+  launchBrowser?: () => Promise<Browser>;
+  storefrontUrl?: string;
+  resolveHostname?: typeof resolveHostnameEvidence;
+  consentGeoVerified?: boolean | null;
+}
+
 class ScanTermination extends Error {
   constructor(
     readonly category: ErrorCategory,
@@ -882,7 +893,8 @@ export async function runStorefrontAudit(
     abortSignal?: AbortSignal;
     onProxyMetric?: (event: ProxyMetricEvent) => Promise<void>;
   },
-  onUpdate: (updates: Partial<StorefrontAudit>) => Promise<void>
+  onUpdate: (updates: Partial<StorefrontAudit>) => Promise<void>,
+  dependencies: AuditRunnerDependencies = {}
 ): Promise<void> {
   const startedMs = Date.now();
   const timeoutMs = globalScanTimeoutMs();
@@ -909,6 +921,7 @@ export async function runStorefrontAudit(
     PDP_NAVIGATION_ATTEMPT_LIMIT
   );
   const normalizedDomain = normalizeAuditDomain(params.domain);
+  const storefrontUrl = dependencies.storefrontUrl || `https://${normalizedDomain || String(params.domain || '')}`;
   const geo = params.tested_geos && ['USA', 'EU', 'UK'].includes(params.tested_geos)
     ? params.tested_geos
     : 'USA';
@@ -1390,7 +1403,12 @@ export async function runStorefrontAudit(
     try {
       browser = cdpUrl
         ? await chromium.connectOverCDP(cdpUrl, { timeout: solveCaptchas ? 60_000 : 30_000 })
-        : await chromium.launch({ headless: true });
+        : dependencies.launchBrowser
+          ? await dependencies.launchBrowser()
+          : await chromium.launch({
+            headless: true,
+            executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined
+          });
     } catch (error) {
       const failureCode = classifyBrowserConnectionError(error);
       evidence.runtime.browser_connection_failure_code = failureCode;
@@ -1483,7 +1501,7 @@ export async function runStorefrontAudit(
     }
 
     addTrace('dns_preflight_started', { hostname: normalizedDomain });
-    const dnsEvidence = await resolveHostnameEvidence(normalizedDomain);
+    const dnsEvidence = await (dependencies.resolveHostname || resolveHostnameEvidence)(normalizedDomain);
     evidenceCollector.setPage({ dnsResolutionStatus: dnsEvidence.status, dnsSources: dnsEvidence.sources });
     if (dnsEvidence.status === 'not_resolved') {
       addTrace('dns_preflight_failed', { failure_code: 'DNS_RESOLUTION_FAILED', sources: dnsEvidence.sources });
@@ -1510,8 +1528,8 @@ export async function runStorefrontAudit(
         check();
         currentPhase = 'consent_initial_load';
         evidenceCollector.setPage({ attempted: true });
-        addTrace('consent_navigation_started', { url: safeUrl(`https://${normalizedDomain}`) });
-        response = await homepage!.goto(`https://${normalizedDomain}`, { waitUntil: 'commit', timeout: 15_000 });
+        addTrace('consent_navigation_started', { url: safeUrl(storefrontUrl) });
+        response = await homepage!.goto(storefrontUrl, { waitUntil: 'commit', timeout: 15_000 });
         await waitForDomContentSoft(
           homepage!,
           'consent_initial_load',
@@ -1809,7 +1827,7 @@ export async function runStorefrontAudit(
         const freshConsent = await createFreshConsentContext(browser!, {
           requestedGeo: geo,
           proxyRegion: currentProxyCountry,
-          independentlyVerified: evidence.runtime.proxy_egress_reachable ? evidence.runtime.proxy_country_verified : null
+          independentlyVerified: dependencies.consentGeoVerified ?? (evidence.runtime.proxy_egress_reachable ? evidence.runtime.proxy_country_verified : null)
         });
         consentContext = freshConsent.context;
         consentHomepage = freshConsent.page;
@@ -1822,7 +1840,7 @@ export async function runStorefrontAudit(
         });
         consentCapture = await prepareConsentV2Session(consentHomepage);
         consentCapture.markNavigationStarted();
-        const navigation = await navigateFreshConsentContext(consentHomepage, `https://${normalizedDomain}`, { timings: consentTimings });
+        const navigation = await navigateFreshConsentContext(consentHomepage, storefrontUrl, { timings: consentTimings });
         if (navigation.dom_content_loaded) consentCapture.markDOMContentLoaded();
         consentCapture.markInitialObservationCompleted();
         const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
@@ -1876,6 +1894,16 @@ export async function runStorefrontAudit(
       const cmpRaw = await captureCmpRawEvidence(homepage!);
       cmpRaw.network_hosts = [...cmpNetworkSignals];
       cmp = detectCMP(cmpRaw);
+      // Replay is the persisted compatibility path for the disabled rollout.
+      // Preserve the same bounded detector facts used by the legacy decision.
+      evidence.consent.dom_selectors = cmpRaw.dom_selectors;
+      evidence.consent.script_hosts = cmpRaw.script_urls;
+      evidence.consent.network_signals = cmpRaw.network_hosts;
+      evidence.consent.cookie_names = cmpRaw.cookie_names;
+      evidence.consent.window_globals = cmpRaw.window_globals;
+      evidence.consent.iframe_hosts = cmpRaw.iframe_urls;
+      evidence.consent.provider_evidence = cmp.evidence;
+      evidence.consent.banner_visible = cmp.banner_visible;
       if (consentSelected) {
         evidence.consent.executed = true;
         addTrace('consent_v2_disabled_legacy_fallback');
