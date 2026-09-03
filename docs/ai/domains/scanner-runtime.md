@@ -22,6 +22,8 @@ Owns a live audit from validated domain/job input through Browserless connection
 
 It depends on configuration from `.env.example`, contracts in `src/types.ts`, decision modules in tracking/consent/server-side/resolver/quality, and external Browserless/Decodo/DNS behavior. It must remain storage-agnostic beyond the supplied update callback.
 
+The homepage and PDP now form one shared evidence session: context observers attach before the first navigation, homepage capture and PDP discovery overlap, and PDP navigation preserves the unanswered consent state. Consent V2 Reject runs only after a confirmed PDP (or on the homepage when Tracking is not selected); an optional Accept comparison uses a clean context and the confirmed PDP URL. `audit-runtime-budget.ts` reserves PDP, passive server classification, and finalization time, so optional actions cannot starve required evidence. Positive events remain append-only, while absence decisions require explicit capture-completeness evidence.
+
 ## Common modification points
 
 - Connection/plan errors: `classifyBrowserConnectionError` and bounded connection loop.

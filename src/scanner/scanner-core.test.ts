@@ -23,8 +23,9 @@ import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } f
 import {
   assessPdpCandidate, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
   canKeepTimedOutPdp, isStrongProductPath, isViewItemForPdp, parseEgressCountry, pdpCandidateRejectionReason,
-  pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, trustArcPreferenceControls, twoLevelPdpCandidate
+  acceptComparisonReason, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, trustArcPreferenceControls, twoLevelPdpCandidate
 } from './audit-runner';
+import { AuditRuntimeBudget } from './audit-runtime-budget';
 import { parseRetryAfterMs, resolveAccessDecision, resolveHostnameEvidence, resolveHostnameStatus } from './navigation';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
 import { browserGeoProfile } from './browser-session';
@@ -303,6 +304,16 @@ describe('PDP candidate selection', () => {
     expect(candidates).toEqual(['https://example.com/product/unavailable', 'https://example.com/catalog/working']);
   });
 
+  it('PDP-RANK-01 ranks an explicit product URL above feature and integration pages', () => {
+    const urls = ['https://example.com/features/email-marketing', 'https://example.com/features/integrations', 'https://example.com/products/widget'];
+    expect([...urls].sort((a, b) => scorePdpCandidate(b, 'example.com') - scorePdpCandidate(a, 'example.com'))[0]).toBe('https://example.com/products/widget');
+  });
+
+  it('PDP-RANK-02 lets product-sitemap evidence lift a generic commerce path above support', () => {
+    expect(scorePdpCandidate('https://example.com/catalog/widget', 'example.com', { source: 'product_sitemap' }))
+      .toBeGreaterThan(scorePdpCandidate('https://example.com/support/widget', 'example.com'));
+  });
+
   it('rejects an out-of-stock product and accepts a product with a usable cart action', () => {
     const unavailable = JSON.parse(readFileSync(path.join(process.cwd(), 'tests/fixtures/mizzen-out-of-stock-pdp.json'), 'utf8'));
     expect(assessPdpCandidate(unavailable.signals)).toEqual({ is_product: true, out_of_stock: true });
@@ -334,6 +345,39 @@ describe('PDP candidate selection', () => {
     expect(pdpReadinessSatisfied({ is_product: true }, false)).toBe(true);
     expect(canKeepTimedOutPdp({ navigationTimedOut: true, finalPdpUrlValid: false, assessment: null, hasValidViewItem: true })).toBe(true);
     expect(canKeepTimedOutPdp({ navigationTimedOut: true, finalPdpUrlValid: false, assessment: null, hasValidViewItem: false })).toBe(false);
+  });
+});
+
+describe('unified audit-flow guardrails', () => {
+  it('BUDGET-01 reserves PDP observation from optional consent work', () => {
+    const started = 1_000;
+    const budget = new AuditRuntimeBudget(started, 20_000, ['consent', 'tracking', 'server_side']);
+    expect(budget.optionalAllowance(started + 9_000)).toBeLessThan(budget.requiredAllowance(5_000, started + 9_000));
+    expect(budget.requiredAllowance(5_000, started + 9_000)).toBeGreaterThanOrEqual(5_000);
+  });
+
+  it('BUDGET-02 keeps passive server classification available at low runtime', () => {
+    const budget = new AuditRuntimeBudget(1_000, 10_000, ['server_side']);
+    expect(budget.remaining(8_500)).toBeGreaterThanOrEqual(budget.serverPassiveReserveMs);
+    expect(budget.canRunOptional(4_000, 8_500)).toBe(false);
+    expect(classifyCollection({
+      executed: true, page_valid: true,
+      requests: [{ vendor: 'ga4', kind: 'collection', collector: 'first_party', host: 'collect.example.com', path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1 }]
+    })).toMatchObject({ collection_type: 'first_party' });
+  });
+
+  it('requires complete observation before deriving negative product findings', () => {
+    const incomplete = resolveProductPayloadStatus({
+      executed: true, page_valid: true, pdp_found: true, pdp_navigation_succeeded: true, consent_status: 'pass',
+      site_ga4_detected: false, site_ga4_collection_hit_detected: false, view_item_hits: [],
+      pdp_observation_complete: false, ga4_observation_complete: false
+    });
+    expect(incomplete).toMatchObject({ status: 'inconclusive', reason_code: 'PDP_OBSERVATION_INCOMPLETE' });
+  });
+
+  it('requests a clean Accept comparison for no pre-Accept measurement and advanced consent pings', () => {
+    expect(acceptComparisonReason({ relevantRequests: [], viewItemHits: [] })).toBe('NO_TRACKING_OBSERVED_PRE_ACCEPT');
+    expect(acceptComparisonReason({ relevantRequests: [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'x', path: '/', method: 'GET', phase: 'baseline', timestamp: 1 }], viewItemHits: [], consentMode: 'advanced denied' })).toBe('ADVANCED_CONSENT_MODE_OBSERVED');
   });
 });
 

@@ -49,6 +49,7 @@ export function normalizeReplayEvidence(source: EvidenceBundle): EvidenceBundle 
       ...source.network,
       relevant_requests: [...source.network.relevant_requests],
       installation_signals: [...(source.network.installation_signals || [])],
+      observation: source.network.observation ? { ...source.network.observation, capture_channel_errors: [...source.network.observation.capture_channel_errors] } : undefined,
       novel_endpoints: [...source.network.novel_endpoints]
     },
     consent: { ...source.consent },
@@ -57,7 +58,9 @@ export function normalizeReplayEvidence(source: EvidenceBundle): EvidenceBundle 
       pdp_candidates: [...source.product.pdp_candidates],
       ga4_view_item_hits: [...source.product.ga4_view_item_hits],
       data_layer_view_item_hits: [...(source.product.data_layer_view_item_hits || [])],
-      meta_view_content_hits: [...source.product.meta_view_content_hits]
+      meta_view_content_hits: [...source.product.meta_view_content_hits],
+      candidate_outcomes: [...(source.product.candidate_outcomes || [])],
+      observation: source.product.observation ? { ...source.product.observation } : undefined
     },
     server_side: { ...source.server_side },
     runtime: {
@@ -145,7 +148,12 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     site_ga4_detected: ga4Installed ? true : trackingEnablementValid ? false : null,
     site_ga4_collection_hit_detected: ga4Collections.length > 0,
     view_item_hits: [...evidence.product.ga4_view_item_hits, ...dataLayerViewItems],
-    runtime_failure: evidence.runtime.failed_phase?.startsWith('product_') === true
+    runtime_failure: evidence.runtime.failed_phase?.startsWith('product_') === true,
+    pdp_discovery_completed: evidence.product.discovery_completed === true ? !evidence.product.discovery_inconclusive : undefined,
+    pdp_observation_complete: evidence.product.observation && (evidence.product.observation.observation_started_at !== null || evidence.product.observation.transport_failure || evidence.product.observation.timeout)
+      ? evidence.product.observation.minimum_observation_satisfied && !evidence.product.observation.transport_failure && !evidence.product.observation.timeout : undefined,
+    ga4_observation_complete: evidence.network.observation && evidence.product.observation?.observation_started_at !== null
+      ? evidence.network.observation.request_listener_active && evidence.network.observation.request_capture_completed && evidence.network.observation.data_layer_capture_completed && evidence.network.observation.performance_capture_completed && evidence.product.observation.minimum_observation_satisfied : undefined
   }) : { status: 'not_tested' as const, confidence: 'low' as const, evidence: [], reason_code: 'PRODUCT_NOT_TESTED' };
   const server = serverSelected ? classifyCollection({
     executed: evidence.server_side.executed,

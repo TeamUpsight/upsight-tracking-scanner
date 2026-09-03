@@ -201,6 +201,16 @@ export interface EvidenceBundle {
     }>;
     response_statuses: Array<{ host: string; path: string; status: number; phase: string }>;
     novel_endpoints: Array<{ host: string; path: string }>;
+    /** Privacy-safe capture health; absence decisions require these channels. */
+    observation?: {
+      request_listener_active: boolean;
+      request_capture_completed: boolean;
+      data_layer_capture_attempted: boolean;
+      data_layer_capture_completed: boolean;
+      performance_capture_attempted: boolean;
+      performance_capture_completed: boolean;
+      capture_channel_errors: string[];
+    };
   };
   consent: {
     executed: boolean;
@@ -233,6 +243,18 @@ export interface EvidenceBundle {
     ga4_view_item_hits: TrackingRequestEvidence[];
     data_layer_view_item_hits?: TrackingRequestEvidence[];
     meta_view_content_hits: TrackingRequestEvidence[];
+    discovery_completed?: boolean;
+    discovery_inconclusive?: boolean;
+    candidate_outcomes?: Array<{ url: string; outcome: 'VALID_PRODUCT' | 'INVALID_PRODUCT' | 'TRANSPORT_FAILED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT' }>;
+    observation?: {
+      pdp_navigation_committed: boolean;
+      product_semantics_checked: boolean;
+      observation_started_at: number | null;
+      observation_elapsed_ms: number;
+      minimum_observation_satisfied: boolean;
+      transport_failure: boolean;
+      timeout: boolean;
+    };
   };
   server_side: {
     executed: boolean;
@@ -243,6 +265,8 @@ export interface EvidenceBundle {
     collector_cookie_persistence_checked: boolean;
     collector_cookie_persisted: boolean;
     strict_duplicate_count: number;
+    passive_classification_completed?: boolean;
+    persistence_not_tested_budget?: boolean;
   };
   runtime: {
     started_at: string;

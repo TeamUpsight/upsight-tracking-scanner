@@ -20,7 +20,7 @@ async function closeServer(server: Server) {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-async function auditFixture(status: number, html: string, consentV2Enabled = true) {
+async function auditFixture(status: number, html: string, consentV2Enabled = true, selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent']) {
   vi.stubEnv('BROWSER_PROVIDER', 'local');
   vi.stubEnv('CONSENT_V2_ENABLED', consentV2Enabled ? 'true' : 'false');
   const fixture = await fixtureServer(status, html);
@@ -30,7 +30,7 @@ async function auditFixture(status: number, html: string, consentV2Enabled = tru
       audit_id: `runner-${status}-${consentV2Enabled}`,
       domain: 'fixture.example',
       tested_geos: 'EU',
-      selected_modules: ['consent']
+      selected_modules
     }, async (update) => { updates.push(update as Record<string, unknown>); }, {
       storefrontUrl: fixture.url,
       resolveHostname: resolvedFixtureHost,
@@ -84,4 +84,15 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(result.consent_status).not.toBe('not_detected');
     expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'page_validity_failed' })]));
   }, 30_000);
+
+  it('RUNNER-UNIFIED-01 reaches the PDP before any consent action and retains its early view_item evidence', async () => {
+    const html = `<a href="/products/widget">Widget</a><form action="/cart/add"><button>Add to cart</button></form>
+      <script>window.dataLayer=[{event:'view_item', ecommerce:{items:[{item_id:'widget-1',item_name:'Widget'}]}}]</script>`;
+    const result = await auditFixture(200, html, true, ['tracking']);
+    const trace = JSON.parse(String(result.trace_steps));
+    expect(result).toMatchObject({ product_payload_status: 'pass', scan_status: 'completed' });
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_navigation_started' })]));
+    expect(trace).not.toEqual(expect.arrayContaining([expect.objectContaining({ step: 'product_consent_enablement' })]));
+    expect((result.evidence_bundle as { product: { data_layer_view_item_hits: unknown[] } }).product.data_layer_view_item_hits).toHaveLength(1);
+  }, 35_000);
 });

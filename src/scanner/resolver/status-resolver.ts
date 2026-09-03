@@ -66,6 +66,9 @@ export function resolveProductPayloadStatus(input: {
   site_ga4_collection_hit_detected: boolean | null;
   view_item_hits: TrackingRequestEvidence[];
   runtime_failure?: boolean;
+  pdp_discovery_completed?: boolean;
+  pdp_observation_complete?: boolean;
+  ga4_observation_complete?: boolean;
 }): StatusDecision<ProductPayloadStatus> {
   if (!input.executed) {
     return { status: 'not_tested', confidence: 'low', reason_code: 'PRODUCT_NOT_TESTED', evidence: [] };
@@ -73,8 +76,11 @@ export function resolveProductPayloadStatus(input: {
   if (input.page_valid !== true) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'ACCESS_BLOCKED', evidence: ['page_invalid'] };
   }
-  if (!input.pdp_found) {
+  if (!input.pdp_found && input.pdp_discovery_completed !== false) {
     return { status: 'pdp_not_found', confidence: 'medium', reason_code: 'PDP_NOT_FOUND', evidence: ['discovery_completed'] };
+  }
+  if (!input.pdp_found) {
+    return { status: 'inconclusive', confidence: 'low', reason_code: 'PDP_DISCOVERY_INCONCLUSIVE', evidence: ['discovery_incomplete'] };
   }
   if (!input.pdp_navigation_succeeded) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'PDP_NAV_TIMEOUT', evidence: ['pdp_navigation_failed'] };
@@ -96,6 +102,9 @@ export function resolveProductPayloadStatus(input: {
   if (input.runtime_failure) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'PRODUCT_RUNTIME_FAILED', evidence: ['runtime_failure'] };
   }
+  if (input.pdp_observation_complete === false) {
+    return { status: 'inconclusive', confidence: 'low', reason_code: 'PDP_OBSERVATION_INCOMPLETE', evidence: ['observation_incomplete'] };
+  }
   if (input.consent_status === 'inconclusive') {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'CONSENT_INCONCLUSIVE', evidence: [] };
   }
@@ -106,6 +115,9 @@ export function resolveProductPayloadStatus(input: {
       reason_code: 'GA4_NO_VIEW_ITEM',
       evidence: [input.site_ga4_collection_hit_detected ? 'ga4_collection' : 'ga4_script']
     };
+  }
+  if (input.ga4_observation_complete === false) {
+    return { status: 'inconclusive', confidence: 'low', reason_code: 'GA4_OBSERVATION_INCOMPLETE', evidence: ['capture_incomplete'] };
   }
   return { status: 'ga4_not_detected', confidence: 'medium', reason_code: 'GA4_NOT_DETECTED', evidence: [] };
 }

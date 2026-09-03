@@ -127,7 +127,16 @@ export class EvidenceCollector {
         relevant_requests_truncated: false,
         installation_signals: [],
         response_statuses: [],
-        novel_endpoints: []
+        novel_endpoints: [],
+        observation: {
+          request_listener_active: false,
+          request_capture_completed: false,
+          data_layer_capture_attempted: false,
+          data_layer_capture_completed: false,
+          performance_capture_attempted: false,
+          performance_capture_completed: false,
+          capture_channel_errors: []
+        }
       },
       consent: {
         executed: false,
@@ -157,7 +166,19 @@ export class EvidenceCollector {
         observation_ms: 0,
         ga4_view_item_hits: [],
         data_layer_view_item_hits: [],
-        meta_view_content_hits: []
+        meta_view_content_hits: [],
+        discovery_completed: false,
+        discovery_inconclusive: false,
+        candidate_outcomes: [],
+        observation: {
+          pdp_navigation_committed: false,
+          product_semantics_checked: false,
+          observation_started_at: null,
+          observation_elapsed_ms: 0,
+          minimum_observation_satisfied: false,
+          transport_failure: false,
+          timeout: false
+        }
       },
       server_side: {
         executed: false,
@@ -167,7 +188,9 @@ export class EvidenceCollector {
         collector_cookie_names: [],
         collector_cookie_persistence_checked: false,
         collector_cookie_persisted: false,
-        strict_duplicate_count: 0
+        strict_duplicate_count: 0,
+        passive_classification_completed: false,
+        persistence_not_tested_budget: false
       },
       runtime: {
         started_at: input.startedAt || new Date().toISOString(),

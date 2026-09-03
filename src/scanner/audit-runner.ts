@@ -60,6 +60,7 @@ import { classifyCollection } from './server-side/classify-collection';
 import { parseGA4Request } from './tracking/ga4';
 import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } from './tracking/meta';
 import { PDP_MIN_TRACKING_OBSERVATION_MS, PDP_NAVIGATION_ATTEMPT_LIMIT, PDP_POST_LOAD_OBSERVATION_MS } from './version';
+import { AuditRuntimeBudget } from './audit-runtime-budget';
 
 const HOMEPAGE_OBSERVATION_MS = 4_000;
 const BOT_CHALLENGE_OBSERVATION_MS = 12_000;
@@ -572,8 +573,9 @@ async function callConsentApi(page: Page, provider: CmpProvider, kind: 'reject' 
 }
 
 const OBVIOUS_NON_PRODUCT_PATHS = new Set([
-  'account', 'articles', 'blogs', 'cart', 'collections', 'contact', 'help', 'pages', 'policies',
-  'search', 'services', 'support', 'customer_authentication'
+  'account', 'about', 'articles', 'blog', 'blogs', 'careers', 'cart', 'categories', 'category', 'collections', 'company', 'contact',
+  'docs', 'documentation', 'features', 'guides', 'help', 'integrations', 'login', 'pages', 'platform', 'policies', 'pricing',
+  'resources', 'search', 'services', 'solutions', 'support', 'customer_authentication'
 ]);
 
 function canonicalPdpCandidate(raw: string, domain: string) {
@@ -612,6 +614,20 @@ export function prioritizePdpCandidatePool(productPatternCandidates: string[], t
   // Preserve discovery order: product-pattern URLs are stronger evidence, but a
   // bad explicit URL must never prevent trying a valid two-level fallback.
   return [...new Set([...productPatternCandidates, ...twoLevelFallbackCandidates])];
+}
+
+export function scorePdpCandidate(raw: string, domain: string, options: { source?: 'link' | 'product_sitemap'; linkText?: string } = {}) {
+  const url = canonicalPdpCandidate(raw, domain);
+  if (!url) return Number.NEGATIVE_INFINITY;
+  const levels = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part).toLowerCase());
+  const first = levels[0] || '';
+  if (OBVIOUS_NON_PRODUCT_PATHS.has(first)) return -100;
+  let score = options.source === 'product_sitemap' ? 80 : 0;
+  if (/^(?:products?|product|item|p|shop)$/.test(first)) score += 60;
+  if (/product|shop|buy|add to cart|add to bag/i.test(options.linkText || '')) score += 20;
+  if (levels.length === 2) score += 8;
+  if (levels.length === 1) score -= 8;
+  return score;
 }
 
 export interface PdpCandidateSignals {
@@ -697,6 +713,28 @@ export function canKeepTimedOutPdp(input: {
     pdpReadinessSatisfied(input.assessment, input.hasValidViewItem);
 }
 
+export type AcceptComparisonReason =
+  | 'NO_TRACKING_OBSERVED_PRE_ACCEPT'
+  | 'ADVANCED_CONSENT_MODE_OBSERVED'
+  | 'LIMITED_MEASUREMENT_OBSERVED'
+  | 'SERVER_COLLECTION_STATE_AMBIGUOUS'
+  | 'PRODUCT_TRACKING_INCONCLUSIVE_DUE_TO_CONSENT'
+  | null;
+
+export function acceptComparisonReason(input: {
+  relevantRequests: TrackingRequestEvidence[];
+  viewItemHits: TrackingRequestEvidence[];
+  consentMode?: string;
+  firstPartyCollectionObserved?: boolean;
+  productObservationIncomplete?: boolean;
+}): AcceptComparisonReason {
+  if (!input.relevantRequests.some((request) => request.kind === 'collection') && input.viewItemHits.length === 0) return 'NO_TRACKING_OBSERVED_PRE_ACCEPT';
+  if (/advanced|denied|cookieless/i.test(input.consentMode || '')) return 'ADVANCED_CONSENT_MODE_OBSERVED';
+  if (input.firstPartyCollectionObserved) return 'SERVER_COLLECTION_STATE_AMBIGUOUS';
+  if (input.productObservationIncomplete) return 'PRODUCT_TRACKING_INCONCLUSIVE_DUE_TO_CONSENT';
+  return null;
+}
+
 async function inspectPdpCandidate(page: Page) {
   const signals = await page.evaluate(() => {
     const visible = (element: Element | null) => {
@@ -747,14 +785,19 @@ async function inspectPdpCandidate(page: Page) {
 
 async function discoverPdp(page: Page, domain: string, check: () => void, candidateLimit: number) {
   check();
-  const links = await page.$$eval('a[href]', (elements) => elements.map((element) => (element as HTMLAnchorElement).href)).catch(() => []);
+  const links = await page.$$eval('a[href]', (elements) => elements.map((element) => ({ href: (element as HTMLAnchorElement).href, text: (element.textContent || '').trim().slice(0, 160) }))).catch(() => [] as Array<{ href: string; text: string }>);
   check();
-  const productCandidates = links.map((link) => productPatternPdpCandidate(link, domain)).filter(Boolean) as string[];
-  const twoLevelFallbackCandidates = links.map((link) => twoLevelPdpCandidate(link, domain)).filter(Boolean) as string[];
-  const collect = (urls: string[]) => {
-    productCandidates.push(...urls.map((url) => productPatternPdpCandidate(url, domain)).filter(Boolean) as string[]);
-    twoLevelFallbackCandidates.push(...urls.map((url) => twoLevelPdpCandidate(url, domain)).filter(Boolean) as string[]);
+  const scored = new Map<string, number>();
+  const collect = (urls: string[], source: 'link' | 'product_sitemap', texts: string[] = []) => {
+    urls.forEach((raw, index) => {
+      const canonical = canonicalPdpCandidate(raw, domain)?.toString();
+      if (!canonical) return;
+      const score = scorePdpCandidate(canonical, domain, { source, linkText: texts[index] });
+      if (score < 0) return;
+      scored.set(canonical, Math.max(score, scored.get(canonical) ?? Number.NEGATIVE_INFINITY));
+    });
   };
+  collect(links.map((link) => link.href), 'link', links.map((link) => link.text));
 
   const fetchXml = async (url: string) => page.evaluate(async (target) => {
     const response = await fetch(target, { credentials: 'same-origin' });
@@ -765,19 +808,19 @@ async function discoverPdp(page: Page, domain: string, check: () => void, candid
     const sitemap = await fetchXml(`https://${domain}/sitemap.xml`);
     check();
     const locations = [...sitemap.matchAll(/<loc>(.*?)<\/loc>/gi)].map((match) => match[1].trim());
-    collect(locations);
+    collect(locations, 'link');
     check();
     const sitemapChildren = locations.filter((url) => /sitemap.*\.xml/i.test(url));
     const child = sitemapChildren.find((url) => /sitemap_products?/i.test(url)) || sitemapChildren[0];
     if (child) {
       const childXml = await fetchXml(child);
-      collect([...childXml.matchAll(/<loc>(.*?)<\/loc>/gi)].map((match) => match[1].trim()));
+      collect([...childXml.matchAll(/<loc>(.*?)<\/loc>/gi)].map((match) => match[1].trim()), /sitemap_products?/i.test(child) ? 'product_sitemap' : 'link');
       check();
     }
   } catch {
     // Homepage candidates remain usable when sitemap discovery is unavailable.
   }
-  const candidates = prioritizePdpCandidatePool(productCandidates, twoLevelFallbackCandidates);
+  const candidates = [...scored.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).map(([url]) => url);
   check();
   return candidates.slice(0, candidateLimit);
 }
@@ -814,6 +857,8 @@ async function capturePageTrackingInstallations(
 }
 
 async function capturePerformanceTrackingRequests(page: Page, phase: string, evidenceCollector: EvidenceCollector) {
+  const observation = evidenceCollector.bundle.network.observation;
+  if (observation) observation.performance_capture_attempted = true;
   const urls = await page.evaluate(() => performance.getEntriesByType('resource')
     .map((entry) => entry.name)
     .filter((name) => /(?:google-analytics\.com|analytics\.google\.com|doubleclick\.net|facebook\.com)\/(?:g\/collect|collect|tr\/)/i.test(name))
@@ -836,10 +881,13 @@ async function capturePerformanceTrackingRequests(page: Page, phase: string, evi
     if (alreadyCaptured) continue;
     if (evidenceCollector.captureRequest({ url, method: 'GET', phase, source: 'performance_timing' })) recovered += 1;
   }
+  if (observation) observation.performance_capture_completed = true;
   return recovered;
 }
 
 async function captureDataLayerViewItems(page: Page, phase: string, evidenceCollector: EvidenceCollector) {
+  const observation = evidenceCollector.bundle.network.observation;
+  if (observation) observation.data_layer_capture_attempted = true;
   const entries = await page.evaluate(() => {
     const layer = (window as any).dataLayer;
     if (!Array.isArray(layer)) return [];
@@ -876,6 +924,7 @@ async function captureDataLayerViewItems(page: Page, phase: string, evidenceColl
   for (const entry of entries) {
     if (evidenceCollector.captureDataLayerViewItem({ entry, pageUrl: page.url(), phase })) captured += 1;
   }
+  if (observation) observation.data_layer_capture_completed = true;
   return captured;
 }
 
@@ -927,6 +976,7 @@ export async function runStorefrontAudit(
     : 'USA';
   const proxyPortOffset = reserveProxyPortOffset(geo);
   const selectedModules = selectedAuditModules(params.selected_modules);
+  const runtimeBudget = new AuditRuntimeBudget(startedMs, timeoutMs, selectedModules);
   const consentSelected = selectedModules.includes('consent');
   const consentV2Enabled = consentV2RolloutControls().enabled;
   const trackingSelected = selectedModules.includes('tracking');
@@ -948,6 +998,7 @@ export async function runStorefrontAudit(
   let consentContext: BrowserContext | null = null;
   let consentHomepage: Page | null = null;
   let consentV2: ConsentV2SessionOutput | null = null;
+  let consentV2Ran = false;
   let pdpPage: Page | null = null;
   let browserConnectedAt: number | null = null;
   let currentPhase = 'initialization';
@@ -967,7 +1018,7 @@ export async function runStorefrontAudit(
   let lastProxyRotated = false;
   let currentProxyCountry = countryForGeo(geo, 0);
   let effectiveDomain = normalizedDomain || '';
-  let contextObserversAttached = false;
+  const observedContexts = new WeakSet<BrowserContext>();
   const collectorCookieNames = new Set<string>();
   const cmpNetworkSignals = new Set<string>();
   const accessNetworkSignals = new Set<string>();
@@ -1067,12 +1118,12 @@ export async function runStorefrontAudit(
     pdpPage = null;
     if (context) await context.close().catch(() => {});
     context = null;
-    contextObserversAttached = false;
     if (browser) await browser.close().catch(() => {});
     browser = null;
   };
 
   const finalizeScanOnce = async () => lifecycle.run(async () => {
+    if (evidence.network.observation) evidence.network.observation.request_capture_completed = evidence.network.observation.request_listener_active;
     if (evidence.page.valid === null) {
       evidenceCollector.setPage({ valid: false, accessCategory: finalError === 'none' ? 'unknown_error' : finalError });
     } else if (finalError !== 'none') {
@@ -1152,8 +1203,15 @@ export async function runStorefrontAudit(
   });
 
   const attachContextObservers = (browserContext: BrowserContext) => {
-    if (contextObserversAttached) return;
-    contextObserversAttached = true;
+    if (observedContexts.has(browserContext)) return;
+    observedContexts.add(browserContext);
+    evidence.network.observation ||= {
+      request_listener_active: false, request_capture_completed: false,
+      data_layer_capture_attempted: false, data_layer_capture_completed: false,
+      performance_capture_attempted: false, performance_capture_completed: false,
+      capture_channel_errors: []
+    };
+    evidence.network.observation.request_listener_active = true;
     browserContext.on('request', (request: Request) => {
       const requestUrl = request.url();
       if (/challenge|turnstile|captcha|datadome|akamai|perimeterx|humansecurity|cdn-cgi|px-captcha/i.test(requestUrl)) {
@@ -1805,21 +1863,25 @@ export async function runStorefrontAudit(
         reason_code: 'EXTERNAL_REDIRECT_CHAIN_VERIFIED'
       });
     }
-    addTrace('consent_navigation_completed', { status: response?.status(), final_url: safeUrl(finalUrl) });
-    await wait(HOMEPAGE_OBSERVATION_MS, homepage);
-    const homepageTimingRecovered = await capturePerformanceTrackingRequests(homepage!, 'consent_initial_load', evidenceCollector);
-    if (homepageTimingRecovered > 0) addTrace('performance_tracking_requests_recovered', { phase: 'consent_initial_load', count: homepageTimingRecovered });
-    const homepageHtml = await homepage!.content();
-    evidenceCollector.setPage({ cmsSignals: cmsSignalsFromHtml(homepageHtml) });
-    await capturePageTrackingInstallations(homepage!, homepageHtml, 'consent_initial_load', evidenceCollector);
-    if (evidence.mode === 'diagnostic') {
-      const image = await homepage!.screenshot({ type: 'jpeg', quality: 55, fullPage: false }).catch(() => null);
-      if (image) evidenceCollector.addScreenshot({ name: 'homepage.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
-    }
+    addTrace('homepage_shared_observation_started', { status: response?.status(), final_url: safeUrl(finalUrl) });
+    // Capture stays live while discovery begins; no module gets an exclusive
+    // homepage wait window.
+    const homepageObservation = (async () => {
+      await wait(HOMEPAGE_OBSERVATION_MS, homepage);
+      const homepageTimingRecovered = await capturePerformanceTrackingRequests(homepage!, 'homepage_shared_observation', evidenceCollector);
+      if (homepageTimingRecovered > 0) addTrace('performance_tracking_requests_recovered', { phase: 'homepage_shared_observation', count: homepageTimingRecovered });
+      const homepageHtml = await homepage!.content();
+      evidenceCollector.setPage({ cmsSignals: cmsSignalsFromHtml(homepageHtml) });
+      await capturePageTrackingInstallations(homepage!, homepageHtml, 'homepage_shared_observation', evidenceCollector);
+      if (evidence.mode === 'diagnostic') {
+        const image = await homepage!.screenshot({ type: 'jpeg', quality: 55, fullPage: false }).catch(() => null);
+        if (image) evidenceCollector.addScreenshot({ name: 'homepage.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
+      }
+    })();
 
     let cmp: ReturnType<typeof detectCMP>;
     const consentStarted = Date.now();
-    if (consentSelected && consentV2Enabled) {
+    if (consentSelected && consentV2Enabled && !trackingSelected) {
       evidence.consent.executed = true;
       currentPhase = 'consent_fresh_initial_load';
       let consentCapture: Awaited<ReturnType<typeof prepareConsentV2Session>> | null = null;
@@ -1852,6 +1914,7 @@ export async function runStorefrontAudit(
           timings: consentTimings,
           access_blocked: readiness.status !== 'ready'
         }, consentCapture);
+        consentV2Ran = true;
         evidence.runtime.consent_v2 = consentV2.telemetry;
         const compatibility = mapConsentV2ToExisting(consentV2.result, {
           geo,
@@ -1906,21 +1969,23 @@ export async function runStorefrontAudit(
       evidence.consent.banner_visible = cmp.banner_visible;
       if (consentSelected) {
         evidence.consent.executed = true;
-        addTrace('consent_v2_disabled_legacy_fallback');
+        addTrace(consentV2Enabled ? 'consent_v2_deferred_until_pdp' : 'consent_v2_disabled_legacy_fallback');
       } else {
         addTrace('consent_module_skipped');
       }
     }
 
     const productStarted = Date.now();
+    const preserveUnansweredPdp = true;
     // Reserve time for selected later modules; this is a local product budget,
     // never a replacement for the global audit deadline.
-    const productDeadline = Math.min(startedMs + timeoutMs - 5_000, productStarted + TRACKING_PRODUCT_MODULE_BUDGET_MS);
+    const productDeadline = Math.min(startedMs + timeoutMs - 2_000, productStarted + Math.min(TRACKING_PRODUCT_MODULE_BUDGET_MS, runtimeBudget.requiredAllowance(PDP_MIN_TRACKING_OBSERVATION_MS)));
     const productBudgetRemaining = () => Math.max(0, productDeadline - Date.now());
     const checkProductBudget = () => {
       check();
       if (productBudgetRemaining() <= 0) throw new PhaseTimeout('tracking_product');
     };
+    let confirmedPdpUrl: string | null = null;
     if (trackingSelected) {
     evidence.product.executed = true;
     evidence.product.discovery_executed = true;
@@ -1933,18 +1998,22 @@ export async function runStorefrontAudit(
         Math.max(1, Math.min(productDiscoveryBudgetMs, productBudgetRemaining())),
         () => discoverPdp(homepage!, effectiveDomain, check, pdpCandidateAttemptLimit)
       );
+      evidence.product.discovery_completed = true;
       check();
     } catch (error) {
       if (!isPhaseTimeout(error)) throw error;
       finalStatus = 'partial';
       evidence.runtime.failed_phase ||= 'product_discovery';
+      evidence.product.discovery_inconclusive = true;
       addTrace('product_discovery_budget_exhausted', { reason_code: 'PRODUCT_DISCOVERY_TIMEOUT' });
     }
     evidence.product.pdp_candidates = pdpCandidates.map((url) => safeUrl(url) || '').filter(Boolean);
     if (!pdpCandidates.length) {
       addTrace('product_payload_status_decision', { status: 'pdp_not_found', reason_code: 'PDP_NOT_FOUND' });
     } else {
-      if (cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown') {
+      // PDP navigation deliberately retains the unanswered/default consent
+      // state. Accept is a later, clean-context comparison only.
+      if (!preserveUnansweredPdp && cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown') {
         currentPhase = 'product_consent_state_capture';
         const productConsentSnapshotStarted = Date.now();
         evidence.runtime.product_consent_snapshot.attempted = true;
@@ -2039,7 +2108,7 @@ export async function runStorefrontAudit(
       await attachAuthorizedAccessHeader(context!, pdpPage, effectiveDomain);
       let selectedPdp = false;
       let pdpNavigationCommitted = false;
-      const maxPdpCandidates = Math.min(pdpCandidateAttemptLimit, pdpCandidates.length);
+      const maxPdpCandidates = Math.min(3, pdpCandidateAttemptLimit, pdpCandidates.length);
       for (const [candidateIndex, pdpUrl] of pdpCandidates.slice(0, maxPdpCandidates).entries()) {
         try { checkProductBudget(); } catch (error) {
           if (!isPhaseTimeout(error)) throw error;
@@ -2082,6 +2151,7 @@ export async function runStorefrontAudit(
               status: pdpResponse?.status() ?? null, candidate_attempt: candidateIndex + 1
             });
             pdpNavigationCommitted = true;
+            evidence.product.observation!.pdp_navigation_committed = true;
           }
           pdpOperation = 'pdp_domcontentloaded';
           await waitForDomContentSoft(pdpPage, 'product_pdp_load', 12_000);
@@ -2126,6 +2196,7 @@ export async function runStorefrontAudit(
           }
           check();
           if (!assessmentUnavailable) {
+            evidence.product.observation!.product_semantics_checked = true;
             addTrace('pdp_candidate_assessed', {
               pdp_url: safeUrl(pdpUrl),
               is_product: assessment.is_product,
@@ -2201,6 +2272,8 @@ export async function runStorefrontAudit(
           }
           const hasValidCandidateViewItem = candidateHits.some((hit) => hit.has_product);
           if (!canKeepTimedOutPdp({ navigationTimedOut, finalPdpUrlValid, assessment, hasValidViewItem: hasValidCandidateViewItem })) {
+            evidence.product.candidate_outcomes?.push({ url: finalPdpUrl, outcome: 'TIMEOUT' });
+            evidence.product.observation!.timeout = true;
             addTrace('pdp_candidate_rejected', { candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl, reason_code: 'PDP_NAV_TIMEOUT' });
             continue;
           }
@@ -2208,6 +2281,7 @@ export async function runStorefrontAudit(
             ? 'PDP_ASSESSMENT_UNAVAILABLE'
             : pdpCandidateRejectionReason(assessment, hasValidCandidateViewItem);
           if (rejectionReason) {
+            evidence.product.candidate_outcomes?.push({ url: finalPdpUrl, outcome: 'INVALID_PRODUCT' });
             addTrace('pdp_candidate_rejected', { pdp_url: safeUrl(pdpUrl), reason_code: rejectionReason });
             continue;
           }
@@ -2219,12 +2293,12 @@ export async function runStorefrontAudit(
           }
 
           selectedPdp = true;
+          confirmedPdpUrl = finalPdpUrl;
+          evidence.product.candidate_outcomes?.push({ url: finalPdpUrl, outcome: 'VALID_PRODUCT' });
           evidence.product.pdp_url = finalPdpUrl;
           evidence.product.candidate_url = safeUrl(pdpUrl);
           evidence.product.final_pdp_url = finalPdpUrl;
           evidence.product.navigation_succeeded = true;
-          evidence.product.meta_view_content_hits = evidence.product.meta_view_content_hits
-            .filter((hit) => isMetaViewContentForPdp(hit, pdpUrl, finalPdpUrl));
           addTrace('pdp_url_selected', { candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl, candidate_attempt: candidateIndex + 1 });
           addTrace('pdp_navigation_completed', { status: pdpResponse?.status() });
           pdpOperation = 'pdp_hydration_engagement';
@@ -2241,6 +2315,7 @@ export async function runStorefrontAudit(
             minimum_tracking_settlement_ms: PDP_MIN_TRACKING_OBSERVATION_MS
           });
           const observationStart = Date.now();
+          evidence.product.observation!.observation_started_at = observationStart;
           while (Date.now() - observationStart < PDP_POST_LOAD_OBSERVATION_MS) {
             const latest = candidateViewItemHits();
             if (latest.some((hit) => hit.has_product) && Date.now() - observationStart >= PDP_MIN_TRACKING_OBSERVATION_MS) break;
@@ -2254,13 +2329,13 @@ export async function runStorefrontAudit(
           const pdpTimingRecovered = await capturePerformanceTrackingRequests(pdpPage, 'product_pdp_load', evidenceCollector);
           if (pdpTimingRecovered > 0) addTrace('performance_tracking_requests_recovered', { phase: 'product_pdp_load', count: pdpTimingRecovered });
           evidence.product.observation_ms = Date.now() - observationStart;
+          evidence.product.observation!.observation_elapsed_ms = evidence.product.observation_ms;
+          evidence.product.observation!.minimum_observation_satisfied = evidence.product.observation_ms >= PDP_MIN_TRACKING_OBSERVATION_MS;
           const finalNetworkViewItems = candidateNetworkViewItemHits();
           const finalDataLayerViewItems = candidateDataLayerViewItemHits();
           const finalViewItems = [...finalNetworkViewItems, ...finalDataLayerViewItems];
-          evidence.product.ga4_view_item_hits = finalNetworkViewItems;
-          evidence.product.data_layer_view_item_hits = finalDataLayerViewItems;
-          evidence.product.meta_view_content_hits = evidence.product.meta_view_content_hits
-            .filter((hit) => isMetaViewContentForPdp(hit, pdpUrl, finalPdpUrl));
+          // EvidenceCollector is append-only. Candidate-local slices above are
+          // used for classification; later failures must never erase a prior hit.
           if (finalViewItems.some((hit) => hit.has_product)) {
             const hit = finalViewItems.find((item) => item.has_product)!;
             addTrace('ga4_item_payload_detected', {
@@ -2300,6 +2375,10 @@ export async function runStorefrontAudit(
             operation: pdpOperation,
             page_closed: pdpPage.isClosed()
           });
+          const outcome = isNavigationTimeout(error) ? 'TIMEOUT' as const : isProxyFailure(error) ? 'TRANSPORT_FAILED' as const : 'OBSERVATION_INCOMPLETE' as const;
+          evidence.product.candidate_outcomes?.push({ url: safeUrl(pdpUrl) || pdpUrl, outcome });
+          if (outcome === 'TRANSPORT_FAILED') evidence.product.observation!.transport_failure = true;
+          if (outcome === 'TIMEOUT') evidence.product.observation!.timeout = true;
           if (isProxyFailure(error) && proxyAttempt < maxProxyRetries) {
             const previousPort = lastProxyPort;
             recordProxyError(geo, previousPort);
@@ -2356,8 +2435,6 @@ export async function runStorefrontAudit(
       }
       if (!selectedPdp) {
         evidence.product.navigation_succeeded = pdpNavigationCommitted;
-        evidence.product.ga4_view_item_hits = [];
-        evidence.product.data_layer_view_item_hits = [];
         addTrace('pdp_navigation_failed', {
           candidates_attempted: maxPdpCandidates,
           reason: 'No accessible in-stock product candidate was confirmed',
@@ -2370,25 +2447,126 @@ export async function runStorefrontAudit(
       addTrace('tracking_module_skipped');
     }
 
+    await homepageObservation.catch((error) => {
+      evidence.network.observation?.capture_channel_errors.push('homepage_observation_failed');
+      addTrace('homepage_shared_observation_incomplete', { error_family: runtimeErrorFamily(error) });
+    });
+
+    // Consent V2 remains the owner of reject verification. It is now fed a
+    // confirmed PDP and runs after the shared baseline rather than starving it.
+    if (consentSelected && consentV2Enabled && !consentV2Ran) {
+      const consentTarget = confirmedPdpUrl || storefrontUrl;
+      const available = trackingSelected ? runtimeBudget.optionalAllowance() : runtimeBudget.requiredAllowance(0);
+      if (available < 2_000) {
+        finalStatus = 'partial';
+        evidence.runtime.failed_phase ||= 'consent_pdp_reject';
+        addTrace('consent_reject_skipped_reserved_budget', { remaining_ms: runtimeBudget.remaining(), reserved_pdp_ms: runtimeBudget.pdpReserveMs });
+      } else {
+        currentPhase = 'consent_pdp_reject';
+        let consentCapture: Awaited<ReturnType<typeof prepareConsentV2Session>> | null = null;
+        try {
+          const freshConsent = await createFreshConsentContext(browser!, {
+            requestedGeo: geo, proxyRegion: currentProxyCountry,
+            independentlyVerified: dependencies.consentGeoVerified ?? (evidence.runtime.proxy_egress_reachable ? evidence.runtime.proxy_country_verified : null)
+          });
+          consentContext = freshConsent.context;
+          consentHomepage = freshConsent.page;
+          attachContextObservers(consentContext);
+          await attachAuthorizedAccessHeader(consentContext, consentHomepage, effectiveDomain);
+          consentCapture = await prepareConsentV2Session(consentHomepage);
+          consentCapture.markNavigationStarted();
+          const navigation = await withinPhaseBudget('consent_pdp_navigation', Math.min(available, 12_000), () =>
+            navigateFreshConsentContext(consentHomepage!, consentTarget, { timings: consentTimings })
+          );
+          if (navigation.dom_content_loaded) consentCapture.markDOMContentLoaded();
+          consentCapture.markInitialObservationCompleted();
+          const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
+          const readiness = consentNavigationReadiness(consentAccess);
+          consentV2 = await withinPhaseBudget('consent_pdp_reject', Math.min(available, 15_000), () => runConsentV2Session(consentHomepage!, {
+            geo, geo_verified: freshConsent.geo.verified,
+            page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
+            timings: consentTimings, access_blocked: readiness.status !== 'ready'
+          }, consentCapture!));
+          consentV2Ran = true;
+          evidence.runtime.consent_v2 = consentV2.telemetry;
+          const compatibility = mapConsentV2ToExisting(consentV2.result, {
+            geo, page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
+            tracking_before_interaction: consentV2.tracking.signals.some((signal) => signal.timing === 'pre_choice'),
+            post_reject_observation_completed: consentV2.result.persistence.status !== 'not_applicable', max_trace_steps: traceLimit
+          }, consentV2.tracking);
+          evidence.consent.executed = true;
+          evidence.consent.provider_evidence = consentV2.result.reason_codes;
+          evidence.consent.banner_visible = consentV2.result.banner.visibility === 'visible';
+          evidence.consent.cookie_names = consentV2.result.storage_changes.map((change) => change.key_name).slice(0, 100);
+          addTrace(readiness.status !== 'ready' ? 'consent_fresh_navigation_blocked_or_challenged' : compatibility.cmp_provider ? 'cmp_provider_detected' : 'cmp_not_found', {
+            provider: compatibility.cmp_provider, reason_codes: consentV2.result.reason_codes
+          });
+          addTrace('consent_pdp_reject_completed', { pdp_url: safeUrl(consentTarget), provider: compatibility.cmp_provider, reason_codes: consentV2.result.reason_codes });
+        } catch (error) {
+          consentCapture?.dispose();
+          finalStatus = 'partial';
+          evidence.runtime.failed_phase ||= 'consent_pdp_reject';
+          addTrace('consent_pdp_reject_inconclusive', { error_family: runtimeErrorFamily(error) });
+        }
+      }
+    }
+    const acceptReason = confirmedPdpUrl ? acceptComparisonReason({
+      relevantRequests: evidence.network.relevant_requests,
+      viewItemHits: [...evidence.product.ga4_view_item_hits, ...(evidence.product.data_layer_view_item_hits || [])],
+      consentMode: evidence.runtime.consent_v2?.consent_mode_classification,
+      firstPartyCollectionObserved: evidence.network.relevant_requests.some((request) => request.kind === 'collection' && request.collector !== 'third_party'),
+      productObservationIncomplete: evidence.product.observation?.minimum_observation_satisfied === false
+    }) : null;
+    if (acceptReason && runtimeBudget.canRunOptional(3_000) && consentV2Enabled && consentSelected) {
+      // Reject never becomes the baseline for Accept. This deliberately uses a
+      // second clean context and the already-confirmed PDP URL.
+      currentPhase = 'accept_comparison';
+      let acceptContext: BrowserContext | null = null;
+      try {
+        const freshAccept = await createFreshConsentContext(browser!, {
+          requestedGeo: geo, proxyRegion: currentProxyCountry,
+          independentlyVerified: dependencies.consentGeoVerified ?? null
+        });
+        acceptContext = freshAccept.context;
+        attachContextObservers(acceptContext);
+        await attachAuthorizedAccessHeader(acceptContext, freshAccept.page, effectiveDomain);
+        await withinPhaseBudget('accept_comparison_navigation', Math.min(8_000, runtimeBudget.optionalAllowance()), () =>
+          navigateFreshConsentContext(freshAccept.page, confirmedPdpUrl!, { timings: consentTimings })
+        );
+        const raw = await captureCmpRawEvidence(freshAccept.page);
+        const acceptCmp = detectCMP({ ...raw, network_hosts: [...cmpNetworkSignals] });
+        const accepted = acceptCmp.provider !== 'Not Found' && acceptCmp.provider !== 'Unknown' &&
+          (await clickConsentChoice(freshAccept.page, 'accept') || await callConsentApi(freshAccept.page, acceptCmp.provider, 'accept'));
+        if (accepted) {
+          await wait(750, freshAccept.page);
+          await captureDataLayerViewItems(freshAccept.page, 'post_accept_comparison', evidenceCollector);
+          await capturePerformanceTrackingRequests(freshAccept.page, 'post_accept_comparison', evidenceCollector);
+          const html = await freshAccept.page.content().catch(() => '');
+          await capturePageTrackingInstallations(freshAccept.page, html, 'post_accept_comparison', evidenceCollector);
+          addTrace('accept_comparison_completed', { reason_code: acceptReason, fresh_context: true, accepted: true });
+        } else {
+          addTrace('accept_comparison_inconclusive', { reason_code: acceptReason, fresh_context: true, accepted: false });
+        }
+      } catch (error) {
+        addTrace('accept_comparison_inconclusive', { reason_code: acceptReason, fresh_context: true, error_family: runtimeErrorFamily(error) });
+      } finally {
+        if (acceptContext) await acceptContext.close().catch(() => {});
+      }
+    } else if (acceptReason) {
+      addTrace('accept_comparison_skipped', { reason_code: acceptReason, reason: runtimeBudget.canRunOptional(3_000) ? 'Consent V2 unavailable' : 'Reserved runtime budget' });
+    }
     evidence.runtime.module_durations_ms.consent = Date.now() - consentStarted;
 
     const serverStarted = Date.now();
-    const remaining = timeoutMs - (Date.now() - startedMs);
     if (!serverSelected) {
       addTrace('server_side_module_skipped');
-    } else if (remaining < 5_000) {
-      evidence.server_side.executed = false;
-      finalStatus = 'partial';
-      addTrace('server_module_skipped_budget_low', { remaining_ms: remaining });
-      addTrace('ss_collection_type_decision', { ss_collection_type: 'not_tested' });
-      addTrace('server_side_status_decision', { server_side_status: 'not_tested' });
     } else {
       evidence.server_side.executed = true;
       const firstPartyRequests = evidence.network.relevant_requests.filter((request) =>
         request.kind === 'collection' && request.collector !== 'third_party'
       );
       evidence.server_side.collector_cookie_names = [...collectorCookieNames];
-      if (firstPartyRequests.length > 0 && collectorCookieNames.size > 0) {
+      if (firstPartyRequests.length > 0 && collectorCookieNames.size > 0 && runtimeBudget.canRunOptional(4_000)) {
         evidence.server_side.collector_cookie_persistence_checked = true;
         currentPhase = 'server_cookie_persistence_reload';
         try {
@@ -2401,7 +2579,8 @@ export async function runStorefrontAudit(
           evidence.server_side.collector_cookie_persisted = false;
         }
       } else {
-        addTrace('collector_cookie_check_skipped', { reason: 'No first-party collector response cookie to verify' });
+        evidence.server_side.persistence_not_tested_budget = firstPartyRequests.length > 0 && collectorCookieNames.size > 0;
+        addTrace('collector_cookie_check_skipped', { reason: evidence.server_side.persistence_not_tested_budget ? 'Reserved runtime budget' : 'No first-party collector response cookie to verify' });
       }
       const serverRequests = evidence.network.relevant_requests.filter((request) => request.phase !== 'server_cookie_persistence_reload');
       const classification = classifyCollection({
@@ -2411,6 +2590,7 @@ export async function runStorefrontAudit(
         collector_cookie_detected: collectorCookieNames.size > 0,
         collector_cookie_persisted: evidence.server_side.collector_cookie_persisted
       });
+      evidence.server_side.passive_classification_completed = true;
       evidence.server_side.first_party_collection_count = classification.first_party_collection_count;
       evidence.server_side.same_origin_collection_count = classification.same_origin_collection_count;
       evidence.server_side.third_party_collection_count = classification.third_party_collection_count;
