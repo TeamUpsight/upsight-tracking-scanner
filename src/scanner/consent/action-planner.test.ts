@@ -47,6 +47,15 @@ describe('consent action planner and executor', () => {
     expect(await executeActionPlan(plan('reject_all'), executor)).toMatchObject({ attempt: { origin: 'provider_selector', outcome: 'executed' } });
   });
 
+  it('records the actual activation timestamp only after an executed action', async () => {
+    const before = Date.now();
+    const { bridge: executor } = bridge({ executeStrategy: async () => { await new Promise((resolve) => setTimeout(resolve, 5)); return 'executed'; } });
+    const executed = await executeActionPlan(plan('reject_all'), executor);
+    expect(executed.activated_at).toBeGreaterThanOrEqual(before);
+    const { bridge: unsupported } = bridge({ inspectTarget: async () => ({ attached: false, visible: false, enabled: false, surface_active: false, frame_path: null, shadow_mode: 'none', navigation_state: 'idle' }) });
+    expect((await executeActionPlan(plan('reject_all'), unsupported)).activated_at).toBeNull();
+  });
+
   it('executes an ARIA semantic strategy', async () => {
     const { bridge: executor } = bridge();
     expect(await executeActionPlan(plan('reject_all', ['semantic_accessibility']), executor)).toMatchObject({ attempt: { origin: 'semantic_ui', outcome: 'executed' } });

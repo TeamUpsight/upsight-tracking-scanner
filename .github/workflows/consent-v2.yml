@@ -21,9 +21,15 @@ jobs:
       - name: Provision reproducible Chromium
         run: npx playwright-core install --with-deps chromium
       - run: npm run lint
-      - run: npm test -- src/scanner/consent
-      - run: npm run test:consent-browser
-      - run: npm run test:regression
-      - run: npm run build
+      - name: Consent V2 unit tests
+        run: npm run test:consent-unit
+      - name: Consent V2 production browser tests
+        run: npm run test:consent-browser
+      - name: Audit-runner browser tests
+        run: npm run test:audit-runner-browser
+      - name: Existing regression tests
+        run: npm run test:regression
+      - name: Production build
+        run: npm run build
       - name: Check whitespace errors
         run: git diff --check HEAD^

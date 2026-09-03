@@ -114,7 +114,7 @@ function hasGcmContradiction(verification: VerificationResult, gcm: GoogleConsen
 
 async function selectProvider(contexts: ProviderContexts, controls: ConsentV2RolloutControls) {
   const evidence = cmpAdapterRegistry.collectProviderEvidence(contexts); const candidates = scoreProviderCandidates(evidence);
-  const plausible = candidates.filter((candidate) => candidate.score >= 85 && candidate.independent_families.length >= 2 && !candidate.strong_conflict)
+  const plausible = candidates.filter((candidate) => candidate.plausible_candidate)
     .map((candidate) => candidate.provider_id as CmpAdapterProviderId)
     .filter((provider) => controls.providers[provider].detection_enabled);
   if (plausible.length === 0) return { provider: undefined, candidates, conflict: false };
@@ -186,7 +186,11 @@ function telemetry(result: FinalConsentAuditResult, tracking: TrackingConsistenc
     failure_reason_codes: result.reason_codes
   }) : null;
   const reject = result.available_actions.find((item) => item.action === 'reject_all');
-  const interaction = result.interactions[0];
+  // A preferences step is preparatory. Requested-Reject telemetry must derive
+  // from the final non-preference action, never from the first interaction.
+  const interaction = [...result.interactions].reverse().find((item) => item.action !== 'open_preferences');
+  const preferencesOpened = result.interactions.some((item) => item.action === 'open_preferences' && item.outcome === 'executed');
+  const rejectAttempted = Boolean(interaction);
   const action_status = result.rejection_verification.status === 'verified' ? 'verified'
     : interaction?.outcome === 'executed' ? 'executed'
       : interaction?.outcome === 'unsupported' ? 'unsupported'
@@ -199,6 +203,10 @@ function telemetry(result: FinalConsentAuditResult, tracking: TrackingConsistenc
     provider_conflict: conflict, banner_visibility: result.banner.visibility,
     reject_availability: reject?.availability || 'not_present',
     interaction_outcome: interaction?.outcome || 'not_attempted',
+    action_attempted: result.interactions.length > 0,
+    preferences_opened: preferencesOpened,
+    reject_attempted: rejectAttempted,
+    reject_outcome: interaction?.outcome || 'not_attempted',
     verification: result.rejection_verification.status, persistence: result.persistence.status,
     generic_fallback: Boolean(custom), selector_or_action_failure: result.interactions.some((item) => item.outcome !== 'executed'),
     tcf_present: frameworkObservations.tcf.present, gpp_present: frameworkObservations.gpp.present,
@@ -229,18 +237,30 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
         // Each state transition rebuilds facts, provider context, action inventory,
         // and target topology. No control reference survives a previous action.
         after = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, after, observedGoogleCommands); const observed = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, observed); frameworks = frameworkStateFromObservations(frameworkObservations); const liveContexts = await buildProviderContexts(page, after, frameworkObservations); const liveProvider = await providerOperations(selection.provider, liveContexts); const machine = rejectStateMachineFor(selection.provider, liveProvider, liveContexts.get(selection.provider), timings);
-        if (machine.status !== 'ready') break;
-        if (transition > 0 && machine.steps.length === 1 && machine.steps[0].action === 'open_preferences') break;
+        if (machine.status !== 'ready') {
+          // Opening preferences is not a successful Reject. Record the missing
+          // requested action explicitly so telemetry cannot report a false win.
+          if (attempts.some((item) => item.action === 'open_preferences' && item.outcome === 'executed')) {
+            attempt = { action: 'reject_all', origin: 'generic_ui', outcome: 'unsupported', category: null, reason_codes: [ConsentAuditCodes.INTERACTION_UNSUPPORTED, ConsentAuditCodes.ACTION_NOT_EXPOSED] };
+            attempts.push(attempt);
+          }
+          break;
+        }
+        if (transition > 0 && machine.steps.length === 1 && machine.steps[0].action === 'open_preferences') {
+          attempt = { action: 'reject_all', origin: 'generic_ui', outcome: 'unsupported', category: null, reason_codes: [ConsentAuditCodes.INTERACTION_UNSUPPORTED, ConsentAuditCodes.ACTION_NOT_EXPOSED] };
+          attempts.push(attempt);
+          break;
+        }
         for (const step of machine.steps) {
           const freshFacts = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, freshFacts, observedGoogleCommands); const freshFrameworks = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, freshFrameworks); frameworks = frameworkStateFromObservations(frameworkObservations); const freshContexts = await buildProviderContexts(page, freshFacts, frameworkObservations); const freshProvider = await providerOperations(selection.provider, freshContexts); const plan = actionPlanFor(selection.provider, freshProvider.actions, freshProvider.banner, freshContexts.get(selection.provider), step.action, step.category, timings);
           if (!plan) { attempt = { action: step.action, origin: 'generic_ui', outcome: 'unsupported', category: step.category, reason_codes: [ConsentAuditCodes.INTERACTION_UNSUPPORTED, ConsentAuditCodes.ACTION_NOT_EXPOSED] }; attempts.push(attempt); break; }
           const executed = await executeActionPlan(plan, adapterActionBridge(page, selection.provider, ledger, timings, freshProvider.state)); attempts.push(executed.attempt);
           if (executed.attempt.outcome !== 'executed' && executed.attempt.outcome !== 'aborted') { attempt = executed.attempt; break; }
-          if (step.action !== 'open_preferences') { attempt = executed.attempt; break; }
+          if (step.action !== 'open_preferences') { attempt = executed.attempt; timestamp = executed.activated_at; break; }
         }
       }
       timeline.reject_completed_at = Date.now();
-      if (attempt && (attempt.outcome === 'executed' || attempt.outcome === 'aborted')) { timestamp = timeline.action_attempt_started_at; timeline.user_choice_at = timestamp; gcm.markUserChoice(timestamp); }
+      if (attempt && (attempt.outcome === 'executed' || attempt.outcome === 'aborted') && timestamp !== null) { timeline.user_choice_at = timestamp; gcm.markUserChoice(timestamp); }
       after = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, after, observedGoogleCommands); const afterFrameworkObservations = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, afterFrameworkObservations); frameworks = frameworkStateFromObservations(frameworkObservations); const afterContexts = await buildProviderContexts(page, after, frameworkObservations); const afterState = (await providerOperations(selection.provider, afterContexts)).state; verification = verifyRequestedConsentAction({ requested_action: attempt?.action || 'reject_all', action_timestamp: timestamp, signals: collectRejectVerificationSignals({ timestamp, interactionExecuted: attempt?.outcome === 'executed', navigationInterrupted: attempt?.outcome === 'aborted', providerState: afterState, providerEventObserved: after.provider_events.length > before.provider_events.length || (after.onetrust?.provider_events.length || 0) > (before.onetrust?.provider_events.length || 0), providerActionCompleted: after.cookieyes?.is_user_action_completed === true, frameworks: frameworkObservations }), navigation_interrupted: attempt?.outcome === 'aborted' }); markTrackingGatedWhenObserved(gcm); }
     const afterContexts = await buildProviderContexts(page, after, frameworkObservations); const resulting = (await providerOperations(selection.provider, afterContexts)).state; const persistence = await verifySameContextReloadPersistence({ meaningful_action_attempt: attempt?.outcome === 'executed' || attempt?.outcome === 'aborted', semantic_verification: verification, after_action: { semantic_state: { provider: resulting.decision, tcf: tcfObservationDecision(frameworkObservations.tcf), gpp: frameworkObservations.gpp.lifecycle === 'ready' ? 'ambiguous' : 'unavailable', shopify_privacy: shopify.state?.decision, consent_mode: gcm.result().commands.length ? 'ambiguous' : 'unavailable' }, storage: buildPersistenceStorage(after) }, settle_timeout_ms: timings.reloadSettleMs }, { async reloadSameContext() { timeline.reload_started_at = Date.now(); const beforeUrl = page.url(); try { await page.reload({ waitUntil: 'commit' }); return { reloaded: true, same_context: true, origin_before: beforeUrl, origin_after: page.url(), navigation_interrupted: false }; } catch { return { reloaded: false, same_context: true, origin_before: beforeUrl, origin_after: page.url(), navigation_interrupted: true }; } }, async waitForSettle(timeoutMs) { try { await page.waitForLoadState('domcontentloaded', { timeout: timeoutMs }); return 'settled'; } catch { return 'timeout'; } }, async readPostReloadSnapshot() { const facts = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, facts, observedGoogleCommands); const reloadFrameworkObservations = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, reloadFrameworkObservations); frameworks = frameworkStateFromObservations(frameworkObservations); const contextsAfterReload = await buildProviderContexts(page, facts, frameworkObservations); const state = (await providerOperations(selection.provider, contextsAfterReload)).state; return { semantic_state: { provider: state.decision, tcf: tcfObservationDecision(frameworkObservations.tcf), gpp: frameworkObservations.gpp.lifecycle === 'ready' ? 'ambiguous' : 'unavailable', consent_mode: gcm.result().commands.length ? 'ambiguous' : 'unavailable' }, storage: buildPersistenceStorage(facts) }; } });
     const mechanisms = composeMechanisms(baseMechanisms, frameworkMechanisms(frameworks), googleConsentModeMechanism(gcm.result())); const contradiction = hasGcmContradiction(verification, gcm); const hasCmpIdentity = baseMechanisms.some((mechanism) => mechanism.mechanism === 'cmp' || mechanism.mechanism === 'custom'); const result = buildResult(input, mechanisms, banner, actions, initial, resulting, attempts, verification, persistence, frameworks, gcm, requests, [...(hasCmpIdentity ? [] : [ConsentAuditCodes.NO_CMP_DETECTED]), ...(selection.conflict ? [ConsentAuditCodes.PROVIDER_CONFLICT] : []), ...verification.reason_codes, ...persistence.reason_codes, ...(contradiction ? [ConsentAuditCodes.STATE_CONTRADICTION] : [])]); const tracking = checkTrackingConsistency({ rejection_verification: verification, user_choice_at: timeline.user_choice_at, post_reject_observation_completed: persistence.post_reload_observation_completed, requests }); return { result, tracking, ledger, telemetry: telemetry(result, tracking, before, generic, frameworkObservations, rollout, selection.provider, selection.conflict, false, actionEnabled, timeline, input.geo), google_consent_mode: gcm.result() };

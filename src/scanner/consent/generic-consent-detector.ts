@@ -91,8 +91,8 @@ const NEGATIVE_INTENTS = new Set<GenericSurfaceIntent>([
 ]);
 
 const DEFAULT_ACTION_LABELS: GenericConsentDetectorConfig['localized_action_labels'] = {
-  accept_all: ['accept all', 'accept cookies', 'allow all', 'alle akzeptieren'],
-  reject_all: ['reject all', 'decline all', 'deny all', 'alle ablehnen'],
+  accept_all: ['accept all', 'accept cookies', 'allow all', 'accept', 'alle akzeptieren'],
+  reject_all: ['reject all', 'decline all', 'deny all', 'reject', 'decline', 'alle ablehnen'],
   only_necessary: ['only necessary', 'necessary only'],
   open_preferences: ['preferences', 'manage preferences', 'cookie settings', 'customize', 'einstellungen'],
   save_preferences: ['save preferences', 'save choices', 'save settings']
@@ -202,7 +202,8 @@ export function detectGenericConsentMechanism(
   };
   const labels = configuredActionLabels(config);
   const visibleSurfaces = surfaces.filter((surface) => surface.visible);
-  const excluded = visibleSurfaces.some((surface) => NEGATIVE_INTENTS.has(surface.intent));
+  // Exclusions apply to their own surface only. A newsletter or login dialog
+  // must not veto a separate, visible consent surface on the same page.
   const confirmed = visibleSurfaces.filter((surface) => surface.privacy_or_cookie_semantics && surface.intent === 'consent');
   const byId = new Map(confirmed.map((surface) => [surface.id, surface]));
   const actions = new Map<Exclude<ConsentActionType, 'set_category' | 'close'>, GenericConsentSurface>();
@@ -238,22 +239,21 @@ export function detectGenericConsentMechanism(
     (signals.consent_mode_transition ? 10 : 0) +
     (signals.tcf_present ? 10 : 0) +
     (signals.gpp_present ? 10 : 0) +
-    (signals.manual_tag_gating_marker ? 10 : 0) -
-    (excluded ? 70 : 0)
+    (signals.manual_tag_gating_marker ? 10 : 0)
   );
   const hasVisibleConsentSurface = confirmed.length > 0;
   const hasRealAction = actions.size > 0;
   const meetsMinimum = hasVisibleConsentSurface && hasRealAction && corroborating.length >= config.minimum_corroborating_signals;
   const availableActions = actionResults(actions);
   const plans = actionPlan(actions);
-  if (!excluded && meetsMinimum && score >= config.candidate_threshold) {
+  if (meetsMinimum && score >= config.candidate_threshold) {
     const evidence = ['generic_visible_consent_surface', ...corroborating];
     return {
       status: 'detected', score, corroborating_signals: corroborating, actions: availableActions, action_plan: plans,
       mechanism: genericMechanism(evidence), reason_codes: [ConsentAuditCodes.CMP_DETECTED, ConsentAuditCodes.CMP_PROVIDER_UNKNOWN]
     };
   }
-  if (!excluded && score >= config.inconclusive_threshold) {
+  if (score >= config.inconclusive_threshold) {
     return {
       status: 'inconclusive', score, corroborating_signals: corroborating, actions: availableActions, action_plan: plans,
       mechanism: null, reason_codes: [ConsentAuditCodes.DETECTION_INCONCLUSIVE]

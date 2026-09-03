@@ -14,6 +14,10 @@ These rules protect the Consent V2 production path from parallel implementations
 8. **Conservative state.** Unavailable or conflicting evidence is inconclusive; it is never inferred as a consent decision.
 9. **Provider/framework separation.** TCF, GPP, USP, and Consent Mode establish framework facts, not CMP identity.
 10. **Multi-mechanism facts.** A CMP, platform privacy runtime, frameworks, and Consent Mode remain independent mechanisms in the result.
+11. **Stop gate.** If a work package concludes `Ready for next package = NO`, no subsequent package may proceed until its blocker is resolved or explicitly waived with a recorded reason.
+12. **CI truth.** A mandatory CI requirement is not complete while its executable test is failing.
+13. **No summary-driven completion.** Commit messages and agent summaries are not acceptance evidence; only production code, executed tests, and required live evidence count.
+14. **Release-candidate stability.** After `CODE_RELEASE_CANDIDATE`, further Consent V2 work must originate from a live-validation failure, provider-drift telemetry, verified bug, or approved new requirement—not speculative general repair.
 
 ## Action-readiness gate
 
@@ -69,6 +73,6 @@ The `CONSENT_V2_ENABLED=false` fallback uses the legacy detector only; it must n
 | compatibility mapper | `compatibility-mapper.ts` | `audit-runner.ts` finalization | mapper unit cases | RUNNER-V2-01 and RUNNER-V2-02 | complete |
 | rollout controls / legacy fallback | `rollout-controls.ts` | `audit-runner.ts` and `v2-session.ts` | disabled production-session case | RUNNER-DISABLED-01 | complete |
 | blocked access semantics | `fresh-context.ts`, `audit-runner.ts` | access finalization | PRE-05 | RUNNER-BLOCKED-01 | complete |
-| Linux CI browser gate | `.github/workflows/consent-v2.yml` | GitHub Actions | Playwright-managed Chromium | runs full Consent V2 and full-runner browser suites | complete |
+| Linux CI browser gate | `.github/workflows/consent-v2.yml` | GitHub Actions | explicit unit, production-browser, regression, and build commands | remote confirmation pending after the final local release gate |
 
-Action readiness remains **NOT READY**. These local deterministic browser fixtures prove production wiring; Completion WP05 still requires reviewed non-production Browserless/Decodo live validation.
+Action readiness remains **NOT READY**. Code status may be `CODE_RELEASE_CANDIDATE` only after the required local executable gates pass; `LIVE_VALIDATION_PENDING` remains until the Browserless/Decodo cohort is observed.

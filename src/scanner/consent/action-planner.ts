@@ -109,6 +109,8 @@ export interface InteractionExecutionResult {
   attempted_strategies: ConsentInteractionStrategy[];
   state_changed: boolean;
   reason_codes: ConsentAuditCode[];
+  /** Actual successful click/API activation, never the attempt-start timestamp. */
+  activated_at: number | null;
 }
 
 export interface RejectStateMachineInput {
@@ -148,7 +150,7 @@ function sameFrame(expected: readonly string[], actual: readonly string[] | null
 function unsupportedResult(action: ActionPlanSemanticAction, reasonCodes: ConsentAuditCode[]): InteractionExecutionResult {
   return {
     attempt: { action, origin: 'generic_ui', outcome: 'unsupported', category: null, reason_codes: reasonCodes },
-    strategy: null, attempted_strategies: [], state_changed: false, reason_codes: reasonCodes
+    strategy: null, attempted_strategies: [], state_changed: false, reason_codes: reasonCodes, activated_at: null
   };
 }
 
@@ -159,11 +161,12 @@ function result(
   reasonCodes: ConsentAuditCode[],
   attempted: ConsentInteractionStrategy[],
   stateChanged = false,
-  category: ConsentCategory | null = null
+  category: ConsentCategory | null = null,
+  activatedAt: number | null = null
 ): InteractionExecutionResult {
   return {
     attempt: { action, origin: strategy ? originFor(strategy) : 'generic_ui', outcome, category, reason_codes: reasonCodes },
-    strategy, attempted_strategies: attempted, state_changed: stateChanged, reason_codes: reasonCodes
+    strategy, attempted_strategies: attempted, state_changed: stateChanged, reason_codes: reasonCodes, activated_at: activatedAt
   };
 }
 
@@ -244,15 +247,16 @@ export async function executeActionPlan(plan: ActionPlan, bridge: InteractionExe
     if (execution === 'unsupported') continue;
     if (execution === 'not_executed') continue;
 
+    const activatedAt = Date.now();
     const stabilization = await bridge.waitForStabilization(plan);
     if (stabilization.navigation_interrupted) {
       const codes = [ConsentAuditCodes.NAVIGATION_INTERRUPTED];
       await bridge.appendEvidence({ kind: 'interaction_result', action: plan.action, strategy, origin: originFor(strategy), reason_codes: codes });
-      return result(plan.action, strategy, 'aborted', codes, attempted, false, plan.category);
+      return result(plan.action, strategy, 'aborted', codes, attempted, false, plan.category, activatedAt);
     }
     const codes = [ConsentAuditCodes.ACTION_EXECUTED];
     await bridge.appendEvidence({ kind: stabilization.state_changed ? 'state_transition' : 'interaction_result', action: plan.action, strategy, origin: originFor(strategy), reason_codes: codes });
-    return result(plan.action, strategy, 'executed', codes, attempted, stabilization.state_changed, plan.category);
+    return result(plan.action, strategy, 'executed', codes, attempted, stabilization.state_changed, plan.category, activatedAt);
   }
   const codes = [ConsentAuditCodes.INTERACTION_UNSUPPORTED, ConsentAuditCodes.ACTION_NOT_EXPOSED];
   await bridge.appendEvidence({ kind: 'interaction_result', action: plan.action, strategy: null, origin: null, reason_codes: codes });

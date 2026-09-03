@@ -42,7 +42,7 @@ No live provider detections were observed (`n=0`), so provider detection precisi
 
 ## Framework accuracy
 
-No live framework observations were collected (`n=0`). TCF, GPP, USP, and Google Consent Mode lifecycle checks passed in the executable production fixtures. GPP semantic opt-out interpretation remains intentionally unsupported; lifecycle presence must not be treated as a semantic consent decision.
+No live framework observations were collected (`n=0`). TCF, GPP, USP, and Google Consent Mode lifecycle checks passed in the executable production fixtures. `GPP_US_SEMANTIC_RESOLVER_PENDING` remains intentionally deferred: lifecycle presence, API support, and section lists must not be treated as US sale/share/targeted-ad opt-out semantics without validated official field-level evidence.
 
 ## Generic/custom accuracy
 
@@ -95,6 +95,6 @@ Keep all provider-specific action flags disabled.
 
 ## Final system verdict
 
-`NOT_PRODUCTION_READY`
+`CODE_RELEASE_CANDIDATE` when the documented local code gates are green; `LIVE_VALIDATION_PENDING` until the approved Browserless/Decodo cohort is observed.
 
 Consent V2 is ready for observation-mode code deployment, but WP05's required non-production Browserless/Decodo live validation has not occurred because no approved cohort is available. The action-readiness gate therefore remains unmet for every provider.

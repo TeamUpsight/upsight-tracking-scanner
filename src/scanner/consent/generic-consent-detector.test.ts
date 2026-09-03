@@ -65,6 +65,32 @@ describe('generic custom consent mechanism fixtures', () => {
     expect(result).toMatchObject({ status: 'not_detected', reason_codes: [ConsentAuditCodes.NO_CMP_DETECTED] });
   });
 
+  it.each([
+    ['GENERIC-MULTI-01 newsletter', { id: 'newsletter', surface_type: 'dialog' as const, visible: true, privacy_or_cookie_semantics: false, intent: 'newsletter' as const }],
+    ['GENERIC-MULTI-02 login', { id: 'login', surface_type: 'dialog' as const, visible: true, privacy_or_cookie_semantics: false, intent: 'login' as const }]
+  ])('%s does not suppress a separate custom CMP surface', (_name, negativeSurface) => {
+    const result = detectGenericConsentMechanism([negativeSurface, consentSurface], [control('accept_all'), control('reject_all')]);
+    expect(result).toMatchObject({ status: 'detected', mechanism: { mechanism: 'custom' } });
+  });
+
+  it('GENERIC-NEGATIVE-ONLY keeps newsletter, login, and age-gate surfaces out of custom CMP detection', () => {
+    const result = detectGenericConsentMechanism([
+      { id: 'newsletter', surface_type: 'dialog', visible: true, privacy_or_cookie_semantics: false, intent: 'newsletter' },
+      { id: 'login', surface_type: 'dialog', visible: true, privacy_or_cookie_semantics: false, intent: 'login' },
+      { id: 'age', surface_type: 'dialog', visible: true, privacy_or_cookie_semantics: false, intent: 'age_gate' }
+    ], []);
+    expect(result).toMatchObject({ status: 'not_detected', reason_codes: [ConsentAuditCodes.NO_CMP_DETECTED] });
+  });
+
+  it.each([
+    'We use cookies to personalize content and newsletter recommendations.',
+    'We use cookies depending on your country and region.',
+    'Our cookie notice includes a privacy policy and email personalization.'
+  ])('GENERIC-POSITIVE classifies consent topology despite incidental copy: %s', (_copy) => {
+    const result = detectGenericConsentMechanism([consentSurface], [control('accept_all'), control('reject_all'), control('open_preferences')]);
+    expect(result).toMatchObject({ status: 'detected', mechanism: { mechanism: 'custom' } });
+  });
+
   it('does not treat a generic Accept button outside a confirmed consent surface as actionable', () => {
     const result = detectGenericConsentMechanism([
       { id: 'ordinary', surface_type: 'dialog', visible: true, privacy_or_cookie_semantics: false, intent: 'unknown' }

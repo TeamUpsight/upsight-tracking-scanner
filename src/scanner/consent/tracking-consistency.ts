@@ -105,16 +105,28 @@ export function captureConsentTrackingRequest(input: {
   let parsed: URL;
   try { parsed = new URL(input.url); } catch { return null; }
   const host = parsed.hostname.toLowerCase();
+  // Keep the bounded Consent buffer for supported collection evidence only.
+  // Unknown resources otherwise crowd out later vendor events on busy pages.
+  const vendor = host.endsWith('google-analytics.com') ? 'ga4'
+    : (host === 'ad.doubleclick.net' || host.endsWith('.ad.doubleclick.net')) && /\/(?:ddm\/)?activity(?:\/|$)/.test(normalizedPath(parsed.pathname)) ? 'floodlight'
+      : /googleadservices\.com|doubleclick\.net/i.test(host) ? 'google_ads'
+        : /facebook\.com|connect\.facebook/i.test(host) ? 'meta'
+          : /tiktok\.com/i.test(host) ? 'tiktok'
+            : /snapchat\.com/i.test(host) ? 'snapchat'
+              : /pinterest\.com/i.test(host) ? 'pinterest'
+                : /twitter\.com|x\.com/i.test(host) ? 'x'
+                  : null;
+  if (!vendor) return null;
   const bodyFields = safePostFields(input.post_data);
   const event = safeEventName(
     parsed.searchParams.get('en') || parsed.searchParams.get('ev') || parsed.searchParams.get('event') || parsed.searchParams.get('event_name') ||
     bodyFields.en || bodyFields.ev || bodyFields.event || bodyFields.event_name || bodyFields.eventName || bodyFields.event_type || bodyFields.eventType
   );
   return {
-    vendor: /facebook\.com|connect\.facebook/i.test(host) ? 'meta' : /google-analytics\.com/i.test(host) ? 'ga4' : /googleadservices|doubleclick/i.test(host) ? 'google_ads' : /tiktok\.com/i.test(host) ? 'tiktok' : /snapchat\.com/i.test(host) ? 'snapchat' : /pinterest\.com/i.test(host) ? 'pinterest' : /twitter\.com|x\.com/i.test(host) ? 'x' : /doubleclick\.net/i.test(host) && /activity/i.test(parsed.pathname) ? 'floodlight' : 'unknown',
+    vendor,
     kind: input.resource_type === 'script' ? 'script' : 'collection',
     collector: 'third_party', host, path: normalizedPath(parsed.pathname), method: input.method,
-    phase: 'consent_v2', timestamp: input.timestamp || Date.now(), event
+    phase: 'consent_v2', timestamp: input.timestamp ?? Date.now(), event
   };
 }
 

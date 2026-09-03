@@ -39,6 +39,38 @@ describe('consent versus tracking consistency', () => {
     expect(result).toMatchObject({ status: 'contradiction', signals: [{ vendor: 'floodlight', kind: 'conversion_hit' }] });
   });
 
+  it('classifies Floodlight before broader DoubleClick Google Ads collection', () => {
+    expect(captureConsentTrackingRequest({ url: 'https://ad.doubleclick.net/ddm/activity', resource_type: 'image', method: 'GET', timestamp: 10 }))
+      .toMatchObject({ vendor: 'floodlight', kind: 'collection' });
+    expect(captureConsentTrackingRequest({ url: 'https://www.googleadservices.com/pagead/conversion/123', resource_type: 'image', method: 'GET', timestamp: 10 }))
+      .toMatchObject({ vendor: 'google_ads', kind: 'collection' });
+  });
+
+  it('BUFFER-01 through BUFFER-03 ignores unrelated requests, retains later vendor events, and remains bounded', () => {
+    const requests: TrackingRequestEvidence[] = [];
+    for (let index = 0; index < 150; index += 1) {
+      const unknown = captureConsentTrackingRequest({ url: `https://storefront.example/api/resource-${index}?private=value`, resource_type: 'fetch', method: 'GET', timestamp: index });
+      if (unknown && requests.length < 100) requests.push(unknown);
+    }
+    for (const input of [
+      { url: 'https://www.google-analytics.com/g/collect?en=page_view&secret=value', post_data: undefined },
+      { url: 'https://www.facebook.com/tr/?event_name=Purchase&secret=value', post_data: undefined },
+      { url: 'https://analytics.tiktok.com/api/v1/pixel/track', post_data: 'event=CompletePayment&email=secret@example.com' }
+    ]) {
+      const captured = captureConsentTrackingRequest({ ...input, resource_type: 'fetch', method: input.post_data ? 'POST' : 'GET', timestamp: 200 });
+      if (captured && requests.length < 100) requests.push(captured);
+    }
+    const result = checkTrackingConsistency({ rejection_verification: unverified, user_choice_at: null, post_reject_observation_completed: false, requests });
+    expect(requests).toHaveLength(3);
+    expect(result.signals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ vendor: 'google_analytics', timing: 'pre_choice' }),
+      expect.objectContaining({ vendor: 'meta', kind: 'conversion_hit', timing: 'pre_choice' }),
+      expect.objectContaining({ vendor: 'tiktok', kind: 'conversion_hit', timing: 'pre_choice' })
+    ]));
+    expect(JSON.stringify(requests)).not.toContain('secret=value');
+    expect(JSON.stringify(requests)).not.toContain('secret@example.com');
+  });
+
   it('is consistent when a completed post-Reject observation has no activity', () => {
     expect(check([])).toMatchObject({ status: 'consistent', reason_codes: [TrackingConsistencyCodes.NO_POST_REJECT_EVENT_HIT] });
   });

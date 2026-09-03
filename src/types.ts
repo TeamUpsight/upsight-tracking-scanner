@@ -292,6 +292,11 @@ export interface EvidenceBundle {
       banner_visibility: 'visible' | 'not_visible' | 'unknown';
       reject_availability: 'direct' | 'preferences_only' | 'api_only' | 'not_present' | 'unknown';
       interaction_outcome: 'executed' | 'not_executed' | 'timeout' | 'unsupported' | 'aborted' | 'not_attempted';
+      /** Attempt-level and requested-Reject outcomes remain distinct for preference flows. */
+      action_attempted?: boolean;
+      preferences_opened?: boolean;
+      reject_attempted?: boolean;
+      reject_outcome?: 'executed' | 'not_executed' | 'timeout' | 'unsupported' | 'aborted' | 'not_attempted';
       verification: 'verified' | 'not_verified' | 'inconclusive';
       persistence: 'confirmed' | 'not_confirmed' | 'inconclusive' | 'not_applicable';
       generic_fallback: boolean;
@@ -312,6 +317,7 @@ export interface EvidenceBundle {
         navigation_started_at: number | null;
         dom_content_loaded_at: number | null;
         initial_observation_completed_at: number | null;
+        action_attempt_started_at?: number | null;
         user_choice_at: number | null;
         reject_started_at: number | null;
         reject_completed_at: number | null;

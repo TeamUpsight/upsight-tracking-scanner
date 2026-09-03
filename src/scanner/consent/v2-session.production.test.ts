@@ -240,6 +240,25 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.persistence).toMatchObject({ status: 'confirmed', post_reload_observation_completed: true, semantic_channels: { provider: 'persisted' } });
   }, 20_000);
 
+  it('DIDOMI-UI-01 prefers a visible Reject control and never calls the API fallback', async () => {
+    const result = await auditNavigation(`<script>
+      let rejected=false; window.Didomi={
+        getCurrentUserStatus(){return {purposes:{a:!rejected,b:!rejected}};},
+        setUserDisagreeToAll(){throw new Error('API fallback must not be used when UI Reject is visible');},
+        notice:{isVisible(){return true;}}
+      };
+    </script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-notice" style="display:block;width:320px;height:120px"><button aria-label="Reject All" onclick="rejected=true;localStorage.setItem('didomi_token','present');window.dispatchEvent(new Event('consent.changed'))">Reject All</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')).toMatchObject({ availability: 'direct' });
+    expect(result.result.interactions[0]).toMatchObject({ action: 'reject_all', origin: 'provider_selector', outcome: 'executed' });
+    expect(result.result.resulting_state?.decision).toBe('rejected');
+    expect(result.result.rejection_verification.status).toBe('verified');
+  }, 20_000);
+
+  it('DIDOMI-API-FALLBACK-01 reports API-only Reject only when no visible Didomi control exists', async () => {
+    const result = await audit(`<script>window.Didomi={setUserDisagreeToAll(){},notice:{isVisible(){return true;}}}</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-host" style="display:block;width:320px;height:120px"></div>`);
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')).toMatchObject({ availability: 'api_only' });
+  });
+
   it('CY-03 verifies CookieYes optional categories with completed action and persistence', async () => {
     const result = await auditNavigation(`<script>
       const rejected=()=>localStorage.getItem('cookieyes-rejected')==='true';
@@ -270,7 +289,23 @@ describe('Consent V2 production session wiring', () => {
   it('PREF-SP-01 re-discovers the privacy-manager Reject in its real cross-origin iframe', async () => {
     const result = await auditSourcepoint(true);
     expect(result.result.interactions.map((item) => item.action)).toEqual(['open_preferences', 'reject_all']);
+    expect(result.telemetry).toMatchObject({ preferences_opened: true, reject_attempted: true, reject_outcome: 'executed', action_status: 'verified' });
   }, 15_000);
+
+  it('TELEMETRY-PREF-02 records missing Reject after preferences as unsupported rather than successful', async () => {
+    const iframe = createServer((_request, response) => response.end('<button class="sp_choice_type_12">Preferences</button>'));
+    await new Promise<void>((resolve) => iframe.listen(0, '127.0.0.1', resolve));
+    const address = iframe.address(); if (!address || typeof address === 'string') throw new Error('fixture did not bind');
+    const top = createServer((_request, response) => response.end(`<!doctype html><script>window._sp_={};window._sp_queue=[];window.__tcfapi=(c,v,cb)=>{if(c==='ping')cb({cmpLoaded:true,apiVersion:'2.2'},true);if(c==='addEventListener')cb({listenerId:1,eventStatus:'tcloaded',purpose:{consents:{1:true}},vendor:{consents:{1:true}}},true)}</script><iframe id="sp_message_iframe_missing" src="http://127.0.0.1:${address.port}/"></iframe>`));
+    await new Promise<void>((resolve) => top.listen(0, '127.0.0.1', resolve));
+    const topAddress = top.address(); if (!topAddress || typeof topAddress === 'string') throw new Error('fixture did not bind');
+    const page = await browser.newPage();
+    try {
+      const capture = await prepareConsentV2Session(page); capture.markNavigationStarted(); await page.goto(`http://127.0.0.1:${topAddress.port}/`, { waitUntil: 'domcontentloaded' });
+      const result = await runConsentV2Session(page, { ...input, rollout: actionRollout }, capture);
+      expect(result.telemetry).toMatchObject({ preferences_opened: true, reject_attempted: true, reject_outcome: 'unsupported', action_status: 'unsupported' });
+    } finally { await page.close(); await new Promise<void>((resolve, reject) => top.close((error) => error ? reject(error) : resolve())); await new Promise<void>((resolve, reject) => iframe.close((error) => error ? reject(error) : resolve())); }
+  }, 20_000);
 
   it('keeps Shopify Customer Privacy as a separate commerce privacy runtime beside OneTrust', async () => {
     const result = await audit(`<script>
@@ -353,6 +388,23 @@ describe('Consent V2 production session wiring', () => {
   it('does not classify a newsletter dialog as a custom CMP', async () => {
     const result = await audit('<div role="dialog">Newsletter <button>Sign up</button></div>');
     expect(result.result.mechanisms.some((item) => item.mechanism === 'custom')).toBe(false);
+  });
+
+  it.each([
+    ['GENERIC-MULTI-01', '<div role="dialog">Subscribe to our newsletter.<button>Accept</button></div>'],
+    ['GENERIC-MULTI-02', '<div role="dialog">Log in to your account.<button>Continue</button></div>']
+  ])('%s detects the real custom CMP beside a negative-intent surface', async (_name, negativeSurface) => {
+    const result = await audit(`${negativeSurface}<div id="cookie-notice">We use cookies.<button>Accept All</button><button>Reject All</button></div>`);
+    expect(result.result.mechanisms.find((item) => item.mechanism === 'custom')).toMatchObject({ provider: { attribution: 'unknown_candidate' } });
+  });
+
+  it.each([
+    'We use cookies to personalize content and newsletter recommendations.',
+    'We use cookies depending on your country and region.',
+    'Our cookie notice includes a privacy policy and email personalization.'
+  ])('GENERIC-POSITIVE retains a consent-shaped surface despite incidental copy', async (copy) => {
+    const result = await audit(`<div id="cookie-notice">${copy}<button>Accept All</button><button>Reject All</button><button>Manage Preferences</button></div>`);
+    expect(result.result.mechanisms.find((item) => item.mechanism === 'custom')).toMatchObject({ provider: { attribution: 'unknown_candidate' } });
   });
 
   it.each([
@@ -453,6 +505,18 @@ describe('Consent V2 production session wiring', () => {
     const result = await auditNavigation(`<head><script>new Image().src='https://www.facebook.com/tr/?ev=Purchase';</script></head><body>fixture</body>`);
     expect(result.tracking.signals).toEqual(expect.arrayContaining([expect.objectContaining({ vendor: 'meta', kind: 'conversion_hit', timing: 'pre_choice' })]));
   });
+
+  it('BUFFER-01 retains GA4 after more than 100 unrelated browser requests', async () => {
+    const result = await auditNavigation(`<head><script>for(let i=0;i<150;i+=1)new Image().src='https://storefront.example/api/'+i+'?secret=value';new Image().src='https://www.google-analytics.com/g/collect?en=page_view&secret=value';</script></head><body>fixture</body>`);
+    expect(result.tracking.signals).toEqual(expect.arrayContaining([expect.objectContaining({ vendor: 'google_analytics', timing: 'pre_choice' })]));
+    expect(result.result.network_signals).toHaveLength(1);
+  });
+
+  it('TIMESTAMP-01 through TIMESTAMP-03 use activation rather than action-attempt start', async () => {
+    const result = await auditNavigation(`<script>let rejected=false;window.OneTrust={RejectAll(){rejected=true;}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk" style="display:block;width:320px;height:120px"><button id="onetrust-reject-all-handler" onclick="const until=Date.now()+25;while(Date.now()<until){};OneTrust.RejectAll()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.telemetry.timeline?.action_attempt_started_at).not.toBeNull();
+    expect(result.telemetry.timeline?.user_choice_at).toBeGreaterThan(result.telemetry.timeline?.action_attempt_started_at || 0);
+  }, 20_000);
 
   it('PRE-03 observes a pre-choice Consent Mode default and its early Google ping', async () => {
     const result = await auditNavigation(`<head><script>

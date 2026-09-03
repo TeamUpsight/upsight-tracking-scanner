@@ -135,6 +135,8 @@ export interface ScoredProviderCandidate {
   independent_families: ProviderEvidenceFamily[];
   strong_conflict: boolean;
   high_confidence: boolean;
+  /** Registry-owned selection eligibility; callers must not recreate thresholds. */
+  plausible_candidate: boolean;
   attribution: 'identified' | 'unknown_candidate' | 'inconclusive';
 }
 
@@ -298,6 +300,7 @@ export function scoreProviderCandidates(
       ...candidate,
       strong_conflict: strongConflict,
       high_confidence: highConfidence,
+      plausible_candidate: highConfidence,
       attribution: strongConflict ? 'inconclusive' : highConfidence ? 'identified' : 'unknown_candidate'
     };
   });
