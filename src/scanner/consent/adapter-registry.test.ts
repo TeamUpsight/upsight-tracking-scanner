@@ -110,7 +110,7 @@ describe('Consent adapter registry', () => {
       { provider_id: 'onetrust', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific', polarity: 'conflicting' }
     ]);
 
-    expect(nearTie[0]).toMatchObject({ score: 95, high_confidence: false, attribution: 'unknown_candidate' });
+    expect(nearTie[0]).toMatchObject({ score: 95, high_confidence: false, plausible_candidate: true, attribution: 'unknown_candidate' });
     expect(conflicted[0]).toMatchObject({ score: 95, conflict_score: 30, strong_conflict: true, attribution: 'inconclusive' });
   });
 });

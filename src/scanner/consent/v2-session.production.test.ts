@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { chromium, type Browser } from 'playwright-core';
+import { chromium, type Browser, type Page } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ConsentV2RolloutControls } from './rollout-controls';
 import { prepareConsentV2Session, runConsentV2Session } from './v2-session';
@@ -29,10 +29,34 @@ beforeAll(async () => {
 });
 afterAll(async () => { await browser?.close(); });
 
+/**
+ * Keeps fixture requests realistic for the production page listener without
+ * allowing a browser test to depend on a vendor CDN or collection endpoint.
+ * Playwright emits `page.on('request')` before this route is fulfilled, so the
+ * Consent V2 capture receives the original request facts.
+ */
+async function installDeterministicExternalFixtureRouting(page: Page) {
+  await page.route('https://**/*', async (route) => {
+    const request = route.request();
+    if (request.resourceType() === 'script') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/javascript; charset=utf-8',
+        body: '/* deterministic fixture external script */'
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 204,
+      headers: { 'access-control-allow-origin': '*' }
+    });
+  });
+}
+
 /** Local executable fixture/page → production bridge → runConsentV2Session(). */
 async function audit(html: string, sessionInput = input) {
   const page = await browser.newPage();
-  try { await page.setContent(html); return await runConsentV2Session(page, sessionInput); } finally { await page.close(); }
+  try { await installDeterministicExternalFixtureRouting(page); await page.setContent(html); return await runConsentV2Session(page, sessionInput); } finally { await page.close(); }
 }
 
 /** Local page navigation → prepared production capture → session evaluation. */
@@ -45,6 +69,7 @@ async function auditNavigation(html: string, accessBlocked = false, sessionInput
   if (!address || typeof address === 'string') throw new Error('Local Consent V2 fixture server did not expose a TCP port.');
   const page = await browser.newPage();
   try {
+    await installDeterministicExternalFixtureRouting(page);
     const capture = await prepareConsentV2Session(page);
     capture.markNavigationStarted();
     await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'domcontentloaded' });
@@ -429,7 +454,12 @@ describe('Consent V2 production session wiring', () => {
 
   it('PREF-AMB-01 leaves ambiguous preference categories untouched', async () => {
     const result = await audit(`<script>window.OneTrust={ToggleInfoDisplay(){document.querySelector('#onetrust-banner-sdk').innerHTML='<div id="onetrust-pc-sdk"><button>Toggle</button><button>Save preferences</button></div>';}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-pc-btn-handler" onclick="OneTrust.ToggleInfoDisplay()">Preferences</button></div>`, { ...input, rollout: actionRollout });
-    expect(result.result.interactions.map((item) => item.action)).toEqual(['open_preferences']);
+    // Opening preferences is preparatory; the session must explicitly record
+    // that no safe Reject became available after rediscovery.
+    expect(result.result.interactions).toMatchObject([
+      { action: 'open_preferences', outcome: 'executed' },
+      { action: 'reject_all', outcome: 'unsupported' }
+    ]);
     expect(result.result.rejection_verification.status).toBe('inconclusive');
   });
 

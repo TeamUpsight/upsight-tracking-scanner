@@ -238,6 +238,10 @@ export async function executeActionPlan(plan: ActionPlan, bridge: InteractionExe
     }
     attempted.push(strategy);
     await bridge.appendEvidence({ kind: 'interaction_attempt', action: plan.action, strategy, origin: originFor(strategy), reason_codes: [] });
+    // A provider may synchronously emit consent commands or tracking requests
+    // while its control handler runs. Capture the activation boundary first so
+    // those browser events are never misclassified as pre-choice evidence.
+    const activatedAt = Date.now();
     const execution = await bridge.executeStrategy(plan, strategy);
     if (execution === 'timeout') {
       const codes = [ConsentAuditCodes.INTERACTION_TIMEOUT];
@@ -247,7 +251,6 @@ export async function executeActionPlan(plan: ActionPlan, bridge: InteractionExe
     if (execution === 'unsupported') continue;
     if (execution === 'not_executed') continue;
 
-    const activatedAt = Date.now();
     const stabilization = await bridge.waitForStabilization(plan);
     if (stabilization.navigation_interrupted) {
       const codes = [ConsentAuditCodes.NAVIGATION_INTERRUPTED];

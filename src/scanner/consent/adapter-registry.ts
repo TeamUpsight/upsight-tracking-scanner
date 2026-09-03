@@ -300,7 +300,12 @@ export function scoreProviderCandidates(
       ...candidate,
       strong_conflict: strongConflict,
       high_confidence: highConfidence,
-      plausible_candidate: highConfidence,
+      // A near-tie is not an identification, but each strongly evidenced
+      // provider still needs to reach session-level active-surface resolution.
+      // Otherwise two live CMPs are incorrectly reported as no CMP at all.
+      plausible_candidate: candidate.score >= config.high_confidence_threshold &&
+        candidate.independent_families.length >= config.minimum_independent_families &&
+        !strongConflict,
       attribution: strongConflict ? 'inconclusive' : highConfidence ? 'identified' : 'unknown_candidate'
     };
   });
