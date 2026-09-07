@@ -18,16 +18,17 @@ const ACTIVE_STATUSES = new Set(['pending', 'scanning']);
 const ACCESS_FAILURES = new Set(['rate_limited', 'access_blocked', 'bot_protection', 'dns_error', 'ssl_error']);
 const QA_CATEGORIES: QaFeedback['category'][] = ['CMP', 'Consent', 'GA4', 'Meta', 'view_item', 'PDP discovery', 'server-side', 'CMS', 'bot/access', 'other'];
 
-function ExplainedAction({ help, children, className = '', ...buttonProps }: {
+function ExplainedAction({ help, children, className = '', iconOnly = false, ...buttonProps }: {
   help: string;
   children: ReactNode;
   className?: string;
+  iconOnly?: boolean;
 } & ButtonHTMLAttributes<HTMLButtonElement>) {
   const tooltipId = useId();
   return (
     <span className="group relative inline-flex">
-      <button {...buttonProps} aria-describedby={tooltipId} className={`action-button ${className}`}>
-        {children}<Info className="h-3 w-3 opacity-55 transition group-hover:opacity-100" aria-hidden="true" />
+      <button {...buttonProps} aria-describedby={tooltipId} className={`action-button ${iconOnly ? '!p-2' : ''} ${className}`}>
+        {children}{!iconOnly && <Info className="h-3 w-3 opacity-55 transition group-hover:opacity-100" aria-hidden="true" />}
       </button>
       <span id={tooltipId} role="tooltip" className="pointer-events-none invisible absolute left-0 top-full z-50 mt-2 w-72 translate-y-1 rounded-lg border border-slate-700 bg-[#090d13] px-3 py-2.5 text-left text-[10px] font-normal normal-case leading-relaxed tracking-normal text-slate-300 opacity-0 shadow-2xl transition group-hover:visible group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:visible group-focus-within:translate-y-0 group-focus-within:opacity-100">
         {help}
@@ -499,12 +500,12 @@ export default function App() {
                   <div className="flex gap-1 overflow-x-auto">{([['all', 'All'], ['review', 'Needs review'], ['failed', 'Failed'], ['timeout', 'Timeout'], ['proxy', 'Proxy'], ['access', 'Access'], ['runtime', 'Runtime'], ['fallback_candidate', 'Fallback candidate'], ['bot_unresolved', 'Bot unresolved'], ['rate_limited', 'Rate-limited'], ['fallback_recovered', 'Fallback recovered'], ['active', 'Active']] as const).map(([key, label]) => <button type="button" key={key} onClick={() => setAuditFilter(key)} className={`shrink-0 rounded-full px-3 py-1.5 text-[10px] font-semibold transition ${auditFilter === key ? 'bg-primary/15 text-primary' : 'text-slate-500 hover:bg-white/[0.04] hover:text-white'}`}>{label}</button>)}</div>
                   <label className="inline-flex items-center gap-2 text-[10px] font-semibold text-slate-400"><input type="checkbox" checked={allFilteredSelected} onChange={toggleAllFilteredAudits} className="h-3.5 w-3.5 accent-primary" />Select Visible</label>
                 </div>
-                {selectedAuditIds.size > 0 && <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-primary/25 bg-primary/[0.06] px-3 py-2">
+                {selectedAuditIds.size > 0 && <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-primary/25 bg-primary/[0.06] px-3 py-2">
                   <span className="text-[10px] font-bold text-primary">{selectedAuditIds.size} Selected</span>
-                  <div className="flex items-center gap-1.5">
-                    <ExplainedAction help="Downloads one sanitized ZIP containing the debug evidence for every selected audit. Each audit is stored in its own folder." type="button" disabled={busy} onClick={() => void bulkExportDebugSelected()} className="border-neutral-border px-2.5 text-slate-300 hover:bg-white/[0.04]"><Download className="h-3.5 w-3.5" />Export Debug</ExplainedAction>
-                    <ExplainedAction help="Create a new audit for every selected row, preserving each audit's geo, scan mode, selected modules, and group label." type="button" disabled={busy} onClick={() => void bulkRerunSelected()} className="border-primary/35 px-2.5 text-primary hover:bg-primary/10"><RotateCcw className="h-3.5 w-3.5" />Re-run</ExplainedAction>
-                    <ExplainedAction help="Permanently delete all selected audit records and their associated QA feedback." type="button" disabled={busy} onClick={() => void bulkDeleteSelected()} className="border-rose-900/60 px-2.5 text-rose-300 hover:bg-rose-950/30"><Trash2 className="h-3.5 w-3.5" />Delete</ExplainedAction>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <ExplainedAction iconOnly aria-label="Export debug packages for selected audits" help="Export Debug: downloads one sanitized ZIP containing the debug evidence for every selected audit. Each audit is stored in its own folder." type="button" disabled={busy} onClick={() => void bulkExportDebugSelected()} className="border-neutral-border text-slate-300 hover:bg-white/[0.04]"><Download className="h-3.5 w-3.5" /></ExplainedAction>
+                    <ExplainedAction iconOnly aria-label="Re-run selected audits" help="Re-run: creates a new audit for every selected row, preserving each audit's geo, scan mode, selected modules, and group label." type="button" disabled={busy} onClick={() => void bulkRerunSelected()} className="border-primary/35 text-primary hover:bg-primary/10"><RotateCcw className="h-3.5 w-3.5" /></ExplainedAction>
+                    <ExplainedAction iconOnly aria-label="Delete selected audits" help="Delete: permanently deletes all selected audit records and their associated QA feedback." type="button" disabled={busy} onClick={() => void bulkDeleteSelected()} className="border-rose-900/60 text-rose-300 hover:bg-rose-950/30"><Trash2 className="h-3.5 w-3.5" /></ExplainedAction>
                   </div>
                 </div>}
               </div>
