@@ -19,7 +19,7 @@ Owns the normalized Evidence Bundle and deterministic conversion of captured fac
 
 ## Evidence and decision flow
 
-Capture inputs are reduced to a versioned bundle with `page`, `network`, `consent`, `product`, `server_side`, and `runtime` sections. Vendor parsers recognize qualifying requests or data-layer events; the collector stores bounded normalized fields. CMP and collection classifiers interpret their fact sets. Status resolvers choose conservative findings. Replay composes those results, runs consistency, and returns the fields used by live finalization and offline comparison.
+Capture inputs are reduced to a versioned bundle with `page`, `network`, `consent`, `product`, `server_side`, and `runtime` sections. Consent V2 enriches the consent facts in that bundle before it is completed; it must not overwrite replayed decision fields afterward. Vendor parsers recognize qualifying requests or data-layer events; the collector stores bounded normalized fields. CMP and collection classifiers interpret their fact sets. Status resolvers choose conservative findings. Replay composes those results, runs consistency, writes the canonical `decision_summary`, and returns the fields used by live finalization, debug exports, UI, and offline comparison.
 
 Key distinctions must remain explicit: installation versus actual collection; generic Google collection versus GA4; third-party versus first/same-origin collection; CMP presence versus a verified consent transition; PDP discovery versus a valid URL-matched product event.
 

@@ -63,16 +63,31 @@ afterEach(() => vi.unstubAllEnvs());
 
 describe('runStorefrontAudit production browser wiring', () => {
   const oneTrust = `<script>window.OneTrust={RejectAll(){ window.__rejectCalled = true; }};</script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`;
+  const verifiedOneTrust = `<script>
+    let listener; let rejected = false;
+    const state = () => ({ listenerId: 1, eventStatus: rejected ? 'useractioncomplete' : 'tcloaded', purpose: { consents: { 1: !rejected, 2: !rejected } }, vendor: { consents: { 1: !rejected, 2: !rejected } } });
+    window.__tcfapi = (command, version, callback) => { if (command === 'ping') callback({ cmpLoaded: true, apiVersion: '2.2', gdprApplies: true }, true); if (command === 'addEventListener') { listener = callback; callback(state(), true); } };
+    window.OneTrust = { RejectAll() {} }; window.OnetrustActiveGroups = 'C001';
+    function reject() { rejected = true; document.cookie = 'OptanonConsent=present; path=/'; window.dispatchEvent(new Event('OTConsentApplied')); setTimeout(() => listener?.(state(), true), 0); }
+  </script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`;
 
   it('RUNNER-V2-01 finalizes Consent V2 compatibility fields from the real runner', async () => {
     const result = await auditFixture(200, oneTrust);
-    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'pass', scan_status: 'completed' });
+    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive', scan_status: 'completed' });
+    expect((result.finding_confidence as { consent?: { reason_code?: string } } | undefined)?.consent?.reason_code).toBe('CMP_BEHAVIOR_NOT_VERIFIED');
     expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([
       expect.objectContaining({ step: 'cmp_provider_detected' }),
       expect.objectContaining({ step: 'consent_context_started', source: 'consent_v2' }),
       expect.objectContaining({ step: 'scan_finalized' })
     ]));
     expect((result.runtime_metrics as { consent_v2?: { enabled: boolean } }).consent_v2?.enabled).toBe(true);
+  }, 30_000);
+
+  it('RUNNER-V2-PASS-01 persists a verified Consent V2 pass through the canonical finalization path', async () => {
+    const result = await auditFixture(200, verifiedOneTrust);
+    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'pass', overall_status: 'pass', scan_status: 'completed' });
+    expect((result.evidence_bundle as { decision_summary: Array<{ decision_name: string; status: string }> }).decision_summary)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ decision_name: 'consent', status: 'pass' })]));
   }, 30_000);
 
   it('RUNNER-V2-02 maps pre-choice tracking to the final consent status', async () => {

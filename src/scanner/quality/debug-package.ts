@@ -17,7 +17,7 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
     : null;
   const observation = evidence?.network.observation;
   const productCandidates = evidence?.product.candidate_outcomes || [];
-  const decisions = [
+  const legacyDecisions = [
     ['consent', audit.consent_status, audit.finding_confidence?.consent, evidence?.consent.executed, evidence?.consent.post_reject_observation_completed],
     ['cmp', audit.cmp_provider, audit.finding_confidence?.cmp, evidence?.consent.executed, evidence?.consent.executed],
     ['product_payload', audit.product_payload_status, audit.finding_confidence?.product, evidence?.product.applicability === 'applicable', productCandidates.every((candidate) => candidate.observation_complete === true)],
@@ -29,10 +29,33 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
     observation_complete, applicable, evidence_codes: (finding as any)?.evidence || [], evidence_counts: { retained: ((finding as any)?.evidence || []).length },
     supporting_phases: [], blocking_uncertainty: observation_complete === true ? [] : ['observation_incomplete']
   }));
+  // New bundles carry the exact canonical replay projection. Legacy bundles
+  // retain this bounded compatibility fallback only.
+  const decisions = evidence?.decision_summary || legacyDecisions;
+  const normalizedErrors = [
+    ...(evidence?.access.proxy_attempts || []).filter((attempt) => attempt.failure_classification).map((attempt) => ({
+      phase: 'access', component: 'proxy', error_family: attempt.failure_classification, reason_code: attempt.failure_classification,
+      recoverable: evidence?.access.proxy_fallback_used === true, recovered: evidence?.access.proxy_fallback_recovered === true,
+      candidate_index: null, elapsed_ms: attempt.connect_duration_ms, effect_on_decision: 'Access evidence was degraded.'
+    })),
+    ...((evidence?.runtime.proxy_attempts || []).filter((attempt) => attempt.failure_reason).map((attempt) => ({
+      phase: 'access', component: 'proxy', error_family: attempt.failure_reason || 'PROXY_FAILURE', reason_code: attempt.failure_reason || null,
+      recoverable: evidence?.runtime.proxy_fallback_used === true, recovered: evidence?.runtime.proxy_fallback_recovered === true,
+      candidate_index: null, elapsed_ms: attempt.connection_ms || null, effect_on_decision: 'Runtime proxy attempt failed.'
+    }))),
+    ...((observation?.capture_channel_errors || []).map((reason_code) => ({
+      phase: 'tracking', component: 'capture', error_family: 'CAPTURE_CHANNEL_ERROR', reason_code,
+      recoverable: false, recovered: false, candidate_index: null, elapsed_ms: null, effect_on_decision: 'Tracking absence conclusions are limited.'
+    }))),
+    ...productCandidates.filter((candidate) => ['TRANSPORT_FAILED', 'OBSERVATION_INCOMPLETE', 'TIMEOUT'].includes(candidate.outcome)).map((candidate, index) => ({
+      phase: 'product', component: 'pdp_candidate', error_family: candidate.outcome, reason_code: candidate.reason_code || candidate.outcome,
+      recoverable: false, recovered: false, candidate_index: index, elapsed_ms: candidate.observation_elapsed_ms || null, effect_on_decision: 'Product result may be inconclusive.'
+    }))
+  ];
   const timeline = (trace as any[]).map((item, index) => ({
-    timestamp: item?.timestamp || null, elapsed_ms: item?.elapsed_ms ?? null, phase: item?.phase || item?.step || 'runtime', module: /consent/i.test(String(item?.step)) ? 'consent' : /pdp|product/i.test(String(item?.step)) ? 'product' : /server|collector/i.test(String(item?.step)) ? 'server' : 'tracking',
+    timestamp: item?.timestamp || null, elapsed_ms: item?.elapsed_ms ?? null, phase: item?.phase || item?.step || 'runtime', module: item?.module || (/consent/i.test(String(item?.step)) ? 'consent' : /pdp|product/i.test(String(item?.step)) ? 'product' : /server|collector/i.test(String(item?.step)) ? 'server' : 'tracking'),
     event: item?.step || `event_${index + 1}`, status: item?.status || null,
-    severity: /failed|error|timeout/i.test(String(item?.step)) ? 'error' : /incomplete|rejected|skipped/i.test(String(item?.step)) ? 'warning' : /completed|detected|selected|validated/i.test(String(item?.step)) ? 'success' : 'info',
+    severity: item?.severity || (/failed|error|timeout/i.test(String(item?.step)) ? 'error' : /incomplete|rejected|skipped/i.test(String(item?.step)) ? 'warning' : /completed|detected|selected|validated/i.test(String(item?.step)) ? 'success' : 'info'),
     reason_code: item?.reason_code || null, summary: String(item?.reason || item?.step || 'Audit event').slice(0, 240), duration_ms: item?.duration_ms || null, candidate_index: item?.candidate_attempt || null
   }));
   const files: Record<string, string | Buffer> = {
@@ -88,7 +111,7 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
     'consent-summary.json': JSON.stringify(sanitizeValue({ provider_candidates: evidence?.consent.provider_evidence || [], selected_provider: audit.cmp_provider, provider_confidence: audit.finding_confidence?.cmp?.confidence || null, banner_state: evidence?.consent.banner_visible ?? null, action_attempted: evidence?.consent.interaction_attempted ?? false, verification_status: evidence?.consent.rejection_verified ?? false, post_reject_observation_complete: evidence?.consent.post_reject_observation_completed ?? false, pre_choice_traffic: (evidence?.network.relevant_requests || []).filter((event) => event.phase.includes('consent_initial')).map((event) => event.consent_measurement || 'unknown'), final_decision: audit.consent_status }), null, 2),
     'server-summary.json': JSON.stringify(sanitizeValue({ passive_classification_complete: evidence?.server_side.passive_classification_completed ?? false, first_party_count: evidence?.server_side.first_party_collection_count ?? 0, same_origin_count: evidence?.server_side.same_origin_collection_count ?? 0, third_party_count: evidence?.server_side.third_party_collection_count ?? 0, duplicate_count: evidence?.server_side.strict_duplicate_count ?? 0, collector_cookie_detected: (evidence?.server_side.collector_cookie_names || []).length > 0, persistence_checked: evidence?.server_side.collector_cookie_persistence_checked ?? false, persistence_result: evidence?.server_side.collector_cookie_persisted ?? false, final_decision: audit.server_side_status, blocking_uncertainty: observation?.request_capture_completed === true ? [] : ['request_capture_incomplete'] }), null, 2),
     'timeline.json': JSON.stringify(sanitizeValue(timeline), null, 2),
-    'errors.json': JSON.stringify(sanitizeValue(timeline.filter((event) => event.severity === 'error' || event.severity === 'warning').map((event) => ({ phase: event.phase, component: event.module, error_family: event.severity, reason_code: event.reason_code, recoverable: event.severity === 'warning', recovered: false, candidate_index: event.candidate_index, elapsed_ms: event.elapsed_ms, effect_on_decision: event.summary }))), null, 2)
+    'errors.json': JSON.stringify(sanitizeValue(normalizedErrors), null, 2)
   };
   for (const screenshot of screenshots) {
     files[`screenshots/${screenshot.name.replace(/[^a-z0-9_.-]/gi, '_')}`] = Buffer.from(screenshot.content_base64, 'base64');

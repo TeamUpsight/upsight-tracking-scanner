@@ -26,12 +26,16 @@ export function resolveConsentStatus(input: {
   rejection_verified: boolean;
   post_reject_observation_completed?: boolean;
   tracking_after_verified_rejection: boolean;
+  technical_blocker_reason?: string;
 }): StatusDecision<ConsentStatus> {
   if (input.page_valid !== true) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'ACCESS_BLOCKED', evidence: ['page_invalid'] };
   }
   if (!input.executed) {
     return { status: 'not_tested', confidence: 'low', reason_code: 'CONSENT_NOT_TESTED', evidence: [] };
+  }
+  if (input.technical_blocker_reason) {
+    return { status: 'inconclusive', confidence: 'low', reason_code: input.technical_blocker_reason, evidence: ['consent_v2_technical_blocker'] };
   }
   const fullMeasurementBeforeInteraction = input.tracking_before_interaction === true || input.tracking_before_interaction === 'full_measurement';
   if (input.tracking_before_interaction === 'limited_measurement' || input.tracking_before_interaction === 'unknown') {

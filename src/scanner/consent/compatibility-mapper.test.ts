@@ -77,9 +77,17 @@ describe('Consent V2 compatibility mapper', () => {
     expect(mapped.trace_events).not.toContain('cmp_provider_identified');
   });
 
-  it('keeps unsupported interaction inconclusive rather than reporting no CMP', () => {
+  it('retains a known CMP identity when geo verification blocks the consent conclusion', () => {
+    const mapped = mapConsentV2ToExisting(result({
+      geo_verified: { status: 'inconclusive', evidence: [], reason_codes: ['GEO_UNVERIFIED'] },
+      reason_codes: ['GEO_UNVERIFIED']
+    }), context);
+    expect(mapped).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive', reason_code: 'GEO_UNVERIFIED' });
+  });
+
+  it('keeps unsupported interaction inconclusive while retaining a known CMP', () => {
     const unsupported = result({ interactions: [{ action: 'reject_all', origin: 'semantic_ui', outcome: 'unsupported', category: null, reason_codes: ['INTERACTION_UNSUPPORTED'] }] });
-    expect(mapConsentV2ToExisting(unsupported, context)).toMatchObject({ cmp_provider: null, consent_status: 'inconclusive' });
+    expect(mapConsentV2ToExisting(unsupported, context)).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive' });
   });
 
   it('maps an explicit clean no-CMP technical result through the existing business resolver', () => {

@@ -11,7 +11,7 @@ import type { TrackingConsistencyResult } from './tracking-consistency';
 export interface ConsentV2CompatibilityContext {
   geo: 'USA' | 'EU' | 'UK';
   page_valid: boolean | null;
-  tracking_before_interaction: boolean;
+  tracking_before_interaction: boolean | 'full_measurement' | 'limited_measurement' | 'unknown';
   post_reject_observation_completed?: boolean;
   trace_steps?: string | null;
   max_trace_steps?: number;
@@ -20,6 +20,7 @@ export interface ConsentV2CompatibilityContext {
 export interface ConsentV2CompatibilityResult {
   cmp_provider: CmpProvider | null;
   consent_status: ConsentStatus;
+  reason_code: string;
   trace_steps: string;
   trace_events: string[];
 }
@@ -66,7 +67,8 @@ function unknownMechanism(result: FinalConsentAuditResult) {
 }
 
 function mapLegacyProvider(result: FinalConsentAuditResult, blockedOrInconclusive: boolean, codes: ReadonlySet<ConsentAuditCode>): CmpProvider | null {
-  if (blockedOrInconclusive) return null;
+  // Identity is an observed technical fact. Behavioral/geo failures are
+  // resolved separately and must not erase a confidently named CMP.
   const visibleCmp = result.mechanisms.find((mechanism) => mechanism.mechanism === 'cmp' && mechanismProvider(mechanism));
   if (visibleCmp) return mechanismProvider(visibleCmp);
   const customCmp = result.mechanisms.find((mechanism) => mechanism.mechanism === 'custom' && mechanismProvider(mechanism));
@@ -79,7 +81,8 @@ function mapLegacyProvider(result: FinalConsentAuditResult, blockedOrInconclusiv
   );
   if (shopifyRuntime) return 'Shopify Privacy';
 
-  return codes.has(ConsentAuditCodes.NO_CMP_DETECTED) ? 'Not Found' : null;
+  // Absence is a conclusion only after a completed, unblocked detection pass.
+  return !blockedOrInconclusive && codes.has(ConsentAuditCodes.NO_CMP_DETECTED) ? 'Not Found' : null;
 }
 
 function parseTrace(value: string | null | undefined) {
@@ -159,6 +162,12 @@ export function mapConsentV2ToExisting(
   return {
     cmp_provider,
     consent_status: technicalStatus.status,
+    reason_code: blockedOrInconclusive
+      ? codes.has(ConsentAuditCodes.GEO_UNVERIFIED) ? ConsentAuditCodes.GEO_UNVERIFIED
+        : codes.has(ConsentAuditCodes.INTERACTION_UNSUPPORTED) ? ConsentAuditCodes.INTERACTION_UNSUPPORTED
+          : codes.has(ConsentAuditCodes.BLOCKED_OR_CHALLENGED) ? ConsentAuditCodes.BLOCKED_OR_CHALLENGED
+            : technicalStatus.reason_code
+      : technicalStatus.reason_code,
     trace_steps: JSON.stringify([...existingTrace, ...appended]),
     trace_events: appended.map((entry) => String(entry.step))
   };

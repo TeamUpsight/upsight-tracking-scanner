@@ -2,8 +2,21 @@ import { CheckCircle2, CircleDot, FlaskConical, GitCompareArrows, ListChecks, Wr
 import { useMemo, useState } from 'react';
 import { StatusBadge } from './StatusBadge';
 import { formatLabel } from './format';
+import type { StorefrontAudit } from '../types';
 
 export type AnalysisResult = { kind: 'review' | 'replay'; data: any };
+
+export function DecisionObservability({ audit }: { audit: StorefrontAudit }) {
+  const decisions = audit.evidence_bundle?.decision_summary || [];
+  const modules = decisions.filter((decision) => ['consent', 'product_payload', 'ga4', 'server_side'].includes(decision.decision_name));
+  return <section className="rounded-2xl border border-neutral-border bg-bg-card p-4 shadow-sm">
+    {audit.consistency_violations?.length ? <div className="mb-4 rounded-lg border border-amber-700/50 bg-amber-950/20 p-3 text-xs text-amber-200"><b>RESULT CONSISTENCY WARNING</b><div className="mt-1 font-mono text-[10px]">{audit.consistency_violations.join(' · ')}</div></div> : null}
+    <div className="grid gap-3 lg:grid-cols-2">
+      <div><h3 className="text-xs font-bold text-white">Why this result?</h3><div className="mt-3 space-y-2">{modules.map((decision) => <div key={decision.decision_name} className="rounded-lg border border-neutral-border-muted bg-[#10141c] p-3 text-[11px]"><div className="flex justify-between gap-2"><b>{formatLabel(decision.decision_name)}</b><StatusBadge value={String(decision.status)} /></div><div className="mt-2 text-slate-400">Reason: <span className="font-mono text-slate-300">{decision.reason_code}</span></div><div className="mt-1 text-slate-400">Evidence: {decision.evidence_codes.join(', ') || '—'}</div>{decision.blocking_uncertainty.length ? <div className="mt-1 text-amber-300">Uncertainty: {decision.blocking_uncertainty.join(', ')}</div> : null}</div>)}</div></div>
+      <div><h3 className="text-xs font-bold text-white">Evidence Completeness</h3><div className="mt-3 space-y-2">{modules.map((decision) => <div key={decision.decision_name} className="flex items-center justify-between rounded-lg border border-neutral-border-muted bg-[#10141c] px-3 py-2 text-[11px]"><span>{formatLabel(decision.decision_name)}</span><span className={decision.observation_complete === true ? 'text-emerald-300' : decision.observation_complete === false ? 'text-amber-300' : 'text-slate-500'}>{decision.observation_complete === true ? '✓ Complete' : decision.observation_complete === false ? '✕ Incomplete' : '— Not applicable'}</span></div>)}</div></div>
+    </div>
+  </section>;
+}
 
 function parseTrace(value: unknown): Record<string, unknown>[] {
   if (Array.isArray(value)) return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object');
@@ -65,8 +78,8 @@ export function TraceTimeline({ trace }: { trace: unknown }) {
   const [filter, setFilter] = useState<'All' | 'Access' | 'Consent' | 'Product' | 'Tracking' | 'Server' | 'Warnings/Errors'>('All');
   const timeline = useMemo(() => steps.map((step, index) => {
     const raw = String(step.step || `event ${index + 1}`);
-    const module = /consent|cmp|reject|accept/i.test(raw) ? 'Consent' : /pdp|product/i.test(raw) ? 'Product' : /server|collector|cookie/i.test(raw) ? 'Server' : /access|proxy|challenge|storefront/i.test(raw) ? 'Access' : 'Tracking';
-    const severity = /failed|error|timeout|exhausted/i.test(raw) ? 'error' : /incomplete|rejected|skipped|unknown/i.test(raw) ? 'warning' : /completed|detected|selected|cleared|confirmed/i.test(raw) ? 'success' : 'info';
+    const module = String((step as any).module || (/consent|cmp|reject|accept/i.test(raw) ? 'Consent' : /pdp|product/i.test(raw) ? 'Product' : /server|collector|cookie/i.test(raw) ? 'Server' : /access|proxy|challenge|storefront/i.test(raw) ? 'Access' : 'Tracking')).replace(/^./, (value) => value.toUpperCase());
+    const severity = (step as any).severity || (/failed|error|timeout|exhausted/i.test(raw) ? 'error' : /incomplete|rejected|skipped|unknown/i.test(raw) ? 'warning' : /completed|detected|selected|cleared|confirmed/i.test(raw) ? 'success' : 'info');
     return { step, raw, module, severity, title: formatLabel(raw), summary: valueText((step as any).reason_code || (step as any).reason || (step as any).status || '') };
   }).filter((event) => !/request|response|listener|capture_started|domcontentloaded/i.test(event.raw)), [steps]);
   const visible = timeline.filter((event) => filter === 'All' || filter === 'Warnings/Errors' ? filter === 'All' || event.severity === 'warning' || event.severity === 'error' : event.module === filter);

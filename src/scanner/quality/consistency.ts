@@ -40,14 +40,18 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
   const corrected = { ...audit };
   const violations: string[] = accessEvidenceViolations(evidence);
   let priority = 0;
-  const networkObservationComplete = evidence.network.observation?.request_listener_active === true &&
+  const requestObservationComplete = evidence.network.observation?.request_listener_active === true &&
+    evidence.network.observation?.request_capture_completed === true;
+  const networkObservationComplete = requestObservationComplete &&
     evidence.network.observation?.request_capture_completed === true &&
     evidence.network.observation?.data_layer_capture_completed === true &&
     evidence.network.observation?.performance_capture_completed === true;
-  const candidateObservationComplete = (evidence.product.candidate_outcomes || []).length > 0
-    ? (evidence.product.candidate_outcomes || []).every((candidate) => candidate.observation_complete === true &&
+  const candidateOutcomes = evidence.product.candidate_outcomes || [];
+  const relevantCandidates = candidateOutcomes.filter((candidate) => !(candidate.outcome === 'INVALID_PRODUCT' && candidate.semantic_result === 'INVALID_PRODUCT' && candidate.observation_complete === true));
+  const candidateObservationComplete = relevantCandidates.length > 0
+    ? relevantCandidates.every((candidate) => candidate.observation_complete === true &&
       ['VALID_PRODUCT_WITH_VIEW_ITEM', 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'].includes(candidate.outcome))
-    : evidence.product.observation?.minimum_observation_satisfied === true &&
+    : candidateOutcomes.length === 0 && evidence.product.observation?.minimum_observation_satisfied === true &&
       evidence.product.observation.transport_failure !== true && evidence.product.observation.timeout !== true;
   const confidence = { ...(corrected.finding_confidence || {}) };
 
@@ -76,7 +80,7 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
   }
 
   if (includesAuditModule(evidence.selected_modules, 'server_side') && corrected.server_side_status === 'not_detected' &&
-    !(evidence.server_side.passive_classification_completed === true && networkObservationComplete)) {
+    !(evidence.server_side.passive_classification_completed === true && requestObservationComplete)) {
     corrected.server_side_status = 'inconclusive';
     corrected.ss_collection_type = 'inconclusive';
     confidence.server_side = { ...(confidence.server_side || { confidence: 'low', evidence: [] }), status: 'inconclusive', confidence: 'low', reason_code: 'SERVER_OBSERVATION_INCOMPLETE' };

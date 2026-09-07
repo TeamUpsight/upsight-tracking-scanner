@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import type { AuditModule, FindingConfidence, QaFeedback, StorefrontAudit } from './types';
-import { AnalysisPanel, type AnalysisResult, TraceTimeline } from './ui/AuditInsights';
+import { AnalysisPanel, DecisionObservability, type AnalysisResult, TraceTimeline } from './ui/AuditInsights';
 import { MetricCard, ProxyDashboard, QualityDashboard, formatDuration } from './ui/Analytics';
 import { apiFetch, downloadBlob } from './ui/api';
 import { formatLabel, websiteUrl } from './ui/format';
@@ -573,6 +573,7 @@ export default function App() {
                 </section>
 
                 {analysis && analysis.data && <AnalysisPanel result={analysis} onClose={() => setAnalysis(null)} />}
+                <DecisionObservability audit={selected} />
                 <TraceTimeline trace={selected.trace_steps} />
               </> : <div className="rounded-2xl border border-dashed border-neutral-border bg-bg-card p-16 text-center"><Database className="mx-auto h-7 w-7 text-slate-700" /><p className="mt-3 text-xs text-slate-600">Select an audit to inspect its findings and evidence.</p></div>}
             </div>

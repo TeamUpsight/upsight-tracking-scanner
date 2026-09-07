@@ -23,7 +23,7 @@ import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } f
 import {
   assessPdpCandidate, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
   canKeepTimedOutPdp, isStrongProductPath, isViewItemForPdp, parseEgressCountry, pdpCandidateRejectionReason,
-  acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, classifyProductApplicability, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, trustArcPreferenceControls, twoLevelPdpCandidate
+  acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, classifyProductApplicability, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, sharedPreConsentMeasurementState, trustArcPreferenceControls, twoLevelPdpCandidate
 } from './audit-runner';
 import { AuditRuntimeBudget } from './audit-runtime-budget';
 import { parseRetryAfterMs, resolveAccessDecision, resolveHostnameEvidence, resolveHostnameStatus } from './navigation';
@@ -1161,12 +1161,13 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
   it('builds the complete sanitized debug package manifest', () => {
     const evidence = baseEvidence();
     evidence.runtime.screenshots.push({ name: 'home page.jpg', mime_type: 'image/jpeg', content_base64: 'aGVsbG8=' });
+    const replayed = replayEvidence(evidence);
     const files = buildDebugPackageFiles({
       audit_id: 'debug', domain: 'example.com', group_label: null, scan_started_at: evidence.runtime.started_at,
       scan_completed_at: null, scan_status: 'completed', scan_mode: 'diagnostic', error_category: 'none',
       tested_geos: 'USA', cms_platform_detected: 'Unknown', overall_status: 'pass', overall_confidence: 'high',
       consent_status: 'not_detected', cmp_provider: 'Not Found', product_payload_status: 'pass', pdp_url_tested: null,
-      server_side_status: 'not_detected', ss_collection_type: 'third_party', trace_steps: '[]', evidence_bundle: evidence
+      server_side_status: 'not_detected', ss_collection_type: 'third_party', trace_steps: '[]', evidence_bundle: replayed.evidence_bundle
     });
     expect(Object.keys(files)).toEqual(expect.arrayContaining([
       'audit-result.json', 'trace.jsonl', 'evidence.json', 'network-summary.json', 'cmp-evidence.json',
@@ -1179,6 +1180,7 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
       final_pdp_url: null
     });
     expect(JSON.parse(String(files['access-summary.json']))).toMatchObject({ page: { valid: null, access_category: 'none' } });
+    expect(JSON.parse(String(files['decisions.json']))).toEqual(replayed.evidence_bundle?.decision_summary);
   });
 });
 
@@ -1440,6 +1442,44 @@ describe('status resolver and consistency', () => {
 });
 
 describe('decision hardening regression pack', () => {
+  it('CANONICAL-01 keeps enriched Consent V2 provider, status, confidence, reason, and overall result aligned', () => {
+    const evidence = baseEvidence('canonical-v2.example');
+    evidence.selected_modules = ['consent']; evidence.page.valid = true; evidence.consent.executed = true;
+    evidence.consent.resolved_provider = 'Cookiebot'; evidence.consent.resolved_provider_confidence = 'high';
+    evidence.consent.technical_blocker_reason = 'GEO_UNVERIFIED';
+    const result = replayEvidence(evidence);
+    expect(result).toMatchObject({ cmp_provider: 'Cookiebot', consent_status: 'inconclusive', overall_status: 'inconclusive', finding_confidence: { cmp: { detected: true, reason_code: 'CMP_PROVIDER_IDENTIFIED' }, consent: { status: 'inconclusive', reason_code: 'GEO_UNVERIFIED' } } });
+    expect(result.reason_codes).toContain('GEO_UNVERIFIED');
+  });
+
+  it('preserves pre-choice measurement semantics with full > unknown > limited precedence', () => {
+    const evidence = baseEvidence('measurement.example');
+    evidence.network.relevant_requests = [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'analytics.google.com', path: '/g/collect', method: 'POST', phase: 'consent_initial_load', timestamp: 1, event: 'page_view', consent_measurement: 'limited_measurement' }];
+    expect(sharedPreConsentMeasurementState(evidence)).toBe('limited_measurement');
+    evidence.network.relevant_requests.push({ ...evidence.network.relevant_requests[0], timestamp: 2, consent_measurement: 'full_measurement' });
+    expect(sharedPreConsentMeasurementState(evidence)).toBe('full_measurement');
+  });
+
+  it('promotes applicability from positive PDP evidence and ignores complete invalid candidates', () => {
+    const evidence = baseEvidence('promotion.example');
+    evidence.selected_modules = ['tracking']; evidence.page.valid = true; evidence.product.executed = true;
+    evidence.product.applicability = 'inconclusive'; evidence.product.pdp_candidates = ['https://promotion.example/products/a', 'https://promotion.example/products/b']; evidence.product.pdp_url = evidence.product.pdp_candidates[1]; evidence.product.navigation_succeeded = true;
+    evidence.product.candidate_outcomes = [
+      { url: evidence.product.pdp_candidates[0], outcome: 'INVALID_PRODUCT', semantic_result: 'INVALID_PRODUCT', observation_complete: true },
+      { url: evidence.product.pdp_url, outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM', semantic_result: 'VALID_PRODUCT', observation_complete: true }
+    ];
+    evidence.product.ga4_view_item_hits = [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'analytics.google.com', path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1, event: 'view_item', has_product: true, product_id: 'sku' }];
+    const result = replayEvidence(evidence);
+    expect(result.product_payload_status).toBe('pass');
+    expect(result.evidence_bundle?.decision_summary?.find((item) => item.decision_name === 'product_payload')).toMatchObject({ applicable: true, observation_complete: true });
+  });
+
+  it('keeps server absence independent of DataLayer and performance capture', () => {
+    const evidence = baseEvidence('server-independence.example');
+    evidence.selected_modules = ['server_side']; evidence.page.valid = true; evidence.server_side.executed = true;
+    Object.assign(evidence.network.observation!, { data_layer_capture_completed: false, performance_capture_completed: false, request_listener_active: true, request_capture_completed: true });
+    expect(replayEvidence(evidence)).toMatchObject({ server_side_status: 'not_detected', ss_collection_type: 'not_detected' });
+  });
   it('OnePeloton-class incomplete capture never emits GA4 absence', () => {
     const evidence = baseEvidence('peloton-class.example');
     evidence.selected_modules = ['tracking']; evidence.page.valid = true; evidence.product.executed = true;

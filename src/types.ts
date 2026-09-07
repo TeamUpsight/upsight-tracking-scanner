@@ -160,6 +160,17 @@ export interface EvidenceBundle {
   geo: 'USA' | 'EU' | 'UK';
   mode: ScanMode;
   selected_modules?: AuditModule[];
+  /** Final bounded decision projection, authored by canonical replay only. */
+  decision_summary?: Array<{
+    decision_name: string;
+    status: string | boolean | null;
+    confidence: Confidence;
+    reason_code: string;
+    applicable: boolean | null;
+    observation_complete: boolean | null;
+    evidence_codes: string[];
+    blocking_uncertainty: string[];
+  }>;
   access: {
     valid_storefront: boolean | null;
     final_url: string | null;
@@ -235,6 +246,12 @@ export interface EvidenceBundle {
     // deliberately separate from the Consent module's reject audit.
     tracking_enablement?: 'not_needed' | 'already_enabled' | 'accepted' | 'failed' | 'inconclusive';
     post_reject_observation_completed: boolean;
+    /** Bounded Consent V2 enrichment, resolved before canonical replay. */
+    resolved_provider?: CmpProvider | null;
+    resolved_provider_confidence?: Confidence;
+    resolved_provider_evidence?: string[];
+    technical_blocker_reason?: string;
+    pre_choice_measurement?: false | 'full_measurement' | 'limited_measurement' | 'unknown';
   };
   product: {
     executed: boolean;

@@ -755,8 +755,8 @@ export function acceptComparisonReason(input: {
   return null;
 }
 
-function sharedPreConsentTrackingObserved(evidence: EvidenceBundle) {
-  return evidence.network.relevant_requests.some((request) =>
+export function sharedPreConsentMeasurementState(evidence: EvidenceBundle): false | 'full_measurement' | 'limited_measurement' | 'unknown' {
+  const preChoice = evidence.network.relevant_requests.filter((request) =>
     // The listener timestamps requests by the active orchestration phase.
     // Homepage navigation therefore lands in consent_initial_load, while the
     // overlapping tracker workflow contributes product_discovery/PDP traffic.
@@ -764,6 +764,9 @@ function sharedPreConsentTrackingObserved(evidence: EvidenceBundle) {
     // and must not be mistaken for the shared pre-choice baseline.
     request.kind === 'collection' && /^(?:consent_initial_load|product_discovery|product_pdp_load)$/.test(request.phase)
   );
+  if (preChoice.some((request) => request.consent_measurement === 'full_measurement')) return 'full_measurement';
+  if (preChoice.some((request) => request.consent_measurement === 'limited_measurement')) return 'limited_measurement';
+  return preChoice.length ? 'unknown' : false;
 }
 
 async function inspectPdpCandidate(page: Page) {
@@ -1074,15 +1077,40 @@ export async function runStorefrontAudit(
   const responseInspectionTasks = new Set<Promise<void>>();
   let scriptResponsesInspected = 0;
 
-  const addTrace = (step: string, details: Record<string, unknown> = {}) => {
+  const addTrace = (step: string, details: Record<string, unknown> = {}, metadata?: { module: 'runtime' | 'access' | 'consent' | 'product' | 'tracking' | 'server'; severity: 'info' | 'success' | 'warning' | 'error' }) => {
     if (trace.length < traceLimit) {
-      trace.push({ step, timestamp: new Date().toISOString(), ...(sanitizeValue(details) as Record<string, unknown>) });
+      trace.push({ step, timestamp: new Date().toISOString(), ...(sanitizeValue(details) as Record<string, unknown>), ...(metadata || {}) });
     }
     const now = Date.now();
     if (now - lastInterimUpdate > 2_000 && !lifecycle.isFinalized) {
       lastInterimUpdate = now;
       orderedUpdates.enqueue({ scan_status: 'scanning', trace_steps: JSON.stringify(trace) });
     }
+  };
+
+  const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null) => {
+    const shared = sharedPreConsentMeasurementState(evidence);
+    const v2PreChoice = result.tracking.signals.some((signal) => signal.timing === 'pre_choice') ? 'unknown' as const : false;
+    const preChoice = shared === 'full_measurement' ? shared : v2PreChoice === 'unknown' ? v2PreChoice : shared;
+    const compatibility = mapConsentV2ToExisting(result.result, {
+      geo, page_valid: pageValid, tracking_before_interaction: preChoice,
+      post_reject_observation_completed: result.result.persistence.post_reload_observation_completed,
+      max_trace_steps: traceLimit
+    }, result.tracking);
+    evidence.consent.executed = true;
+    evidence.consent.resolved_provider = compatibility.cmp_provider;
+    evidence.consent.resolved_provider_confidence = compatibility.cmp_provider ? 'high' : 'low';
+    evidence.consent.resolved_provider_evidence = result.result.reason_codes;
+    evidence.consent.technical_blocker_reason = compatibility.consent_status === 'inconclusive' ? compatibility.reason_code : undefined;
+    evidence.consent.pre_choice_measurement = preChoice;
+    evidence.consent.interaction_attempted = result.result.interactions.some((attempt) => attempt.action === 'reject_all' || attempt.action === 'only_necessary');
+    evidence.consent.rejection_verified = result.result.rejection_verification.status === 'verified';
+    evidence.consent.post_reject_observation_completed = Boolean(result.result.persistence.post_reload_observation_completed);
+    evidence.consent.provider_evidence = result.result.reason_codes;
+    evidence.consent.banner_visible = result.result.banner.visibility === 'visible';
+    evidence.consent.cookie_names = result.result.storage_changes.map((change) => change.key_name).slice(0, 100);
+    for (const step of compatibility.trace_events) addTrace(step, {}, { module: 'consent', severity: 'info' });
+    return compatibility;
   };
 
   const persistProxyMetric = (event: ProxyMetricEvent) => {
@@ -1211,6 +1239,7 @@ export async function runStorefrontAudit(
         new Promise((resolve) => setTimeout(resolve, 1_500))
       ]);
     }
+    if (consentV2) enrichConsentV2Evidence(consentV2, evidence.page.valid);
     await closeSession();
     const completedEvidence = evidenceCollector.complete(startedMs);
     const replayed = replayEvidence(completedEvidence);
@@ -1222,31 +1251,13 @@ export async function runStorefrontAudit(
       terminal_reason_code: terminalReasonCode,
       scan_completed_at: new Date().toISOString()
     };
-    if (consentV2) {
-      const compatibility = mapConsentV2ToExisting(consentV2.result, {
-        geo,
-        page_valid: evidence.page.valid,
-        tracking_before_interaction: sharedPreConsentTrackingObserved(evidence) || consentV2.tracking.signals.some((signal) => signal.timing === 'pre_choice'),
-        post_reject_observation_completed: consentV2.result.persistence.post_reload_observation_completed,
-        trace_steps: JSON.stringify(trace),
-        max_trace_steps: traceLimit
-      }, consentV2.tracking);
-      merged.cmp_provider = compatibility.cmp_provider;
-      merged.consent_status = compatibility.consent_status;
-      for (const step of compatibility.trace_events) {
-        if (trace.length >= traceLimit) break;
-        trace.push({ step, source: 'consent_v2', timestamp: new Date().toISOString() });
-      }
-    }
-    if (finalError !== 'none') {
-      merged.overall_status = 'inconclusive';
-      merged.overall_confidence = 'low';
-    }
     merged.failure_fingerprints = generateFailureFingerprints(merged, completedEvidence, merged.consistency_violations || []);
     merged.qa_priority = calculateQaPriority(merged, completedEvidence, merged.consistency_violations || []);
     trace.push({
       step: 'scan_finalized',
       status: 'completed',
+      module: 'runtime',
+      severity: finalError ? 'error' : 'success',
       scan_status: finalStatus,
       error_category: finalError,
       elapsed_ms: Date.now() - startedMs,
@@ -1976,14 +1987,7 @@ export async function runStorefrontAudit(
         }, consentCapture);
         consentV2Ran = true;
         evidence.runtime.consent_v2 = consentV2.telemetry;
-        evidence.consent.post_reject_observation_completed = Boolean(consentV2.result.persistence.post_reload_observation_completed);
-        const compatibility = mapConsentV2ToExisting(consentV2.result, {
-          geo,
-          page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
-          tracking_before_interaction: sharedPreConsentTrackingObserved(evidence) || consentV2.tracking.signals.some((signal) => signal.timing === 'pre_choice'),
-          post_reject_observation_completed: consentV2.result.persistence.post_reload_observation_completed,
-          max_trace_steps: traceLimit
-        }, consentV2.tracking);
+        const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
         cmp = {
           provider: compatibility.cmp_provider || (readiness.status === 'ready' ? 'Not Found' : 'Unknown'),
           confidence: compatibility.cmp_provider ? 'high' : 'low',
@@ -1991,9 +1995,6 @@ export async function runStorefrontAudit(
           banner_visible: consentV2.result.banner.visibility === 'visible',
           reason_code: consentV2.result.reason_codes[0] || 'DETECTION_INCONCLUSIVE'
         };
-        evidence.consent.provider_evidence = consentV2.result.reason_codes;
-        evidence.consent.banner_visible = consentV2.result.banner.visibility === 'visible';
-        evidence.consent.cookie_names = consentV2.result.storage_changes.map((change) => change.key_name).slice(0, 100);
         addTrace(readiness.status !== 'ready' ? 'consent_fresh_navigation_blocked_or_challenged' : compatibility.cmp_provider ? 'cmp_provider_detected' : 'cmp_not_found', {
           provider: compatibility.cmp_provider,
           reason_codes: consentV2.result.reason_codes,
@@ -2598,16 +2599,7 @@ export async function runStorefrontAudit(
           }, consentCapture!));
           consentV2Ran = true;
           evidence.runtime.consent_v2 = consentV2.telemetry;
-          evidence.consent.post_reject_observation_completed = Boolean(consentV2.result.persistence.post_reload_observation_completed);
-          const compatibility = mapConsentV2ToExisting(consentV2.result, {
-            geo, page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
-            tracking_before_interaction: sharedPreConsentTrackingObserved(evidence) || consentV2.tracking.signals.some((signal) => signal.timing === 'pre_choice'),
-            post_reject_observation_completed: consentV2.result.persistence.post_reload_observation_completed, max_trace_steps: traceLimit
-          }, consentV2.tracking);
-          evidence.consent.executed = true;
-          evidence.consent.provider_evidence = consentV2.result.reason_codes;
-          evidence.consent.banner_visible = consentV2.result.banner.visibility === 'visible';
-          evidence.consent.cookie_names = consentV2.result.storage_changes.map((change) => change.key_name).slice(0, 100);
+          const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
           addTrace(readiness.status !== 'ready' ? 'consent_fresh_navigation_blocked_or_challenged' : compatibility.cmp_provider ? 'cmp_provider_detected' : 'cmp_not_found', {
             provider: compatibility.cmp_provider, reason_codes: consentV2.result.reason_codes
           });
