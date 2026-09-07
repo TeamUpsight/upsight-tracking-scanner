@@ -210,6 +210,7 @@ export interface EvidenceBundle {
       performance_capture_attempted: boolean;
       performance_capture_completed: boolean;
       capture_channel_errors: string[];
+      limited_measurement_observed?: boolean;
     };
   };
   consent: {
@@ -245,7 +246,7 @@ export interface EvidenceBundle {
     meta_view_content_hits: TrackingRequestEvidence[];
     discovery_completed?: boolean;
     discovery_inconclusive?: boolean;
-    candidate_outcomes?: Array<{ url: string; outcome: 'VALID_PRODUCT' | 'INVALID_PRODUCT' | 'TRANSPORT_FAILED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT' }>;
+    candidate_outcomes?: Array<{ url: string; outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' | 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' | 'INVALID_PRODUCT' | 'TRANSPORT_FAILED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT' }>;
     observation?: {
       pdp_navigation_committed: boolean;
       product_semantics_checked: boolean;

@@ -23,7 +23,7 @@ import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } f
 import {
   assessPdpCandidate, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
   canKeepTimedOutPdp, isStrongProductPath, isViewItemForPdp, parseEgressCountry, pdpCandidateRejectionReason,
-  acceptComparisonReason, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, trustArcPreferenceControls, twoLevelPdpCandidate
+  acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, trustArcPreferenceControls, twoLevelPdpCandidate
 } from './audit-runner';
 import { AuditRuntimeBudget } from './audit-runtime-budget';
 import { parseRetryAfterMs, resolveAccessDecision, resolveHostnameEvidence, resolveHostnameStatus } from './navigation';
@@ -379,6 +379,28 @@ describe('unified audit-flow guardrails', () => {
     expect(acceptComparisonReason({ relevantRequests: [], viewItemHits: [] })).toBe('NO_TRACKING_OBSERVED_PRE_ACCEPT');
     expect(acceptComparisonReason({ relevantRequests: [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'x', path: '/', method: 'GET', phase: 'baseline', timestamp: 1 }], viewItemHits: [], consentMode: 'advanced denied' })).toBe('ADVANCED_CONSENT_MODE_OBSERVED');
   });
+
+  it('CAPTURE-01 and CAPTURE-02 keep failed browser evaluation distinct from an empty completed capture', async () => {
+    const collector = new EvidenceCollector({ auditId: 'capture-failure', domain: 'example.com', geo: 'USA', mode: 'normal' });
+    const page = { evaluate: async () => { throw new Error('context destroyed'); } } as any;
+    await captureDataLayerViewItems(page, 'product_pdp_load', collector);
+    await capturePerformanceTrackingRequests(page, 'product_pdp_load', collector);
+    expect(collector.bundle.network.observation).toMatchObject({
+      data_layer_capture_attempted: true, data_layer_capture_completed: false,
+      performance_capture_attempted: true, performance_capture_completed: false
+    });
+    expect(collector.bundle.network.observation?.capture_channel_errors).toEqual(expect.arrayContaining([
+      'data_layer_evaluation_failed', 'performance_resource_evaluation_failed'
+    ]));
+  });
+
+  it('DISCOVERY-02 resolves an incomplete discovery as inconclusive rather than PDP_NOT_FOUND', () => {
+    expect(resolveProductPayloadStatus({
+      executed: true, page_valid: true, pdp_found: false, pdp_navigation_succeeded: false,
+      consent_status: 'pass', site_ga4_detected: null, site_ga4_collection_hit_detected: null,
+      view_item_hits: [], pdp_discovery_completed: false
+    })).toMatchObject({ status: 'inconclusive', reason_code: 'PDP_DISCOVERY_INCONCLUSIVE' });
+  });
 });
 
 describe('review priority scoring', () => {
@@ -620,7 +642,9 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     const evidence = baseEvidence('access-fixture.example');
     evidence.access = { ...evidence.access, ...recovery.access, proxy_attempts: [targetFailure.attempt] };
     expect(evidence.access).toMatchObject({ final_provider: 'browserless_residential', proxy_fallback_recovered: true, proxy_attempts: [targetFailure.attempt] });
-    expect({ ...evidence.access, ...solverRecovery.access }).toMatchObject({ challenge_solver_result: 'succeeded' });
+    expect({ ...evidence.access, ...solverRecovery.access }).toMatchObject({
+      challenge_solver_result: 'succeeded', challenge_detected: false, challenge_type: null
+    });
     evidence.access = { ...evidence.access, ...solverFailure.access };
     const result = replayEvidence(evidence);
     expect(result).toMatchObject({

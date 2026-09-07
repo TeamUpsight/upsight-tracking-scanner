@@ -90,7 +90,7 @@
   },
   {
     "name": "PDP not found",
-    "product": { "executed": true, "discovery_executed": true, "pdp_url": null, "pdp_candidates": [], "navigation_succeeded": false },
+    "product": { "executed": true, "discovery_executed": true, "discovery_completed": true, "pdp_url": null, "pdp_candidates": [], "navigation_succeeded": false },
     "expected": { "product_payload_status": "pdp_not_found" }
   },
   {

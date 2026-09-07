@@ -149,7 +149,7 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     site_ga4_collection_hit_detected: ga4Collections.length > 0,
     view_item_hits: [...evidence.product.ga4_view_item_hits, ...dataLayerViewItems],
     runtime_failure: evidence.runtime.failed_phase?.startsWith('product_') === true,
-    pdp_discovery_completed: evidence.product.discovery_completed === true ? !evidence.product.discovery_inconclusive : undefined,
+    pdp_discovery_completed: evidence.product.discovery_inconclusive === true ? false : evidence.product.discovery_completed === true ? true : undefined,
     pdp_observation_complete: evidence.product.observation && (evidence.product.observation.observation_started_at !== null || evidence.product.observation.transport_failure || evidence.product.observation.timeout)
       ? evidence.product.observation.minimum_observation_satisfied && !evidence.product.observation.transport_failure && !evidence.product.observation.timeout : undefined,
     ga4_observation_complete: evidence.network.observation && evidence.product.observation?.observation_started_at !== null

@@ -224,6 +224,8 @@ export interface PersistenceResult {
   status: PersistenceStatus;
   evidence: string[];
   reason_codes: ConsentAuditCode[];
+  /** Lifecycle fact; intentionally independent from persistence semantics. */
+  post_reload_observation_completed?: boolean;
 }
 
 export type FrameworkPresence = 'present' | 'stub_present' | 'not_present' | 'unknown';

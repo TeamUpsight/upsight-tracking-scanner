@@ -76,7 +76,7 @@ export function resolveProductPayloadStatus(input: {
   if (input.page_valid !== true) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'ACCESS_BLOCKED', evidence: ['page_invalid'] };
   }
-  if (!input.pdp_found && input.pdp_discovery_completed !== false) {
+  if (!input.pdp_found && input.pdp_discovery_completed === true) {
     return { status: 'pdp_not_found', confidence: 'medium', reason_code: 'PDP_NOT_FOUND', evidence: ['discovery_completed'] };
   }
   if (!input.pdp_found) {

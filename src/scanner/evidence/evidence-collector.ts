@@ -135,7 +135,8 @@ export class EvidenceCollector {
           data_layer_capture_completed: false,
           performance_capture_attempted: false,
           performance_capture_completed: false,
-          capture_channel_errors: []
+          capture_channel_errors: [],
+          limited_measurement_observed: false
         }
       },
       consent: {
@@ -167,8 +168,8 @@ export class EvidenceCollector {
         ga4_view_item_hits: [],
         data_layer_view_item_hits: [],
         meta_view_content_hits: [],
-        discovery_completed: false,
-        discovery_inconclusive: false,
+        discovery_completed: undefined,
+        discovery_inconclusive: undefined,
         candidate_outcomes: [],
         observation: {
           pdp_navigation_committed: false,
