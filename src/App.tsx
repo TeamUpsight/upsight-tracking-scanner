@@ -493,7 +493,7 @@ export default function App() {
           </section>
 
           <div className="grid items-start gap-5 lg:grid-cols-[minmax(360px,.78fr)_minmax(0,1.22fr)]">
-            <section className="overflow-hidden rounded-2xl border border-neutral-border bg-bg-card shadow-sm lg:sticky lg:top-24">
+            <section className="rounded-2xl border border-neutral-border bg-bg-card shadow-sm lg:sticky lg:top-24">
               <div className="border-b border-neutral-border p-4">
                 <div className="relative"><Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-600" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search domain, CMS, group or fingerprint" className="w-full rounded-lg border border-neutral-border bg-[#0d1016] py-2 pl-9 pr-10 text-xs outline-none transition focus:border-primary" /><button type="button" onClick={() => void loadScans()} aria-label="Refresh audits" className="absolute right-1.5 top-1.5 rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-white"><RefreshCw className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} /></button></div>
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
