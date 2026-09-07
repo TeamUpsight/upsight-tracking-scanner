@@ -23,6 +23,10 @@ Capture inputs are reduced to a versioned bundle with `page`, `network`, `consen
 
 Key distinctions must remain explicit: installation versus actual collection; generic Google collection versus GA4; third-party versus first/same-origin collection; CMP presence versus a verified consent transition; PDP discovery versus a valid URL-matched product event.
 
+## Decision hardening invariants
+
+All persisted correlated findings are resolved in replay before final persistence and then checked by `consistency.ts`. A negative requires explicit `true` completeness for every required capture channel; missing or incomplete state maps to `null`/`inconclusive`, never an absence. CMP provider identity remains available when behavioral verification is inconclusive. Product negatives require applicable commerce context plus complete candidate-local observation, while server-side `not_detected` requires completed passive request capture. Debug exports derive their decision summaries from this same resolved record.
+
 ## Important models and APIs
 
 Persisted result fields and UI/API contracts are defined by `StorefrontAudit`. Evidence is persisted as JSONB through `src/db.ts`. Replay is exposed through `POST /api/v1/scans/:id/replay`, `POST /api/v1/replay`, and `scripts/replay.ts`; those consumers must agree.

@@ -62,6 +62,8 @@ export type CollectionType =
   | 'not_detected'
   | 'inconclusive';
 
+export type ProductApplicability = 'applicable' | 'not_applicable' | 'inconclusive';
+
 export type CmpProvider =
   | 'OneTrust'
   | 'Cookiebot'
@@ -114,6 +116,8 @@ export interface TrackingRequestEvidence {
   category?: string;
   value?: number;
   source?: 'page' | 'service_worker' | 'performance_timing' | 'data_layer' | 'unknown';
+  /** Bounded semantic Consent Mode interpretation; never stores raw gcs/gcd. */
+  consent_measurement?: 'full_measurement' | 'limited_measurement' | 'unknown';
 }
 
 export interface ScreenshotEvidence {
@@ -246,7 +250,28 @@ export interface EvidenceBundle {
     meta_view_content_hits: TrackingRequestEvidence[];
     discovery_completed?: boolean;
     discovery_inconclusive?: boolean;
-    candidate_outcomes?: Array<{ url: string; outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' | 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' | 'INVALID_PRODUCT' | 'TRANSPORT_FAILED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT' }>;
+    /** PDP crawling is skipped when completed storefront evidence proves it is not commerce. */
+    applicability?: ProductApplicability;
+    applicability_reason_code?: string;
+    candidate_outcomes?: Array<{
+      url: string;
+      final_url?: string | null;
+      rank?: number;
+      score?: number;
+      source?: 'link' | 'product_sitemap' | 'unknown';
+      semantic_result?: 'VALID_PRODUCT' | 'INVALID_PRODUCT' | 'INCOMPLETE';
+      strong_commerce_signals?: string[];
+      supporting_signals?: string[];
+      navigation_complete?: boolean;
+      observation_complete?: boolean;
+      request_capture_complete?: boolean;
+      data_layer_capture_complete?: boolean;
+      performance_capture_complete?: boolean;
+      observation_elapsed_ms?: number;
+      view_item_detected?: boolean;
+      reason_code?: string;
+      outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' | 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' | 'INVALID_PRODUCT' | 'TRANSPORT_FAILED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT';
+    }>;
     observation?: {
       pdp_navigation_committed: boolean;
       product_semantics_checked: boolean;

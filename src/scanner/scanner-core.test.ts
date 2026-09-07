@@ -16,14 +16,14 @@ import { buildBrowserlessCdpUrl, buildRotatingFallbackProxy, getExternalProxyFor
 import { buildProxyAttemptPlan, classifyConfirmedTunnelFailure, shouldUseBrowserlessResidentialFallback } from './proxy/provider';
 import { decideAccessTransition } from './access-state-machine';
 import { FinalizeOnce } from './resolver/lifecycle';
-import { resolveProductPayloadStatus } from './resolver/status-resolver';
+import { resolveConsentStatus, resolveProductPayloadStatus } from './resolver/status-resolver';
 import { classifyCollection, findStrictDuplicates } from './server-side/classify-collection';
 import { parseGA4DataLayerEntry, parseGA4Request } from './tracking/ga4';
 import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } from './tracking/meta';
 import {
   assessPdpCandidate, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
   canKeepTimedOutPdp, isStrongProductPath, isViewItemForPdp, parseEgressCountry, pdpCandidateRejectionReason,
-  acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, trustArcPreferenceControls, twoLevelPdpCandidate
+  acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, classifyProductApplicability, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, trustArcPreferenceControls, twoLevelPdpCandidate
 } from './audit-runner';
 import { AuditRuntimeBudget } from './audit-runtime-budget';
 import { parseRetryAfterMs, resolveAccessDecision, resolveHostnameEvidence, resolveHostnameStatus } from './navigation';
@@ -34,7 +34,14 @@ import { verifyConsentAcceptance, verifyConsentRejection } from './consent/conse
 import { AUDIT_MODULE_ORDER, normalizeAuditModules } from '../audit-modules';
 
 function baseEvidence(name = 'example.com'): EvidenceBundle {
-  return new EvidenceCollector({ auditId: name, domain: name, geo: 'USA', mode: 'normal', startedAt: '2026-08-27T00:00:00.000Z' }).bundle;
+  const bundle = new EvidenceCollector({ auditId: name, domain: name, geo: 'USA', mode: 'normal', startedAt: '2026-08-27T00:00:00.000Z' }).bundle;
+  // Most legacy fixtures model a successful bounded observation. Individual
+  // failure tests explicitly clear these fields to model incomplete evidence.
+  Object.assign(bundle.network.observation!, { request_listener_active: true, request_capture_completed: true, data_layer_capture_attempted: true, data_layer_capture_completed: true, performance_capture_attempted: true, performance_capture_completed: true });
+  Object.assign(bundle.product.observation!, { observation_started_at: 1, minimum_observation_satisfied: true, transport_failure: false, timeout: false });
+  bundle.server_side.passive_classification_completed = true;
+  bundle.product.applicability = 'applicable';
+  return bundle;
 }
 
 describe('audit module selection', () => {
@@ -331,7 +338,7 @@ describe('PDP candidate selection', () => {
       visible_product_heading: true, visible_price: true, structured_in_stock: false,
       structured_out_of_stock: false, unavailable_message: false, disabled_sold_out_control: false
     };
-    expect(assessPdpCandidate(weakSignals)).toEqual({ is_product: true, out_of_stock: false });
+    expect(assessPdpCandidate(weakSignals)).toEqual({ is_product: false, out_of_stock: false });
     const hit = {
       vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'www.google-analytics.com',
       path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1,
@@ -1185,6 +1192,7 @@ describe('server-side collection classifier', () => {
   it('does not infer collection from a first-party script', () => {
     const result = classifyCollection({
       executed: true, page_valid: true,
+      observation_complete: true,
       requests: [event({ kind: 'script', collector: 'first_party', event: undefined, measurement_id: undefined })]
     });
     expect(result.status).toBe('not_detected');
@@ -1229,6 +1237,7 @@ describe('status resolver and consistency', () => {
     evidence.product.pdp_candidates = ['https://example.com/product/model'];
     evidence.product.pdp_url = 'https://example.com/product/model';
     evidence.product.navigation_succeeded = true;
+    Object.assign(evidence.network.observation!, { request_listener_active: true, request_capture_completed: true, data_layer_capture_completed: true, performance_capture_completed: true });
     const entry = JSON.parse(readFileSync(path.join(process.cwd(), 'tests/fixtures/listenlively-m2-datalayer.json'), 'utf8'));
     collector.captureDataLayerViewItem({ entry, pageUrl: evidence.product.pdp_url, phase: 'product_pdp_load', timestamp: 1 });
     const result = replayEvidence(evidence);
@@ -1427,6 +1436,68 @@ describe('status resolver and consistency', () => {
     });
     expect(result.failure_fingerprints).toContain('DNS_RESOLUTION_FAILED');
     expect(result.failure_fingerprints).not.toContain('PROXY_TUNNEL_FAILED');
+  });
+});
+
+describe('decision hardening regression pack', () => {
+  it('OnePeloton-class incomplete capture never emits GA4 absence', () => {
+    const evidence = baseEvidence('peloton-class.example');
+    evidence.selected_modules = ['tracking']; evidence.page.valid = true; evidence.product.executed = true;
+    Object.assign(evidence.network.observation!, { request_capture_completed: false });
+    const result = replayEvidence(evidence);
+    expect(result).toMatchObject({ site_ga4_detected: null, site_ga4_collection_hit_detected: null, product_payload_status: 'inconclusive' });
+  });
+
+  it('Gymshark-class incomplete PDP candidates block missing_view_item', () => {
+    const evidence = baseEvidence('gymshark-class.example');
+    evidence.selected_modules = ['tracking']; evidence.page.valid = true; evidence.product.executed = true;
+    evidence.product.pdp_candidates = ['https://gymshark-class.example/products/a']; evidence.product.pdp_url = evidence.product.pdp_candidates[0]; evidence.product.navigation_succeeded = true;
+    evidence.product.candidate_outcomes = [{ url: evidence.product.pdp_url, outcome: 'OBSERVATION_INCOMPLETE', observation_complete: false }];
+    evidence.network.relevant_requests.push({ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'analytics.google.com', path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1, event: 'page_view', measurement_id: 'G-TEST' });
+    expect(replayEvidence(evidence).product_payload_status).toBe('inconclusive');
+  });
+
+  it('Guardian and documentation price-only pages are not PDPs', () => {
+    const priceOnly = { json_ld_product: false, og_product: false, product_form: false, enabled_add_to_cart: false, visible_product_heading: true, visible_price: true, structured_in_stock: false, structured_out_of_stock: false, unavailable_message: false, disabled_sold_out_control: false };
+    expect(assessPdpCandidate(priceOnly)).toMatchObject({ is_product: false });
+    expect(classifyProductApplicability({ html: '<article>Technical documentation $19 support</article>', cmsSignals: ['docs'] })).toMatchObject({ applicability: 'not_applicable' });
+  });
+
+  it('keeps a known CMP identity when Reject behavior is unverified', () => {
+    const evidence = baseEvidence('cookiebot-class.example');
+    evidence.selected_modules = ['consent']; evidence.page.valid = true; evidence.consent.executed = true;
+    evidence.consent.script_hosts = ['consent.cookiebot.com']; evidence.consent.interaction_attempted = false;
+    const result = replayEvidence(evidence);
+    expect(result).toMatchObject({ cmp_provider: 'Cookiebot', consent_status: 'inconclusive' });
+    expect(result.finding_confidence?.consent.reason_code).toBe('CMP_BEHAVIOR_NOT_VERIFIED');
+  });
+
+  it('maps clear but unsupported TCF evidence to Unknown rather than Not Found', () => {
+    const evidence = baseEvidence('tcf-class.example');
+    evidence.selected_modules = ['consent']; evidence.page.valid = true; evidence.consent.executed = true;
+    evidence.consent.window_globals = ['__tcfapi']; evidence.consent.script_hosts = ['choice.cdn.example'];
+    expect(replayEvidence(evidence).cmp_provider).not.toBe('Not Found');
+  });
+
+  it('never passes consent without an attempted, verified Reject and completed post-Reject observation', () => {
+    expect(resolveConsentStatus({ executed: true, page_valid: true, geo: 'EU', cmp_provider: 'OneTrust', tracking_before_interaction: false, rejection_attempted: false, rejection_verified: false, post_reject_observation_completed: false, tracking_after_verified_rejection: false }))
+      .toMatchObject({ status: 'inconclusive', reason_code: 'CMP_BEHAVIOR_NOT_VERIFIED' });
+  });
+
+  it('treats denied/cookieless Consent Mode traffic as limited, not a prior-consent violation', () => {
+    expect(resolveConsentStatus({ executed: true, page_valid: true, geo: 'EU', cmp_provider: 'OneTrust', tracking_before_interaction: 'limited_measurement', rejection_attempted: false, rejection_verified: false, post_reject_observation_completed: false, tracking_after_verified_rejection: false }).status)
+      .not.toBe('prior_consent_violation');
+  });
+
+  it('Server absence is inconclusive when request capture is incomplete', () => {
+    expect(classifyCollection({ executed: true, page_valid: true, requests: [], observation_complete: false })).toMatchObject({ status: 'inconclusive', reason_code: 'SERVER_OBSERVATION_INCOMPLETE' });
+  });
+
+  it('final consistency reconciles a CMP identity/confidence contradiction', () => {
+    const evidence = baseEvidence('didomi-class.example'); evidence.selected_modules = ['consent']; evidence.page.valid = true;
+    const result = enforceConsistency({ cmp_provider: 'Didomi', finding_confidence: { cmp: { detected: false, confidence: 'low', evidence: [], reason_code: 'CMP_NOT_DETECTED' } } }, evidence);
+    expect(result.audit.finding_confidence?.cmp).toMatchObject({ detected: true, reason_code: 'CMP_PROVIDER_IDENTIFIED' });
+    expect(result.violations).toContain('CMP_PROVIDER_CONTRADICTION');
   });
 });
 

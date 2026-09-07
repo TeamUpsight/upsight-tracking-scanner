@@ -27,6 +27,7 @@ export interface ParsedGA4Request {
   brand?: string;
   category?: string;
   value?: number;
+  consent_measurement?: 'full_measurement' | 'limited_measurement' | 'unknown';
 }
 
 export interface ParsedGA4DataLayerEvent {
@@ -51,6 +52,18 @@ function parseBody(body: string): URLSearchParams[] {
 
 function valueFrom(urlParams: URLSearchParams, bodyParams: URLSearchParams, key: string): string {
   return bodyParams.get(key) || urlParams.get(key) || '';
+}
+
+/** Convert Consent Mode wire hints into a bounded semantic class. Raw values are never retained. */
+function consentMeasurement(urlParams: URLSearchParams, bodyParams: URLSearchParams): ParsedGA4Request['consent_measurement'] {
+  const gcs = valueFrom(urlParams, bodyParams, 'gcs');
+  const gcd = valueFrom(urlParams, bodyParams, 'gcd');
+  if (!gcs && !gcd) return 'unknown';
+  // G111 is the only well-defined full-grant shape we classify positively.
+  if (/^G111$/i.test(gcs)) return 'full_measurement';
+  // A Consent Mode marker which is not a full grant may be a denied/cookieless
+  // ping. Keep it limited rather than treating it as a pre-consent violation.
+  return 'limited_measurement';
 }
 
 function parseNumber(raw: string): number | undefined {
@@ -234,6 +247,7 @@ export function parseGA4Request(url: string, body = ''): ParsedGA4Request | null
     session_id: valueFrom(urlParams, bodyParams, 'sid'),
     has_product: hasProduct,
     payload_source: payloadSource,
+    consent_measurement: consentMeasurement(urlParams, bodyParams),
     ...product
   };
 }
@@ -266,6 +280,7 @@ export function toGA4Evidence(parsed: ParsedGA4Request, input: {
     brand: parsed.brand,
     category: parsed.category,
     value: parsed.value
+    , consent_measurement: parsed.consent_measurement
   };
 }
 

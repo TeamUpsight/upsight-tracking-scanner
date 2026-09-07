@@ -69,6 +69,8 @@ export function classifyCollection(input: {
   requests: TrackingRequestEvidence[];
   collector_cookie_detected?: boolean;
   collector_cookie_persisted?: boolean;
+  /** Absence requires an explicitly completed passive request observation. */
+  observation_complete?: boolean;
 }): ServerSideClassification {
   if (!input.executed) {
     return {
@@ -91,6 +93,14 @@ export function classifyCollection(input: {
   const thirdParty = collection.filter((request) => request.collector === 'third_party');
   const firstPartyTotal = firstParty.length + sameOrigin.length;
   const duplicatePairs = firstPartyTotal > 0 ? findStrictDuplicates(collection) : [];
+
+  if (firstPartyTotal === 0 && input.observation_complete !== true) {
+    return {
+      collection_type: 'inconclusive', status: 'inconclusive',
+      first_party_collection_count: 0, same_origin_collection_count: 0, third_party_collection_count: thirdParty.length,
+      strict_duplicate_count: 0, duplicate_pairs: [], reason_code: 'SERVER_OBSERVATION_INCOMPLETE'
+    };
+  }
 
   if (firstPartyTotal === 0) {
     return {

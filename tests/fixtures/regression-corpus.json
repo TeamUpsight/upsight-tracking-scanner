@@ -12,7 +12,7 @@
     "requests": [
       { "vendor": "ga4", "kind": "collection", "collector": "third_party", "host": "www.google-analytics.com", "path": "/g/collect", "method": "GET", "phase": "product_pdp_load", "timestamp": 1000, "event": "page_view", "measurement_id": "G-LAKANTO", "page_url": "https://lakanto.com/products/example" }
     ],
-    "expected": { "cmp_provider": "Shopify Privacy", "product_payload_status": "missing_view_item", "ss_collection_type": "third_party" }
+    "expected": { "cmp_provider": "Shopify Privacy", "product_payload_status": "inconclusive", "ss_collection_type": "third_party" }
   },
   {
     "name": "MATW — strong first-party/server-side collector",

@@ -34,7 +34,7 @@ function result(overrides: Partial<FinalConsentAuditResult> = {}): FinalConsentA
   };
 }
 
-const context = { geo: 'EU' as const, page_valid: true, tracking_before_interaction: false, trace_steps: JSON.stringify([{ step: 'existing_trace' }]) };
+const context = { geo: 'EU' as const, page_valid: true, tracking_before_interaction: false, post_reject_observation_completed: true, trace_steps: JSON.stringify([{ step: 'existing_trace' }]) };
 
 describe('Consent V2 compatibility mapper', () => {
   it('maps a verified named CMP and appends bounded legacy trace events', () => {

@@ -644,12 +644,29 @@ export interface PdpCandidateSignals {
 }
 
 export function assessPdpCandidate(signals: PdpCandidateSignals) {
+  // Heading, price, images, and sales language are supporting context only.
+  // A PDP needs a commerce-native signal so articles, manuals, and donation
+  // pages cannot become products from price-looking prose.
   const productEvidence = signals.json_ld_product || signals.og_product || signals.product_form || signals.enabled_add_to_cart ||
-    signals.visible_product_heading && signals.visible_price || signals.structured_in_stock || signals.structured_out_of_stock ||
-    signals.unavailable_message || signals.disabled_sold_out_control;
+    signals.structured_in_stock || signals.structured_out_of_stock || signals.disabled_sold_out_control;
   const outOfStock = !signals.structured_in_stock && !signals.enabled_add_to_cart &&
     (signals.structured_out_of_stock || signals.unavailable_message || signals.disabled_sold_out_control);
   return { is_product: productEvidence, out_of_stock: productEvidence && outOfStock };
+}
+
+/** A cheap, homepage-only gate. It deliberately never guesses "not applicable"
+ * from absence unless the inspected surface is positively non-commerce. */
+export function classifyProductApplicability(input: { html: string; cmsSignals: string[] }) {
+  const html = input.html.toLowerCase();
+  const signals = input.cmsSignals.join(' ').toLowerCase();
+  const commerce = /application\/ld\+json[^>]*>[\s\S]{0,400}"@type"\s*:\s*"product"|og:type["']?\s+content=["']product|add to (?:cart|bag)|\/products?\//i.test(input.html) ||
+    /shopify|woocommerce|magento|bigcommerce/.test(signals);
+  if (commerce) return { applicability: 'applicable' as const, reason_code: 'PRODUCT_COMMERCE_SIGNAL' };
+  const nonCommerce = /\b(documentation|technical manual|support article|news article|knowledge base)\b/.test(html) ||
+    /\b(docs|documentation|support|help|news|blog)\b/.test(signals);
+  return nonCommerce
+    ? { applicability: 'not_applicable' as const, reason_code: 'PRODUCT_NOT_APPLICABLE' }
+    : { applicability: 'inconclusive' as const, reason_code: 'PRODUCT_APPLICABILITY_INCONCLUSIVE' };
 }
 
 export function pdpCandidateRejectionReason(
@@ -2037,11 +2054,22 @@ export async function runStorefrontAudit(
     addTrace('product_context_started', { max_pdp_urls_to_audit: 1, max_candidate_attempts: pdpCandidateAttemptLimit });
     let pdpCandidates: string[] = [];
     try {
-      pdpCandidates = await withinPhaseBudget(
-        'product_discovery',
-        Math.max(1, Math.min(productDiscoveryBudgetMs, productBudgetRemaining())),
-        () => discoverPdp(homepage!, effectiveDomain, check, pdpCandidateAttemptLimit)
-      );
+      const homepageHtml = await homepage!.content();
+      const applicability = classifyProductApplicability({ html: homepageHtml, cmsSignals: evidence.page.cms_signals });
+      evidence.product.applicability = applicability.applicability;
+      evidence.product.applicability_reason_code = applicability.reason_code;
+      if (applicability.applicability === 'not_applicable') {
+        addTrace('product_applicability_decided', { status: 'not_applicable', reason_code: applicability.reason_code });
+      } else {
+        // Inconclusive remains eligible for the existing bounded discovery path;
+        // it can never produce a definitive negative downstream.
+        pdpCandidates = await withinPhaseBudget(
+          'product_discovery',
+          Math.max(1, Math.min(productDiscoveryBudgetMs, productBudgetRemaining())),
+          () => discoverPdp(homepage!, effectiveDomain, check, pdpCandidateAttemptLimit)
+        );
+        addTrace('product_applicability_decided', { status: applicability.applicability, reason_code: applicability.reason_code });
+      }
       evidence.product.discovery_completed = true;
       check();
     } catch (error) {
@@ -2056,7 +2084,9 @@ export async function runStorefrontAudit(
     }
     evidence.product.pdp_candidates = pdpCandidates.map((url) => safeUrl(url) || '').filter(Boolean);
     if (!pdpCandidates.length) {
-      addTrace('product_payload_status_decision', evidence.product.discovery_completed && !evidence.product.discovery_inconclusive
+      addTrace('product_payload_status_decision', evidence.product.applicability === 'not_applicable'
+        ? { status: 'not_tested', reason_code: 'PRODUCT_NOT_APPLICABLE' }
+        : evidence.product.discovery_completed && !evidence.product.discovery_inconclusive && evidence.product.applicability === 'applicable'
         ? { status: 'pdp_not_found', reason_code: 'PDP_NOT_FOUND' }
         : { status: 'inconclusive', reason_code: 'PDP_DISCOVERY_INCONCLUSIVE' });
     } else {
@@ -2321,7 +2351,7 @@ export async function runStorefrontAudit(
           }
           const hasValidCandidateViewItem = candidateHits.some((hit) => hit.has_product);
           if (!canKeepTimedOutPdp({ navigationTimedOut, finalPdpUrlValid, assessment, hasValidViewItem: hasValidCandidateViewItem })) {
-            evidence.product.candidate_outcomes?.push({ url: finalPdpUrl, outcome: 'TIMEOUT' });
+            evidence.product.candidate_outcomes?.push({ url: finalPdpUrl, rank: candidateIndex + 1, navigation_complete: false, observation_complete: false, reason_code: 'PDP_NAV_TIMEOUT', outcome: 'TIMEOUT' });
             evidence.product.observation!.timeout = true;
             addTrace('pdp_candidate_rejected', { candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl, reason_code: 'PDP_NAV_TIMEOUT' });
             continue;
@@ -2330,7 +2360,15 @@ export async function runStorefrontAudit(
             ? 'PDP_ASSESSMENT_UNAVAILABLE'
             : pdpCandidateRejectionReason(assessment, hasValidCandidateViewItem);
           if (rejectionReason) {
-            evidence.product.candidate_outcomes?.push({ url: finalPdpUrl, outcome: 'INVALID_PRODUCT' });
+            evidence.product.candidate_outcomes?.push({
+              url: finalPdpUrl, rank: candidateIndex + 1, final_url: finalPdpUrl,
+              semantic_result: assessmentUnavailable ? 'INCOMPLETE' : 'INVALID_PRODUCT',
+              navigation_complete: true, observation_complete: !assessmentUnavailable,
+              strong_commerce_signals: assessmentUnavailable ? [] : Object.entries(assessment.signals).filter(([key, value]) => value && ['json_ld_product', 'og_product', 'product_form', 'enabled_add_to_cart', 'structured_in_stock', 'structured_out_of_stock', 'disabled_sold_out_control'].includes(key)).map(([key]) => key),
+              supporting_signals: assessmentUnavailable ? [] : Object.entries(assessment.signals).filter(([key, value]) => value && ['visible_product_heading', 'visible_price', 'unavailable_message'].includes(key)).map(([key]) => key),
+              reason_code: rejectionReason,
+              outcome: assessmentUnavailable ? 'OBSERVATION_INCOMPLETE' : 'INVALID_PRODUCT'
+            });
             addTrace('pdp_candidate_rejected', { pdp_url: safeUrl(pdpUrl), reason_code: rejectionReason });
             continue;
           }
@@ -2385,6 +2423,19 @@ export async function runStorefrontAudit(
           const candidateHasViewItem = finalViewItems.some((hit) => hit.has_product);
           evidence.product.candidate_outcomes?.push({
             url: finalPdpUrl,
+            final_url: finalPdpUrl,
+            rank: candidateIndex + 1,
+            semantic_result: 'VALID_PRODUCT',
+            navigation_complete: true,
+            observation_complete: evidence.product.observation!.minimum_observation_satisfied && !evidence.product.observation!.transport_failure && !evidence.product.observation!.timeout,
+            request_capture_complete: evidence.network.observation?.request_capture_completed === true,
+            data_layer_capture_complete: evidence.network.observation?.data_layer_capture_completed === true,
+            performance_capture_complete: evidence.network.observation?.performance_capture_completed === true,
+            observation_elapsed_ms: evidence.product.observation_ms,
+            view_item_detected: candidateHasViewItem,
+            strong_commerce_signals: Object.entries(assessment.signals).filter(([key, value]) => value && ['json_ld_product', 'og_product', 'product_form', 'enabled_add_to_cart', 'structured_in_stock', 'structured_out_of_stock', 'disabled_sold_out_control'].includes(key)).map(([key]) => key),
+            supporting_signals: Object.entries(assessment.signals).filter(([key, value]) => value && ['visible_product_heading', 'visible_price', 'unavailable_message'].includes(key)).map(([key]) => key),
+            reason_code: candidateHasViewItem ? 'GA4_VIEW_ITEM_VALID' : 'GA4_NO_VIEW_ITEM',
             outcome: candidateHasViewItem ? 'VALID_PRODUCT_WITH_VIEW_ITEM' : 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'
           });
           // EvidenceCollector is append-only. Candidate-local slices above are
@@ -2434,7 +2485,7 @@ export async function runStorefrontAudit(
             page_closed: pdpPage.isClosed()
           });
           const outcome = isNavigationTimeout(error) ? 'TIMEOUT' as const : isProxyFailure(error) ? 'TRANSPORT_FAILED' as const : 'OBSERVATION_INCOMPLETE' as const;
-          evidence.product.candidate_outcomes?.push({ url: safeUrl(pdpUrl) || pdpUrl, outcome });
+          evidence.product.candidate_outcomes?.push({ url: safeUrl(pdpUrl) || pdpUrl, rank: candidateIndex + 1, navigation_complete: false, observation_complete: false, reason_code: outcome === 'TIMEOUT' ? 'PDP_NAV_TIMEOUT' : 'PDP_OBSERVATION_INCOMPLETE', outcome });
           if (outcome === 'TRANSPORT_FAILED') evidence.product.observation!.transport_failure = true;
           if (outcome === 'TIMEOUT') evidence.product.observation!.timeout = true;
           if (isProxyFailure(error) && proxyAttempt < maxProxyRetries) {
@@ -2598,12 +2649,24 @@ export async function runStorefrontAudit(
         const accepted = acceptCmp.provider !== 'Not Found' && acceptCmp.provider !== 'Unknown' &&
           (await clickConsentChoice(freshAccept.page, 'accept') || await callConsentApi(freshAccept.page, acceptCmp.provider, 'accept'));
         if (accepted) {
-          await wait(750, freshAccept.page);
+          const acceptObservationStarted = Date.now();
+          const acceptObservationMaxMs = Math.min(4_000, runtimeBudget.optionalAllowance());
+          // A minimum settle prevents fast CMP/GTM stacks being judged before
+          // they initialize; the bounded window still exits early on evidence.
+          await wait(1_000, freshAccept.page);
+          while (Date.now() - acceptObservationStarted < acceptObservationMaxMs) {
+            const observed = evidenceCollector.bundle.network.relevant_requests.some((request) =>
+              request.phase === 'post_accept_comparison' && request.kind === 'collection');
+            if (observed) break;
+            await wait(200, freshAccept.page);
+          }
           await captureDataLayerViewItems(freshAccept.page, 'post_accept_comparison', evidenceCollector);
           await capturePerformanceTrackingRequests(freshAccept.page, 'post_accept_comparison', evidenceCollector);
           const html = await freshAccept.page.content().catch(() => '');
           await capturePageTrackingInstallations(freshAccept.page, html, 'post_accept_comparison', evidenceCollector);
-          addTrace('accept_comparison_completed', { reason_code: acceptReason, fresh_context: true, accepted: true });
+          evidence.consent.acceptance_attempted = true;
+          evidence.consent.acceptance_verified = true;
+          addTrace('accept_comparison_completed', { reason_code: acceptReason, fresh_context: true, accepted: true, observation_elapsed_ms: Date.now() - acceptObservationStarted });
         } else {
           evidence.consent.tracking_enablement = 'inconclusive';
           addTrace('accept_comparison_inconclusive', { reason_code: acceptReason, fresh_context: true, accepted: false });
@@ -2651,7 +2714,11 @@ export async function runStorefrontAudit(
         page_valid: evidence.page.valid,
         requests: serverRequests,
         collector_cookie_detected: collectorCookieNames.size > 0,
-        collector_cookie_persisted: evidence.server_side.collector_cookie_persisted
+        collector_cookie_persisted: evidence.server_side.collector_cookie_persisted,
+        observation_complete: evidence.network.observation?.request_listener_active === true &&
+          evidence.network.observation?.request_capture_completed === true &&
+          evidence.network.observation?.data_layer_capture_completed === true &&
+          evidence.network.observation?.performance_capture_completed === true
       });
       evidence.server_side.passive_classification_completed = true;
       evidence.server_side.first_party_collection_count = classification.first_party_collection_count;

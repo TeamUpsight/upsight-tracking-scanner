@@ -1,4 +1,5 @@
 import { CheckCircle2, CircleDot, FlaskConical, GitCompareArrows, ListChecks, Wrench } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { StatusBadge } from './StatusBadge';
 import { formatLabel } from './format';
 
@@ -61,21 +62,24 @@ function ReviewList({ title, items = [], icon: Icon, empty = 'No suggestions.' }
 
 export function TraceTimeline({ trace }: { trace: unknown }) {
   const steps = parseTrace(trace);
+  const [filter, setFilter] = useState<'All' | 'Access' | 'Consent' | 'Product' | 'Tracking' | 'Server' | 'Warnings/Errors'>('All');
+  const timeline = useMemo(() => steps.map((step, index) => {
+    const raw = String(step.step || `event ${index + 1}`);
+    const module = /consent|cmp|reject|accept/i.test(raw) ? 'Consent' : /pdp|product/i.test(raw) ? 'Product' : /server|collector|cookie/i.test(raw) ? 'Server' : /access|proxy|challenge|storefront/i.test(raw) ? 'Access' : 'Tracking';
+    const severity = /failed|error|timeout|exhausted/i.test(raw) ? 'error' : /incomplete|rejected|skipped|unknown/i.test(raw) ? 'warning' : /completed|detected|selected|cleared|confirmed/i.test(raw) ? 'success' : 'info';
+    return { step, raw, module, severity, title: formatLabel(raw), summary: valueText((step as any).reason_code || (step as any).reason || (step as any).status || '') };
+  }).filter((event) => !/request|response|listener|capture_started|domcontentloaded/i.test(event.raw)), [steps]);
+  const visible = timeline.filter((event) => filter === 'All' || filter === 'Warnings/Errors' ? filter === 'All' || event.severity === 'warning' || event.severity === 'error' : event.module === filter);
   return (
     <details className="rounded-xl border border-neutral-border bg-bg-card p-4">
-      <summary className="cursor-pointer list-none text-xs font-bold text-white"><span className="flex items-center justify-between gap-3"><span className="flex items-center gap-2"><CircleDot className="h-4 w-4 text-primary" />Sanitized Trace Timeline</span><span className="text-[10px] font-normal text-slate-400">{steps.length} events · technical evidence</span></span></summary>
-      <p className="mt-3 text-[11px] leading-relaxed text-slate-400">Chronological runtime facts for debugging. Secrets and sensitive values are removed; the reviewer above interprets these facts.</p>
+      <summary className="cursor-pointer list-none text-xs font-bold text-white"><span className="flex items-center justify-between gap-3"><span className="flex items-center gap-2"><CircleDot className="h-4 w-4 text-primary" />Audit Timeline</span><span className="text-[10px] font-normal text-slate-400">{timeline.length} high-level events</span></span></summary>
+      <p className="mt-3 text-[11px] leading-relaxed text-slate-400">A compact decision timeline. Expand Technical Trace only when the high-level record needs evidence-level debugging.</p>
+      <div className="mt-3 flex flex-wrap gap-1.5">{(['All', 'Access', 'Consent', 'Product', 'Tracking', 'Server', 'Warnings/Errors'] as const).map((item) => <button key={item} type="button" onClick={() => setFilter(item)} className={`rounded-full px-2 py-1 text-[10px] ${filter === item ? 'bg-primary text-slate-950' : 'bg-slate-800 text-slate-300'}`}>{item}</button>)}</div>
       <div className="mt-4 max-h-[520px] space-y-0 overflow-auto pr-2">
-        {steps.map((step, index) => {
-          const details = Object.entries(step).filter(([key]) => !['step', 'timestamp'].includes(key));
-          return <div key={`${index}-${String(step.step)}`} className="relative ml-2 border-l border-slate-700 pb-4 pl-5 last:pb-0"><i className="absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full border-2 border-bg-card bg-primary" /><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-mono text-[11px] font-semibold text-slate-100">{formatLabel(String(step.step || `event ${index + 1}`))}</span>{step.timestamp && <time className="text-[10px] font-medium text-slate-400">{new Date(String(step.timestamp)).toLocaleString()}</time>}</div>{details.length > 0 && <div className="mt-2 flex flex-wrap gap-1.5">{details.slice(0, 10).map(([key, value]) => {
-            const text = valueText(value);
-            const isUrl = /url/i.test(key) && /^https?:\/\//i.test(text);
-            return isUrl ? <a key={key} href={text} target="_blank" rel="noreferrer" title={text} className="max-w-full truncate rounded border border-primary/20 bg-[#0a1016] px-2 py-1.5 font-mono text-[10px] text-primary hover:border-primary/50 hover:underline"><b className="text-slate-400">{formatLabel(key)}:</b> {text}</a> : <span key={key} title={text} className="max-w-full truncate rounded border border-slate-800 bg-[#0a1016] px-2 py-1.5 font-mono text-[10px] text-slate-300"><b className="text-slate-400">{formatLabel(key)}:</b> {text}</span>;
-          })}</div>}</div>;
-        })}
-        {!steps.length && <div className="rounded-lg border border-dashed border-neutral-border p-8 text-center text-xs text-slate-500">No trace events were stored.</div>}
+        {visible.map((event, index) => <div key={`${index}-${event.raw}`} className="relative ml-2 border-l border-slate-700 pb-4 pl-5 last:pb-0"><i className={`absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full border-2 border-bg-card ${event.severity === 'error' ? 'bg-rose-500' : event.severity === 'warning' ? 'bg-amber-400' : event.severity === 'success' ? 'bg-emerald-400' : 'bg-primary'}`} /><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-[11px] font-semibold text-slate-100">{event.title}</span>{event.step.timestamp && <time className="text-[10px] font-medium text-slate-400">{new Date(String(event.step.timestamp)).toLocaleTimeString()}</time>}</div><p className="mt-1 text-[10px] text-slate-400">{event.summary || event.module}</p></div>)}
+        {!visible.length && <div className="rounded-lg border border-dashed border-neutral-border p-8 text-center text-xs text-slate-500">No timeline events match this filter.</div>}
       </div>
+      <details className="mt-4 rounded-lg border border-slate-800 p-3"><summary className="cursor-pointer text-[11px] font-semibold text-slate-300">Technical Trace ({steps.length})</summary><pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-[10px] text-slate-400">{JSON.stringify(steps, null, 2)}</pre></details>
     </details>
   );
 }

@@ -40,6 +40,64 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
   const corrected = { ...audit };
   const violations: string[] = accessEvidenceViolations(evidence);
   let priority = 0;
+  const networkObservationComplete = evidence.network.observation?.request_listener_active === true &&
+    evidence.network.observation?.request_capture_completed === true &&
+    evidence.network.observation?.data_layer_capture_completed === true &&
+    evidence.network.observation?.performance_capture_completed === true;
+  const candidateObservationComplete = (evidence.product.candidate_outcomes || []).length > 0
+    ? (evidence.product.candidate_outcomes || []).every((candidate) => candidate.observation_complete === true &&
+      ['VALID_PRODUCT_WITH_VIEW_ITEM', 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'].includes(candidate.outcome))
+    : evidence.product.observation?.minimum_observation_satisfied === true &&
+      evidence.product.observation.transport_failure !== true && evidence.product.observation.timeout !== true;
+  const confidence = { ...(corrected.finding_confidence || {}) };
+
+  const makeUnknown = (key: 'ga4' | 'meta', field: 'site_ga4_detected' | 'site_meta_detected', collectionField: 'site_ga4_collection_hit_detected' | 'site_meta_collection_hit_detected') => {
+    if (corrected[field] === false || corrected[collectionField] === false || confidence[key]?.detected === false) {
+      corrected[field] = null;
+      corrected[collectionField] = null;
+      confidence[key] = { ...(confidence[key] || { confidence: 'low', evidence: [] }), detected: null, confidence: 'low', reason_code: `${key.toUpperCase()}_OBSERVATION_INCOMPLETE` };
+      violations.push(`${key.toUpperCase()}_FALSE_WITH_INCOMPLETE_OBSERVATION`);
+      priority += 35;
+    }
+  };
+
+  if (includesAuditModule(evidence.selected_modules, 'tracking') && !networkObservationComplete) {
+    makeUnknown('ga4', 'site_ga4_detected', 'site_ga4_collection_hit_detected');
+    makeUnknown('meta', 'site_meta_detected', 'site_meta_collection_hit_detected');
+  }
+
+  if (includesAuditModule(evidence.selected_modules, 'tracking') &&
+    ['missing_view_item', 'ga4_not_detected', 'pdp_not_found'].includes(String(corrected.product_payload_status)) &&
+    (candidateObservationComplete !== true || evidence.product.applicability !== 'applicable')) {
+    corrected.product_payload_status = 'inconclusive';
+    confidence.product = { ...(confidence.product || { confidence: 'low', evidence: [] }), status: 'inconclusive', confidence: 'low', reason_code: 'PDP_OBSERVATION_INCOMPLETE' };
+    violations.push('PRODUCT_NEGATIVE_WITH_INCOMPLETE_CANDIDATE');
+    priority += 40;
+  }
+
+  if (includesAuditModule(evidence.selected_modules, 'server_side') && corrected.server_side_status === 'not_detected' &&
+    !(evidence.server_side.passive_classification_completed === true && networkObservationComplete)) {
+    corrected.server_side_status = 'inconclusive';
+    corrected.ss_collection_type = 'inconclusive';
+    confidence.server_side = { ...(confidence.server_side || { confidence: 'low', evidence: [] }), status: 'inconclusive', confidence: 'low', reason_code: 'SERVER_OBSERVATION_INCOMPLETE' };
+    violations.push('SERVER_NOT_DETECTED_WITH_INCOMPLETE_CAPTURE');
+    priority += 35;
+  }
+
+  if (includesAuditModule(evidence.selected_modules, 'consent') && corrected.consent_status === 'pass' &&
+    (!evidence.consent.interaction_attempted || !evidence.consent.rejection_verified || evidence.consent.post_reject_observation_completed !== true)) {
+    corrected.consent_status = 'inconclusive';
+    confidence.consent = { ...(confidence.consent || { confidence: 'low', evidence: [] }), status: 'inconclusive', confidence: 'low', reason_code: 'CMP_BEHAVIOR_NOT_VERIFIED' };
+    violations.push('CONSENT_PASS_WITHOUT_VERIFIED_BEHAVIOR');
+    priority += 40;
+  }
+
+  if (corrected.cmp_provider && corrected.cmp_provider !== 'Not Found' && confidence.cmp?.detected === false) {
+    confidence.cmp = { ...confidence.cmp, detected: true, reason_code: confidence.cmp.reason_code === 'CMP_NOT_DETECTED' ? 'CMP_PROVIDER_IDENTIFIED' : confidence.cmp.reason_code };
+    violations.push('CMP_PROVIDER_CONTRADICTION');
+    priority += 35;
+  }
+  corrected.finding_confidence = confidence;
 
   if (includesAuditModule(evidence.selected_modules, 'tracking') && corrected.site_ga4_detected === true && corrected.product_payload_status === 'ga4_not_detected') {
     corrected.product_payload_status = corrected.consent_status === 'inconclusive' ? 'inconclusive' : 'missing_view_item';
