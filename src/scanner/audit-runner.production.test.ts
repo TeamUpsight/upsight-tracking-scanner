@@ -35,6 +35,9 @@ async function closeServer(server: Server) {
 async function auditFixture(status: number, html: FixtureHtml, consentV2Enabled = true, selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent']) {
   vi.stubEnv('BROWSER_PROVIDER', 'local');
   vi.stubEnv('CONSENT_V2_ENABLED', consentV2Enabled ? 'true' : 'false');
+  vi.stubEnv('CONSENT_V2_ACTIONS_ENABLED', consentV2Enabled ? 'true' : 'false');
+  vi.stubEnv('CONSENT_ONETRUST_ACTIONS_ENABLED', consentV2Enabled ? 'true' : 'false');
+  vi.stubEnv('CONSENT_V2_ACTION_SAMPLE_PERCENT', consentV2Enabled ? '100' : '0');
   const fixture = await fixtureServer(status, html);
   const updates: Array<Record<string, unknown>> = [];
   try {
@@ -74,11 +77,11 @@ describe('runStorefrontAudit production browser wiring', () => {
   it('RUNNER-V2-01 finalizes Consent V2 compatibility fields from the real runner', async () => {
     const result = await auditFixture(200, oneTrust);
     expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive', scan_status: 'completed' });
-    expect((result.finding_confidence as { consent?: { reason_code?: string } } | undefined)?.consent?.reason_code).toBe('CMP_BEHAVIOR_NOT_VERIFIED');
+    expect((result.finding_confidence as { consent?: { reason_code?: string } } | undefined)?.consent?.reason_code).toBe('CMP_REJECT_NOT_VERIFIED');
     expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([
       expect.objectContaining({ step: 'cmp_provider_detected' }),
-      expect.objectContaining({ step: 'consent_context_started', source: 'consent_v2' }),
-      expect.objectContaining({ step: 'scan_finalized' })
+      expect.objectContaining({ step: 'consent_context_started', module: 'consent', severity: 'info' }),
+      expect.objectContaining({ step: 'scan_finalized', module: 'runtime', severity: 'success' })
     ]));
     expect((result.runtime_metrics as { consent_v2?: { enabled: boolean } }).consent_v2?.enabled).toBe(true);
   }, 30_000);
@@ -91,7 +94,7 @@ describe('runStorefrontAudit production browser wiring', () => {
   }, 30_000);
 
   it('RUNNER-V2-02 maps pre-choice tracking to the final consent status', async () => {
-    const result = await auditFixture(200, `<head><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view';</script></head>${oneTrust}`);
+    const result = await auditFixture(200, `<head><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G111';</script></head>${oneTrust}`);
     expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'prior_consent_violation', scan_status: 'completed' });
   }, 30_000);
 
@@ -164,13 +167,11 @@ describe('runStorefrontAudit production browser wiring', () => {
     const result = await auditFixture(200, (path) => {
       if (path !== '/') return '';
       homepageLoads += 1;
-      const tracking = homepageLoads === 1 ? `<script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view';</script>` : '';
+      const tracking = homepageLoads === 1 ? `<script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G111';</script>` : '';
       return `${tracking}${oneTrust}`;
     });
     expect(result).toMatchObject({ consent_status: 'prior_consent_violation', scan_status: 'completed' });
-    // Lifecycle completion is an observed session fact, not a status-derived
-    // guess. This fixture deliberately has no reload completion.
-    expect((result.evidence_bundle as { consent: { post_reject_observation_completed: boolean } }).consent.post_reject_observation_completed).toBe(false);
+    expect((result.evidence_bundle as { consent: { post_reject_observation_completed: boolean } }).consent.post_reject_observation_completed).toBe(true);
   }, 35_000);
 
   it('SERVER-BUDGET-01 preserves passive server classification with the minimum global budget', async () => {

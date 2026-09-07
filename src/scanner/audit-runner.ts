@@ -1090,8 +1090,15 @@ export async function runStorefrontAudit(
 
   const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null) => {
     const shared = sharedPreConsentMeasurementState(evidence);
-    const v2PreChoice = result.tracking.signals.some((signal) => signal.timing === 'pre_choice') ? 'unknown' as const : false;
-    const preChoice = shared === 'full_measurement' ? shared : v2PreChoice === 'unknown' ? v2PreChoice : shared;
+    const v2EventBeforeChoice = result.tracking.signals.some((signal) =>
+      signal.timing === 'pre_choice' && (signal.kind === 'event_hit' || signal.kind === 'conversion_hit')
+    );
+    const v2PreChoice = v2EventBeforeChoice
+      ? result.google_consent_mode.classification === 'advanced_candidate' ? 'limited_measurement' as const : 'full_measurement' as const
+      : result.tracking.signals.some((signal) => signal.timing === 'pre_choice') ? 'unknown' as const : false;
+    const measurementRank = (value: false | 'full_measurement' | 'limited_measurement' | 'unknown') =>
+      value === false ? 0 : value === 'limited_measurement' ? 1 : value === 'unknown' ? 2 : 3;
+    const preChoice = measurementRank(v2PreChoice) > measurementRank(shared) ? v2PreChoice : shared;
     const compatibility = mapConsentV2ToExisting(result.result, {
       geo, page_valid: pageValid, tracking_before_interaction: preChoice,
       post_reject_observation_completed: result.result.persistence.post_reload_observation_completed,
@@ -1257,7 +1264,7 @@ export async function runStorefrontAudit(
       step: 'scan_finalized',
       status: 'completed',
       module: 'runtime',
-      severity: finalError ? 'error' : 'success',
+      severity: finalError !== 'none' ? 'error' : 'success',
       scan_status: finalStatus,
       error_category: finalError,
       elapsed_ms: Date.now() - startedMs,

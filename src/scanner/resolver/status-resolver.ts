@@ -34,10 +34,18 @@ export function resolveConsentStatus(input: {
   if (!input.executed) {
     return { status: 'not_tested', confidence: 'low', reason_code: 'CONSENT_NOT_TESTED', evidence: [] };
   }
+  const fullMeasurementBeforeInteraction = input.tracking_before_interaction === true || input.tracking_before_interaction === 'full_measurement';
+  // A full pre-choice collection is a complete, higher-priority semantic fact.
+  // It must not be hidden by an incomplete later Reject interaction.
+  if ((input.geo === 'EU' || input.geo === 'UK') && fullMeasurementBeforeInteraction && input.cmp_provider && input.cmp_provider !== 'Not Found') {
+    return { status: 'prior_consent_violation', confidence: 'high', reason_code: 'CMP_TRACKING_BEFORE_INTERACTION', evidence: ['cmp_detected', 'pre_interaction_collection'] };
+  }
+  if ((input.geo === 'EU' || input.geo === 'UK') && fullMeasurementBeforeInteraction && input.cmp_provider === 'Not Found') {
+    return { status: 'missing', confidence: 'medium', reason_code: 'CMP_NOT_DETECTED_WITH_TRACKING', evidence: ['pre_interaction_collection'] };
+  }
   if (input.technical_blocker_reason) {
     return { status: 'inconclusive', confidence: 'low', reason_code: input.technical_blocker_reason, evidence: ['consent_v2_technical_blocker'] };
   }
-  const fullMeasurementBeforeInteraction = input.tracking_before_interaction === true || input.tracking_before_interaction === 'full_measurement';
   if (input.tracking_before_interaction === 'limited_measurement' || input.tracking_before_interaction === 'unknown') {
     // Evidence is intentionally preserved by callers; this only prevents an
     // ambiguous Consent Mode request becoming a definitive compliance finding.
@@ -50,12 +58,6 @@ export function resolveConsentStatus(input: {
   }
   if (input.rejection_verified && input.post_reject_observation_completed === false) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'CMP_POST_REJECT_OBSERVATION_FAILED', evidence: ['verified_rejection'] };
-  }
-  if ((input.geo === 'EU' || input.geo === 'UK') && fullMeasurementBeforeInteraction && input.cmp_provider && input.cmp_provider !== 'Not Found') {
-    return { status: 'prior_consent_violation', confidence: 'high', reason_code: 'CMP_TRACKING_BEFORE_INTERACTION', evidence: ['cmp_detected', 'pre_interaction_collection'] };
-  }
-  if ((input.geo === 'EU' || input.geo === 'UK') && fullMeasurementBeforeInteraction && input.cmp_provider === 'Not Found') {
-    return { status: 'missing', confidence: 'medium', reason_code: 'CMP_NOT_DETECTED_WITH_TRACKING', evidence: ['pre_interaction_collection'] };
   }
   if (input.rejection_attempted && !input.rejection_verified) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'CMP_REJECT_NOT_VERIFIED', evidence: ['rejection_attempted'] };

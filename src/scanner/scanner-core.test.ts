@@ -1460,6 +1460,14 @@ describe('decision hardening regression pack', () => {
     expect(sharedPreConsentMeasurementState(evidence)).toBe('full_measurement');
   });
 
+  it('gives full pre-choice measurement priority over an incomplete later Reject interaction', () => {
+    const evidence = baseEvidence('pre-choice-priority.example');
+    evidence.geo = 'EU'; evidence.selected_modules = ['consent']; evidence.page.valid = true; evidence.consent.executed = true;
+    evidence.consent.resolved_provider = 'OneTrust'; evidence.consent.pre_choice_measurement = 'full_measurement';
+    evidence.consent.technical_blocker_reason = 'CMP_BEHAVIOR_NOT_VERIFIED';
+    expect(replayEvidence(evidence)).toMatchObject({ consent_status: 'prior_consent_violation', overall_status: 'fail' });
+  });
+
   it('promotes applicability from positive PDP evidence and ignores complete invalid candidates', () => {
     const evidence = baseEvidence('promotion.example');
     evidence.selected_modules = ['tracking']; evidence.page.valid = true; evidence.product.executed = true;
