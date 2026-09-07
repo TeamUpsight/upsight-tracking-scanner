@@ -458,6 +458,32 @@ app.get('/api/v1/audits/export', asyncRoute(async (req, res) => {
   res.send([headers.join(','), ...rows].join('\n'));
 }));
 
+app.post('/api/v1/scans/bulk-debug-package', asyncRoute(async (req, res) => {
+  const ids: string[] | null = Array.isArray(req.body?.ids)
+    ? [...new Set<string>(req.body.ids.map((id: unknown) => String(id)))].slice(0, 1000)
+    : null;
+  if (!ids?.length) return res.status(400).json({ error: 'ids must be a non-empty array.' });
+  const audits = (await Promise.all(ids.map((id) => db.getAudit(id)))).filter((audit): audit is StorefrontAudit => Boolean(audit));
+  if (!audits.length) return res.status(404).json({ error: 'No selected audits were found.' });
+  const foundIds = new Set(audits.map((audit) => String(audit.audit_id)));
+  res.attachment(`upsight-debug-audits-${audits.length}.zip`);
+  res.type('application/zip');
+  const archive = new ZipArchive({ zlib: { level: 6 } });
+  archive.on('error', (error) => {
+    console.error('[DebugPackage] Bulk ZIP creation failed:', error);
+    if (!res.headersSent) res.status(500).json({ error: 'Unable to create debug package.' });
+    else res.destroy(error);
+  });
+  archive.pipe(res);
+  archive.append(JSON.stringify({ requested_audit_ids: ids, included_audit_ids: audits.map((audit) => audit.audit_id), missing_audit_ids: ids.filter((id) => !foundIds.has(id)) }, null, 2), { name: 'manifest.json' });
+  for (const audit of audits) {
+    for (const [name, content] of Object.entries(buildDebugPackageFiles(audit))) {
+      archive.append(content, { name: `audits/${audit.audit_id}/${name}` });
+    }
+  }
+  await archive.finalize();
+}));
+
 app.get('/api/v1/scans/:id/debug-package', asyncRoute(async (req, res) => {
   const audit = await db.getAudit(req.params.id);
   if (!audit) return res.status(404).json({ error: 'Audit not found.' });

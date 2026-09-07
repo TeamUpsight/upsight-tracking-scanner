@@ -412,6 +412,18 @@ export default function App() {
     } catch (caught: any) { setError(caught.message); } finally { setBusy(false); }
   };
 
+  const bulkExportDebugSelected = async () => {
+    const ids = [...selectedAuditIds];
+    if (!ids.length) return;
+    setBusy(true); setError(null);
+    try {
+      const response = await request('/api/v1/scans/bulk-debug-package', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids })
+      });
+      downloadBlob(await response.blob(), `upsight-debug-audits-${ids.length}.zip`);
+    } catch (caught: any) { setError(caught.message); } finally { setBusy(false); }
+  };
+
   const bulkDeleteSelected = async () => {
     const ids = [...selectedAuditIds];
     if (!ids.length || !window.confirm(`Delete ${ids.length} selected audit${ids.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
@@ -490,6 +502,7 @@ export default function App() {
                 {selectedAuditIds.size > 0 && <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-primary/25 bg-primary/[0.06] px-3 py-2">
                   <span className="text-[10px] font-bold text-primary">{selectedAuditIds.size} Selected</span>
                   <div className="flex items-center gap-1.5">
+                    <ExplainedAction help="Downloads one sanitized ZIP containing the debug evidence for every selected audit. Each audit is stored in its own folder." type="button" disabled={busy} onClick={() => void bulkExportDebugSelected()} className="border-neutral-border px-2.5 text-slate-300 hover:bg-white/[0.04]"><Download className="h-3.5 w-3.5" />Export Debug</ExplainedAction>
                     <ExplainedAction help="Create a new audit for every selected row, preserving each audit's geo, scan mode, selected modules, and group label." type="button" disabled={busy} onClick={() => void bulkRerunSelected()} className="border-primary/35 px-2.5 text-primary hover:bg-primary/10"><RotateCcw className="h-3.5 w-3.5" />Re-run</ExplainedAction>
                     <ExplainedAction help="Permanently delete all selected audit records and their associated QA feedback." type="button" disabled={busy} onClick={() => void bulkDeleteSelected()} className="border-rose-900/60 px-2.5 text-rose-300 hover:bg-rose-950/30"><Trash2 className="h-3.5 w-3.5" />Delete</ExplainedAction>
                   </div>
