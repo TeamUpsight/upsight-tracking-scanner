@@ -2,6 +2,16 @@ import type { EvidenceBundle, StorefrontAudit } from '../../types';
 import { sanitizeValue } from './sanitize';
 import { qaPrioritySignals } from './fingerprints';
 
+function sanitizeCandidateUrl(raw: string | null | undefined) {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
 export function buildDebugPackageFiles(audit: StorefrontAudit) {
   const trace = (() => {
     try {
@@ -17,6 +27,14 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
     : null;
   const observation = evidence?.network.observation;
   const productCandidates = evidence?.product.candidate_outcomes || [];
+  const candidateCounters = {
+    discovered: evidence?.product.candidate_discovered_count ?? 0,
+    queued: evidence?.product.candidate_queued_count ?? 0,
+    promoted: evidence?.product.candidate_promoted_count ?? 0,
+    attempted: evidence?.product.candidate_attempted_count ?? 0,
+    completed: evidence?.product.candidate_completed_count ?? 0
+  };
+  const sanitizedProductCandidates = productCandidates.map((candidate) => ({ rank: candidate.rank ?? null, source: candidate.source || 'unknown', sources: candidate.sources || [], score: candidate.score ?? null, promoted_from: sanitizeCandidateUrl(candidate.promoted_from), page_role: candidate.page_role || 'UNKNOWN', sanitized_url: sanitizeCandidateUrl(candidate.final_url || candidate.url), outcome: candidate.outcome, reason_code: candidate.reason_code || null, observation_complete: candidate.observation_complete ?? null, view_item_detected: candidate.view_item_detected ?? null }));
   const legacyDecisions = [
     ['consent', audit.consent_status, audit.finding_confidence?.consent, evidence?.consent.executed, evidence?.consent.post_reject_observation_completed],
     ['cmp', audit.cmp_provider, audit.finding_confidence?.cmp, evidence?.consent.executed, evidence?.consent.executed],
@@ -31,7 +49,12 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
   }));
   // New bundles carry the exact canonical replay projection. Legacy bundles
   // retain this bounded compatibility fallback only.
-  const decisions = evidence?.decision_summary || legacyDecisions;
+  const decisions = (evidence?.decision_summary || legacyDecisions) as Array<{ decision_name: string; status: unknown; confidence?: unknown; reason_code?: unknown; blocking_uncertainty?: string[] }>;
+  const canonicalDecision = (name: string) => decisions.find((decision) => decision.decision_name === name) || null;
+  const decisionStatus = (name: string, fallback: unknown) => {
+    const decision = canonicalDecision(name);
+    return decision ? decision.status : fallback;
+  };
   const normalizedErrors = [
     ...(evidence?.access.proxy_attempts || []).filter((attempt) => attempt.failure_classification).map((attempt) => ({
       phase: 'access', component: 'proxy', error_family: attempt.failure_classification, reason_code: attempt.failure_classification,
@@ -100,16 +123,17 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
     'build-metadata.json': JSON.stringify({
       scanner_version: evidence?.scanner_version || 'unknown',
       build_commit: evidence?.build_commit || null,
+      build_dirty: evidence?.build_dirty ?? null,
       build_timestamp: evidence?.build_timestamp || 'unknown',
       rule_pack_version: evidence?.rule_pack_version || 'unknown'
     }, null, 2),
-    'manifest.json': JSON.stringify(sanitizeValue({ debug_schema_version: 2, scanner_version: evidence?.scanner_version || 'unknown', build_commit: evidence?.build_commit || null, build_timestamp: evidence?.build_timestamp || null, environment_mode: evidence?.mode || null, selected_modules: evidence?.selected_modules || audit.selected_modules || [], audit_start: audit.scan_started_at, audit_end: audit.scan_completed_at }), null, 2),
-    'summary.json': JSON.stringify(sanitizeValue({ audit_id: audit.audit_id, domain: audit.domain, build_commit: evidence?.build_commit || null, geo: audit.tested_geos, selected_modules: evidence?.selected_modules || audit.selected_modules || [], scan_status: audit.scan_status, total_duration_ms: evidence?.runtime.total_duration_ms || null, final: { overall: audit.overall_status, consent: audit.consent_status, product: audit.product_payload_status, ga4: audit.site_ga4_detected, meta: audit.site_meta_detected, server_side: audit.server_side_status }, major_warnings: audit.qa_priority_signals || [], major_errors: (audit.failure_fingerprints || []), consistency_violations: audit.consistency_violations || [] }), null, 2),
+    'manifest.json': JSON.stringify(sanitizeValue({ debug_schema_version: 2, scanner_version: evidence?.scanner_version || 'unknown', build_commit: evidence?.build_commit || null, build_dirty: evidence?.build_dirty ?? null, build_timestamp: evidence?.build_timestamp || null, environment_mode: evidence?.mode || null, selected_modules: evidence?.selected_modules || audit.selected_modules || [], audit_start: audit.scan_started_at, audit_end: audit.scan_completed_at }), null, 2),
+    'summary.json': JSON.stringify(sanitizeValue({ audit_id: audit.audit_id, domain: audit.domain, build_commit: evidence?.build_commit || null, build_dirty: evidence?.build_dirty ?? null, geo: audit.tested_geos, selected_modules: evidence?.selected_modules || audit.selected_modules || [], scan_status: audit.scan_status, total_duration_ms: evidence?.runtime.total_duration_ms || null, final: { overall: audit.overall_status, consent: decisionStatus('consent', audit.consent_status), product: decisionStatus('product_payload', audit.product_payload_status), ga4: decisionStatus('ga4', audit.site_ga4_detected), meta: decisionStatus('meta', audit.site_meta_detected), server_side: decisionStatus('server_side', audit.server_side_status) }, product_discovery: { homepage_candidate_count: evidence?.product.homepage_candidate_count ?? 0, sitemap_candidate_count: evidence?.product.sitemap_candidate_count ?? 0, sitemap_enrichment_status: evidence?.product.sitemap_enrichment_status || 'not_attempted', candidate_counters: candidateCounters }, major_warnings: audit.qa_priority_signals || [], major_errors: (audit.failure_fingerprints || []), consistency_violations: audit.consistency_violations || [] }), null, 2),
     'decisions.json': JSON.stringify(sanitizeValue(decisions), null, 2),
-    'product-candidates.json': JSON.stringify(sanitizeValue(productCandidates), null, 2),
-    'tracking-summary.json': JSON.stringify(sanitizeValue({ vendors: ['ga4', 'meta'].map((vendor) => { const events = (evidence?.network.relevant_requests || []).filter((event) => event.vendor === vendor); return { vendor, installation_observed: events.some((event) => event.kind === 'script') || events.some((event) => event.kind === 'collection'), collection_observed: events.some((event) => event.kind === 'collection'), collection_count: events.filter((event) => event.kind === 'collection').length, pre_accept_count: events.filter((event) => event.phase.includes('consent_initial')).length, post_accept_count: events.filter((event) => event.phase.includes('post_accept')).length, pre_reject_count: events.filter((event) => event.phase.includes('pre_reject')).length, post_reject_count: events.filter((event) => event.phase.includes('post_reject')).length, observation_complete: observation?.request_capture_completed === true, capture_channels: observation || {}, limited_consent_measurement_count: events.filter((event) => event.consent_measurement === 'limited_measurement').length, full_measurement_count: events.filter((event) => event.consent_measurement === 'full_measurement').length, first_party_count: events.filter((event) => event.collector !== 'third_party').length, third_party_count: events.filter((event) => event.collector === 'third_party').length }; }) }), null, 2),
-    'consent-summary.json': JSON.stringify(sanitizeValue({ provider_candidates: evidence?.consent.provider_evidence || [], selected_provider: audit.cmp_provider, provider_confidence: audit.finding_confidence?.cmp?.confidence || null, banner_state: evidence?.consent.banner_visible ?? null, action_attempted: evidence?.consent.interaction_attempted ?? false, verification_status: evidence?.consent.rejection_verified ?? false, post_reject_observation_complete: evidence?.consent.post_reject_observation_completed ?? false, pre_choice_traffic: (evidence?.network.relevant_requests || []).filter((event) => event.phase.includes('consent_initial')).map((event) => event.consent_measurement || 'unknown'), final_decision: audit.consent_status }), null, 2),
-    'server-summary.json': JSON.stringify(sanitizeValue({ passive_classification_complete: evidence?.server_side.passive_classification_completed ?? false, first_party_count: evidence?.server_side.first_party_collection_count ?? 0, same_origin_count: evidence?.server_side.same_origin_collection_count ?? 0, third_party_count: evidence?.server_side.third_party_collection_count ?? 0, duplicate_count: evidence?.server_side.strict_duplicate_count ?? 0, collector_cookie_detected: (evidence?.server_side.collector_cookie_names || []).length > 0, persistence_checked: evidence?.server_side.collector_cookie_persistence_checked ?? false, persistence_result: evidence?.server_side.collector_cookie_persisted ?? false, final_decision: audit.server_side_status, blocking_uncertainty: observation?.request_capture_completed === true ? [] : ['request_capture_incomplete'] }), null, 2),
+    'product-candidates.json': JSON.stringify(sanitizeValue({ candidate_counters: candidateCounters, candidates: sanitizedProductCandidates }), null, 2),
+    'tracking-summary.json': JSON.stringify(sanitizeValue({ vendors: ['ga4', 'meta'].map((vendor) => { const events = (evidence?.network.relevant_requests || []).filter((event) => event.vendor === vendor); return { vendor, final_decision: canonicalDecision(vendor), installation_observed: events.some((event) => event.kind === 'script') || events.some((event) => event.kind === 'collection'), collection_observed: events.some((event) => event.kind === 'collection'), collection_count: events.filter((event) => event.kind === 'collection').length, pre_accept_count: events.filter((event) => event.phase.includes('consent_initial')).length, post_accept_count: events.filter((event) => event.phase.includes('post_accept')).length, pre_reject_count: events.filter((event) => event.phase.includes('pre_reject')).length, post_reject_count: events.filter((event) => event.phase.includes('post_reject')).length, observation_complete: observation?.request_capture_completed === true, capture_channels: observation || {}, limited_consent_measurement_count: events.filter((event) => event.consent_measurement === 'limited_measurement').length, full_measurement_count: events.filter((event) => event.consent_measurement === 'full_measurement').length, first_party_count: events.filter((event) => event.collector !== 'third_party').length, third_party_count: events.filter((event) => event.collector === 'third_party').length }; }) }), null, 2),
+    'consent-summary.json': JSON.stringify(sanitizeValue({ provider_candidates: evidence?.consent.provider_evidence || [], selected_provider: decisionStatus('cmp', audit.cmp_provider), provider_confidence: canonicalDecision('cmp')?.confidence || null, banner_visible: evidence?.consent.banner_visible ?? null, actions_available: { accept: evidence?.consent.accept_action_available ?? false, reject: evidence?.consent.reject_action_available ?? false, preferences: evidence?.consent.preferences_action_available ?? false }, actions_rollout_enabled: evidence?.consent.actions_rollout_enabled ?? false, action_attempted: evidence?.consent.interaction_attempted ?? false, verification_status: evidence?.consent.rejection_verified ?? false, post_reject_observation_complete: evidence?.consent.post_reject_observation_completed ?? false, pre_choice_measurement: evidence?.consent.pre_choice_measurement ?? false, limited_measurement_count: (evidence?.network.relevant_requests || []).filter((event) => event.phase.includes('consent_initial') && event.consent_measurement === 'limited_measurement').length, full_measurement_count: (evidence?.network.relevant_requests || []).filter((event) => event.phase.includes('consent_initial') && event.consent_measurement === 'full_measurement').length, unknown_measurement_count: (evidence?.network.relevant_requests || []).filter((event) => event.phase.includes('consent_initial') && event.consent_measurement === 'unknown').length, final_decision: canonicalDecision('consent') }), null, 2),
+    'server-summary.json': JSON.stringify(sanitizeValue({ passive_classification_complete: evidence?.server_side.passive_classification_completed ?? false, first_party_count: evidence?.server_side.first_party_collection_count ?? 0, same_origin_count: evidence?.server_side.same_origin_collection_count ?? 0, third_party_count: evidence?.server_side.third_party_collection_count ?? 0, duplicate_count: evidence?.server_side.strict_duplicate_count ?? 0, collector_cookie_detected: (evidence?.server_side.collector_cookie_names || []).length > 0, persistence_checked: evidence?.server_side.collector_cookie_persistence_checked ?? false, persistence_result: evidence?.server_side.collector_cookie_persisted ?? false, final_decision: canonicalDecision('server_side'), blocking_uncertainty: canonicalDecision('server_side')?.blocking_uncertainty || [] }), null, 2),
     'timeline.json': JSON.stringify(sanitizeValue(timeline), null, 2),
     'errors.json': JSON.stringify(sanitizeValue(normalizedErrors), null, 2)
   };

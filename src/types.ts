@@ -154,6 +154,8 @@ export interface EvidenceBundle {
   audit_id: string;
   scanner_version: string;
   build_commit: string | null;
+  /** Build-time Git diff state. Production audits require this to be false. */
+  build_dirty: boolean;
   build_timestamp: string;
   rule_pack_version: string;
   domain: string;
@@ -170,6 +172,13 @@ export interface EvidenceBundle {
     observation_complete: boolean | null;
     evidence_codes: string[];
     blocking_uncertainty: string[];
+    candidate_counters?: {
+      discovered: number;
+      queued: number;
+      promoted: number;
+      attempted: number;
+      completed: number;
+    };
   }>;
   access: {
     valid_storefront: boolean | null;
@@ -238,6 +247,11 @@ export interface EvidenceBundle {
     iframe_hosts: string[];
     provider_evidence: string[];
     banner_visible: boolean | null;
+    /** Observed controls are recorded separately from any attempted action. */
+    accept_action_available?: boolean;
+    reject_action_available?: boolean;
+    preferences_action_available?: boolean;
+    actions_rollout_enabled?: boolean;
     interaction_attempted: boolean;
     rejection_verified: boolean;
     acceptance_attempted?: boolean;
@@ -267,6 +281,14 @@ export interface EvidenceBundle {
     meta_view_content_hits: TrackingRequestEvidence[];
     discovery_completed?: boolean;
     discovery_inconclusive?: boolean;
+    homepage_candidate_count?: number;
+    sitemap_candidate_count?: number;
+    sitemap_enrichment_status?: 'completed' | 'timed_out' | 'failed' | 'not_attempted';
+    candidate_discovered_count?: number;
+    candidate_queued_count?: number;
+    candidate_attempted_count?: number;
+    candidate_completed_count?: number;
+    candidate_promoted_count?: number;
     /** PDP crawling is skipped when completed storefront evidence proves it is not commerce. */
     applicability?: ProductApplicability;
     applicability_reason_code?: string;
@@ -275,8 +297,11 @@ export interface EvidenceBundle {
       final_url?: string | null;
       rank?: number;
       score?: number;
-      source?: 'link' | 'product_sitemap' | 'unknown';
-      semantic_result?: 'VALID_PRODUCT' | 'INVALID_PRODUCT' | 'INCOMPLETE';
+      source?: 'homepage_link' | 'sitemap' | 'product_sitemap' | 'promoted_child' | 'unknown';
+      sources?: Array<'homepage_link' | 'sitemap' | 'product_sitemap' | 'promoted_child'>;
+      promoted_from?: string | null;
+      page_role?: 'PDP' | 'PRODUCT_LISTING' | 'NON_PRODUCT' | 'UNKNOWN';
+      semantic_result?: 'VALID_PRODUCT' | 'INVALID_PRODUCT' | 'PRODUCT_LISTING' | 'INCOMPLETE';
       strong_commerce_signals?: string[];
       supporting_signals?: string[];
       navigation_complete?: boolean;
@@ -287,7 +312,7 @@ export interface EvidenceBundle {
       observation_elapsed_ms?: number;
       view_item_detected?: boolean;
       reason_code?: string;
-      outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' | 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' | 'INVALID_PRODUCT' | 'TRANSPORT_FAILED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT';
+      outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' | 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' | 'INVALID_PRODUCT' | 'PRODUCT_LISTING' | 'TRANSPORT_FAILED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT';
     }>;
     observation?: {
       pdp_navigation_committed: boolean;

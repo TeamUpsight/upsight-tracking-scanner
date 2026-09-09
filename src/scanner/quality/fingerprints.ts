@@ -88,7 +88,6 @@ export function generateFailureFingerprints(audit: Partial<StorefrontAudit>, evi
   }
   if (includesAuditModule(evidence.selected_modules, 'tracking') && audit.product_payload_status === 'missing_view_item') codes.add('GA4_NO_VIEW_ITEM');
   if (includesAuditModule(evidence.selected_modules, 'tracking') && audit.site_ga4_detected && !audit.site_ga4_collection_hit_detected) codes.add('GA4_SCRIPT_NO_COLLECT');
-  if (includesAuditModule(evidence.selected_modules, 'server_side') && (audit.server_side_status === 'first_party_collection_detected' || audit.server_side_status === 'likely_server_side')) codes.add('SERVER_FP_COLLECTOR');
   if (includesAuditModule(evidence.selected_modules, 'server_side') && audit.ss_collection_type === 'mixed' && evidence.server_side.strict_duplicate_count === 0) codes.add('SERVER_MIXED_NO_DUPLICATE');
   if (includesAuditModule(evidence.selected_modules, 'server_side') && audit.server_side_status === 'partial_or_misconfigured') codes.add('SERVER_STRICT_DUPLICATE');
   if (includesAuditModule(evidence.selected_modules, 'consent') && audit.cmp_provider === 'OneTrust' && evidence.consent.banner_visible === false) codes.add('CMP_ONETRUST_SCRIPT_NO_BANNER');

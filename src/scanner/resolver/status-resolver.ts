@@ -90,7 +90,7 @@ export function resolveProductPayloadStatus(input: {
   pdp_observation_complete?: boolean;
   ga4_observation_complete?: boolean;
   product_applicability?: 'applicable' | 'not_applicable' | 'inconclusive';
-  candidate_outcomes?: Array<{ outcome: string; observation_complete?: boolean }>;
+  candidate_outcomes?: Array<{ outcome: string; observation_complete?: boolean; page_role?: string }>;
 }): StatusDecision<ProductPayloadStatus> {
   if (!input.executed) {
     return { status: 'not_tested', confidence: 'low', reason_code: 'PRODUCT_NOT_TESTED', evidence: [] };
@@ -130,9 +130,10 @@ export function resolveProductPayloadStatus(input: {
   if (input.runtime_failure) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'PRODUCT_RUNTIME_FAILED', evidence: ['runtime_failure'] };
   }
-  const requiredCandidatesComplete = input.candidate_outcomes?.length
-    ? input.candidate_outcomes.every((candidate) => candidate.outcome === 'VALID_PRODUCT_WITH_VIEW_ITEM' || candidate.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM') &&
-      input.candidate_outcomes.every((candidate) => candidate.observation_complete === true)
+  const productCandidates = input.candidate_outcomes?.filter((candidate) => candidate.page_role !== 'PRODUCT_LISTING' && candidate.outcome !== 'PRODUCT_LISTING') || [];
+  const requiredCandidatesComplete = productCandidates.length
+    ? productCandidates.every((candidate) => candidate.outcome === 'VALID_PRODUCT_WITH_VIEW_ITEM' || candidate.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM') &&
+      productCandidates.every((candidate) => candidate.observation_complete === true)
     : input.pdp_observation_complete === true;
   if (input.pdp_observation_complete !== true || !requiredCandidatesComplete) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'PDP_OBSERVATION_INCOMPLETE', evidence: ['observation_incomplete'] };

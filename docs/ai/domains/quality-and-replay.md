@@ -23,6 +23,8 @@ Live finalization calls the same replay/consistency/fingerprint functions used o
 
 The reviewer consumes an audit, evidence, and parsed trace, then returns violations, likely root cause, patch guidance, and regression suggestions. The sanitized chronological trace remains a separate UI concept from derived reviewer output.
 
+Debug package summaries consume `EvidenceBundle.decision_summary` whenever it is available. Module-specific summaries may add descriptive counts, but they must not recalculate status, reason, confidence, or blocking uncertainty. Build metadata includes the commit and build-time dirty state so a controlled audit can be tied to a clean tested commit.
+
 ## Related endpoints and data
 
 - `POST /api/v1/scans/:id/qa-feedback`

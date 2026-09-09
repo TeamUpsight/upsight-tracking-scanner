@@ -24,6 +24,8 @@ It depends on configuration from `.env.example`, contracts in `src/types.ts`, de
 
 The homepage and PDP now form one shared evidence session: context observers attach before the first navigation, homepage capture and PDP discovery overlap, and PDP navigation preserves the unanswered consent state. Consent V2 Reject runs only after a confirmed PDP (or on the homepage when Tracking is not selected); an optional Accept comparison uses a clean context and the confirmed PDP URL. `audit-runtime-budget.ts` reserves PDP, passive server classification, and finalization time, so optional actions cannot starve required evidence. Positive events remain append-only, while absence decisions require explicit capture-completeness evidence.
 
+Product candidates carry a bounded page role (`PDP`, `PRODUCT_LISTING`, `NON_PRODUCT`, or `UNKNOWN`) after navigation. Confirmed listings record their evidence, promote at most two strong child product links once, and never receive PDP hydration grace. Candidate counters are authoritative only at discovery, queue, navigation-start, promotion, and outcome boundaries; their final values are emitted into the trace and canonical decision projection.
+
 ## Common modification points
 
 - Connection/plan errors: `classifyBrowserConnectionError` and bounded connection loop.

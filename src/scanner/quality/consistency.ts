@@ -47,7 +47,7 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
     evidence.network.observation?.data_layer_capture_completed === true &&
     evidence.network.observation?.performance_capture_completed === true;
   const candidateOutcomes = evidence.product.candidate_outcomes || [];
-  const relevantCandidates = candidateOutcomes.filter((candidate) => !(candidate.outcome === 'INVALID_PRODUCT' && candidate.semantic_result === 'INVALID_PRODUCT' && candidate.observation_complete === true));
+  const relevantCandidates = candidateOutcomes.filter((candidate) => !(candidate.outcome === 'INVALID_PRODUCT' && candidate.semantic_result === 'INVALID_PRODUCT' && candidate.observation_complete === true) && candidate.page_role !== 'PRODUCT_LISTING' && candidate.outcome !== 'PRODUCT_LISTING');
   const candidateObservationComplete = relevantCandidates.length > 0
     ? relevantCandidates.every((candidate) => candidate.observation_complete === true &&
       ['VALID_PRODUCT_WITH_VIEW_ITEM', 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'].includes(candidate.outcome))

@@ -23,6 +23,15 @@ function gitCommit() {
   }
 }
 
+function gitDirty() {
+  try {
+    execFileSync('git', ['diff', '--quiet'], { stdio: 'ignore' });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 const buildCommit = firstValue(
   process.env.BUILD_COMMIT,
   process.env.CF_PAGES_COMMIT_SHA,
@@ -30,9 +39,11 @@ const buildCommit = firstValue(
   gitCommit()
 );
 const buildTimestamp = firstValue(process.env.BUILD_TIMESTAMP) ?? new Date().toISOString();
+const buildDirty = gitDirty();
 const define = {
   __BUILD_COMMIT__: JSON.stringify(buildCommit ?? ''),
-  __BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp)
+  __BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp),
+  __BUILD_DIRTY__: JSON.stringify(String(buildDirty))
 };
 
 rmSync(distDirectory, { recursive: true, force: true });
@@ -53,4 +64,4 @@ await bundleServer({
   define
 });
 
-console.log(`[Build] package_version=${packageJson.version} build_commit=${buildCommit ?? 'unavailable'} build_timestamp=${buildTimestamp}`);
+console.log(`[Build] package_version=${packageJson.version} build_commit=${buildCommit ?? 'unavailable'} build_dirty=${buildDirty} build_timestamp=${buildTimestamp}`);

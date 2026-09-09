@@ -65,6 +65,7 @@ import { AuditRuntimeBudget } from './audit-runtime-budget';
 const HOMEPAGE_OBSERVATION_MS = 4_000;
 const BOT_CHALLENGE_OBSERVATION_MS = 12_000;
 const DEFAULT_PRODUCT_DISCOVERY_BUDGET_MS = 15_000;
+const SITEMAP_ENRICHMENT_BUDGET_MS = 4_000;
 const DEFAULT_PRODUCT_CONSENT_BUDGET_MS = 15_000;
 const TRACKING_PRODUCT_MODULE_BUDGET_MS = 30_000;
 
@@ -616,7 +617,7 @@ export function prioritizePdpCandidatePool(productPatternCandidates: string[], t
   return [...new Set([...productPatternCandidates, ...twoLevelFallbackCandidates])];
 }
 
-export function scorePdpCandidate(raw: string, domain: string, options: { source?: 'link' | 'product_sitemap'; linkText?: string } = {}) {
+export function scorePdpCandidate(raw: string, domain: string, options: { source?: 'homepage_link' | 'sitemap' | 'product_sitemap'; linkText?: string } = {}) {
   const url = canonicalPdpCandidate(raw, domain);
   if (!url) return Number.NEGATIVE_INFINITY;
   const levels = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part).toLowerCase());
@@ -641,7 +642,14 @@ export interface PdpCandidateSignals {
   structured_out_of_stock: boolean;
   unavailable_message: boolean;
   disabled_sold_out_control: boolean;
+  product_card_link_count?: number;
+  multiple_add_to_cart_controls?: boolean;
+  item_list_json_ld?: boolean;
+  listing_semantics?: boolean;
+  view_item_list?: boolean;
 }
+
+export type ProductPageRole = 'PDP' | 'PRODUCT_LISTING' | 'NON_PRODUCT' | 'UNKNOWN';
 
 export function assessPdpCandidate(signals: PdpCandidateSignals) {
   // Heading, price, images, and sales language are supporting context only.
@@ -652,6 +660,32 @@ export function assessPdpCandidate(signals: PdpCandidateSignals) {
   const outOfStock = !signals.structured_in_stock && !signals.enabled_add_to_cart &&
     (signals.structured_out_of_stock || signals.unavailable_message || signals.disabled_sold_out_control);
   return { is_product: productEvidence, out_of_stock: productEvidence && outOfStock };
+}
+
+/** Page role is deliberately independent of discovery score. A category page
+ * can be an excellent source of children without ever being a PDP candidate. */
+export function classifyProductPageRole(signals: PdpCandidateSignals): { page_role: ProductPageRole; pdp_semantic_strength: boolean } {
+  const pdp = assessPdpCandidate(signals);
+  const listing = Boolean(signals.view_item_list || signals.item_list_json_ld || signals.multiple_add_to_cart_controls ||
+    (signals.product_card_link_count || 0) >= 2 || signals.listing_semantics);
+  // A cart control inside each product card is listing evidence, not a PDP.
+  // Only page-level product metadata/form/availability can override a strong
+  // multi-product surface.
+  const pageLevelPdp = signals.json_ld_product || signals.og_product || signals.product_form ||
+    signals.structured_in_stock || signals.structured_out_of_stock || signals.disabled_sold_out_control;
+  if (listing && !pageLevelPdp) return { page_role: 'PRODUCT_LISTING', pdp_semantic_strength: false };
+  if (pdp.is_product) return { page_role: 'PDP', pdp_semantic_strength: true };
+  if (signals.visible_product_heading || signals.visible_price) return { page_role: 'UNKNOWN', pdp_semantic_strength: false };
+  return { page_role: 'NON_PRODUCT', pdp_semantic_strength: false };
+}
+
+/** Compatibility export for existing callers. Runtime grace uses semantic
+ * evidence from classifyProductPageRole(), not URL structure. */
+export function isStrongProductPath(raw: string) {
+  try {
+    const levels = new URL(raw).pathname.split('/').filter(Boolean);
+    return levels.length === 2 && /^(?:products?|item|p)$/i.test(levels[0]);
+  } catch { return false; }
 }
 
 /** A cheap, homepage-only gate. It deliberately never guesses "not applicable"
@@ -677,15 +711,6 @@ export function pdpCandidateRejectionReason(
   if (!assessment.is_product) return 'PDP_PRODUCT_SIGNALS_MISSING';
   if (assessment.out_of_stock) return 'PDP_OUT_OF_STOCK';
   return null;
-}
-
-export function isStrongProductPath(raw: string) {
-  try {
-    const levels = new URL(raw).pathname.split('/').filter(Boolean);
-    return levels.length === 2 && /^(?:products?|item|p)$/i.test(levels[0]);
-  } catch {
-    return false;
-  }
 }
 
 function matchesPdpUrl(pageUrl: string | undefined, candidateUrl: string, finalPdpUrl = candidateUrl) {
@@ -797,10 +822,21 @@ async function inspectPdpCandidate(page: Page) {
     const label = (element: HTMLElement | HTMLInputElement) => String(
       element instanceof HTMLInputElement ? element.value : element.textContent || element.getAttribute('aria-label') || ''
     ).trim().toLowerCase().replace(/\s+/g, ' ');
-    const addToCart = controls.find((element) => /add to (?:cart|bag)|buy now/.test(label(element)));
+    const addToCartControls = controls.filter((element) => /add to (?:cart|bag)|buy now/.test(label(element)));
+    const addToCart = addToCartControls[0];
     const soldOutControl = controls.find((element) => /sold out|out of stock|unavailable/.test(label(element)));
     const bodyText = (document.body?.innerText || '').slice(0, 250_000).toLowerCase();
     const headings = Array.from(document.querySelectorAll('h1')).filter(visible);
+    const productCardLinks = Array.from(document.querySelectorAll('a[href]')).filter((element) => {
+      const href = (element as HTMLAnchorElement).href;
+      const card = element.closest('[data-product-id], [data-product-card], .product-card, .product-item, li.product, [class*="product-card" i]');
+      return Boolean(card) && /\/(?:products?|item|p)\//i.test(href);
+    });
+    const itemLists = jsonLd.filter((item) => {
+      const type = item?.['@type'];
+      return (Array.isArray(type) ? type : [type]).some((entry) => String(entry).toLowerCase() === 'itemlist');
+    });
+    const dataLayerText = (() => { try { return JSON.stringify((window as any).dataLayer || []).slice(0, 100_000); } catch { return ''; } })();
     return {
       json_ld_product: products.length > 0,
       og_product: /product/i.test(document.querySelector('meta[property="og:type"]')?.getAttribute('content') || ''),
@@ -811,52 +847,99 @@ async function inspectPdpCandidate(page: Page) {
       structured_in_stock: availability.some((value) => value.endsWith('/instock') || value === 'instock'),
       structured_out_of_stock: availability.length > 0 && availability.every((value) => value.endsWith('/outofstock') || value === 'outofstock'),
       unavailable_message: /\bis out of stock\b|\bcurrently unavailable\b|\bthis (?:item|product) is unavailable\b/.test(bodyText),
-      disabled_sold_out_control: Boolean(soldOutControl && ((soldOutControl as HTMLButtonElement).disabled || soldOutControl.getAttribute('aria-disabled') === 'true'))
+      disabled_sold_out_control: Boolean(soldOutControl && ((soldOutControl as HTMLButtonElement).disabled || soldOutControl.getAttribute('aria-disabled') === 'true')),
+      product_card_link_count: productCardLinks.length,
+      multiple_add_to_cart_controls: addToCartControls.length >= 2,
+      item_list_json_ld: itemLists.some((item) => Array.isArray(item.itemListElement) && item.itemListElement.length > 1),
+      listing_semantics: /\b(?:category|collection|search results|all products|shop all)\b/.test(bodyText),
+      view_item_list: /[\"']event[\"']\s*:\s*[\"']view_item_list[\"']|view_item_list/.test(dataLayerText)
     } satisfies PdpCandidateSignals;
   });
-  return { signals, ...assessPdpCandidate(signals) };
+  return { signals, ...assessPdpCandidate(signals), ...classifyProductPageRole(signals) };
 }
 
-async function discoverPdp(page: Page, domain: string, check: () => void, candidateLimit: number) {
+type CandidateSource = 'homepage_link' | 'sitemap' | 'product_sitemap' | 'promoted_child';
+type DiscoveredPdpCandidate = { url: string; score: number; source: CandidateSource; sources: CandidateSource[]; promoted_from?: string | null };
+type PdpDiscoveryResult = { candidates: DiscoveredPdpCandidate[]; homepage_candidate_count: number; sitemap_candidate_count: number; sitemap_enrichment_status: 'completed' | 'timed_out' | 'failed' | 'not_attempted' };
+
+async function discoverListingChildren(page: Page, domain: string, check: () => void, parentUrl: string): Promise<DiscoveredPdpCandidate[]> {
+  const links = await page.$$eval('a[href]', (elements) => elements.map((element) => {
+    const card = element.closest('[data-product-id], [data-product-card], .product-card, .product-item, li.product, [class*="product-card" i]');
+    const context = `${card?.textContent || ''} ${(element.textContent || '')}`.trim().slice(0, 300);
+    return { href: (element as HTMLAnchorElement).href, text: context, product_card: Boolean(card) };
+  })).catch(() => [] as Array<{ href: string; text: string; product_card: boolean }>);
+  check();
+  const best = new Map<string, number>();
+  for (const link of links) {
+    const url = canonicalPdpCandidate(link.href, domain)?.toString();
+    if (!url) continue;
+    const score = scorePdpCandidate(url, domain, { source: 'homepage_link', linkText: link.text }) + (link.product_card ? 30 : 0);
+    if (score < 20) continue;
+    best.set(url, Math.max(score, best.get(url) ?? Number.NEGATIVE_INFINITY));
+  }
+  return [...best.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 2)
+    .map(([url, score]) => ({ url, score, source: 'promoted_child' as const, sources: ['promoted_child'] as CandidateSource[], promoted_from: parentUrl }));
+}
+
+async function discoverPdp(page: Page, domain: string, check: () => void, candidateLimit: number): Promise<PdpDiscoveryResult> {
   check();
   const links = await page.$$eval('a[href]', (elements) => elements.map((element) => ({ href: (element as HTMLAnchorElement).href, text: (element.textContent || '').trim().slice(0, 160) }))).catch(() => [] as Array<{ href: string; text: string }>);
   check();
-  const scored = new Map<string, number>();
-  const collect = (urls: string[], source: 'link' | 'product_sitemap', texts: string[] = []) => {
+  const scored = new Map<string, { score: number; sources: Set<Exclude<CandidateSource, 'promoted_child'>> }>();
+  const collect = (urls: string[], source: Exclude<CandidateSource, 'promoted_child'>, texts: string[] = []) => {
     urls.forEach((raw, index) => {
       const canonical = canonicalPdpCandidate(raw, domain)?.toString();
       if (!canonical) return;
+      const listingPath = /\/(?:collections?|categories?|search)(?:\/|$)/i.test(new URL(canonical).pathname);
       const score = scorePdpCandidate(canonical, domain, { source, linkText: texts[index] });
-      if (score < 0) return;
-      scored.set(canonical, Math.max(score, scored.get(canonical) ?? Number.NEGATIVE_INFINITY));
+      // A bounded listing candidate is useful only as a one-hop source for a
+      // PDP. It stays below direct product URLs in the deterministic queue.
+      if (score < 0 && !listingPath) return;
+      const current = scored.get(canonical);
+      const next = current || { score: Number.NEGATIVE_INFINITY, sources: new Set<Exclude<CandidateSource, 'promoted_child'>>() };
+      next.score = Math.max(listingPath ? Math.max(1, score) : score, next.score);
+      next.sources.add(source);
+      scored.set(canonical, next);
     });
   };
-  collect(links.map((link) => link.href), 'link', links.map((link) => link.text));
+  collect(links.map((link) => link.href), 'homepage_link', links.map((link) => link.text));
+  const homepageCandidateCount = scored.size;
 
-  const fetchXml = async (url: string) => page.evaluate(async (target) => {
-    const response = await fetch(target, { credentials: 'same-origin' });
+  const fetchXml = async (url: string) => page.evaluate(async ({ target, timeoutMs }) => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const response = await fetch(target, { credentials: 'same-origin', signal: controller.signal }).finally(() => window.clearTimeout(timer));
     if (!response.ok) throw new Error(`Sitemap HTTP ${response.status}`);
     return (await response.text()).slice(0, 1_000_000);
-  }, url);
+  }, { target: url, timeoutMs: SITEMAP_ENRICHMENT_BUDGET_MS });
+  let sitemap_enrichment_status: PdpDiscoveryResult['sitemap_enrichment_status'] = 'not_attempted';
   try {
-    const sitemap = await fetchXml(`https://${domain}/sitemap.xml`);
+    // Preserve the observed storefront origin (including a non-default test
+    // port); sitemap enrichment must not invent a different transport target.
+    const sitemap = await fetchXml(new URL('/sitemap.xml', page.url()).toString());
     check();
     const locations = [...sitemap.matchAll(/<loc>(.*?)<\/loc>/gi)].map((match) => match[1].trim());
-    collect(locations, 'link');
+    collect(locations, 'sitemap');
     check();
     const sitemapChildren = locations.filter((url) => /sitemap.*\.xml/i.test(url));
     const child = sitemapChildren.find((url) => /sitemap_products?/i.test(url)) || sitemapChildren[0];
     if (child) {
       const childXml = await fetchXml(child);
-      collect([...childXml.matchAll(/<loc>(.*?)<\/loc>/gi)].map((match) => match[1].trim()), /sitemap_products?/i.test(child) ? 'product_sitemap' : 'link');
+      collect([...childXml.matchAll(/<loc>(.*?)<\/loc>/gi)].map((match) => match[1].trim()), /sitemap_products?/i.test(child) ? 'product_sitemap' : 'sitemap');
       check();
     }
-  } catch {
+    sitemap_enrichment_status = 'completed';
+  } catch (error) {
+    sitemap_enrichment_status = /abort|timeout/i.test(String(error)) ? 'timed_out' : 'failed';
     // Homepage candidates remain usable when sitemap discovery is unavailable.
   }
-  const candidates = [...scored.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).map(([url]) => url);
+  const candidates = [...scored.entries()].sort((left, right) => right[1].score - left[1].score || left[0].localeCompare(right[0])).map(([url, details]) => {
+    const sources = [...details.sources];
+    const source: DiscoveredPdpCandidate['source'] = sources.includes('product_sitemap') ? 'product_sitemap' : sources.includes('homepage_link') ? 'homepage_link' : 'sitemap';
+    return { url, score: details.score, source, sources };
+  });
   check();
-  return candidates.slice(0, candidateLimit);
+  return { candidates: candidates.slice(0, candidateLimit), homepage_candidate_count: homepageCandidateCount, sitemap_candidate_count: Math.max(0, scored.size - homepageCandidateCount), sitemap_enrichment_status };
 }
 
 function cmsSignalsFromHtml(html: string) {
@@ -1088,7 +1171,7 @@ export async function runStorefrontAudit(
     }
   };
 
-  const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null) => {
+  const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null, emitTrace = true) => {
     const shared = sharedPreConsentMeasurementState(evidence);
     const v2EventBeforeChoice = result.tracking.signals.some((signal) =>
       signal.timing === 'pre_choice' && (signal.kind === 'event_hit' || signal.kind === 'conversion_hit')
@@ -1115,8 +1198,12 @@ export async function runStorefrontAudit(
     evidence.consent.post_reject_observation_completed = Boolean(result.result.persistence.post_reload_observation_completed);
     evidence.consent.provider_evidence = result.result.reason_codes;
     evidence.consent.banner_visible = result.result.banner.visibility === 'visible';
+    evidence.consent.accept_action_available = result.result.available_actions.some((action) => action.action === 'accept_all' && action.availability !== 'not_present');
+    evidence.consent.reject_action_available = result.result.available_actions.some((action) => action.action === 'reject_all' && action.availability !== 'not_present');
+    evidence.consent.preferences_action_available = result.result.available_actions.some((action) => action.action === 'open_preferences' && action.availability !== 'not_present');
+    evidence.consent.actions_rollout_enabled = !result.telemetry.observation_only;
     evidence.consent.cookie_names = result.result.storage_changes.map((change) => change.key_name).slice(0, 100);
-    for (const step of compatibility.trace_events) addTrace(step, {}, { module: 'consent', severity: 'info' });
+    if (emitTrace) for (const step of compatibility.trace_events) addTrace(step, {}, { module: 'consent', severity: 'info' });
     return compatibility;
   };
 
@@ -1246,7 +1333,7 @@ export async function runStorefrontAudit(
         new Promise((resolve) => setTimeout(resolve, 1_500))
       ]);
     }
-    if (consentV2) enrichConsentV2Evidence(consentV2, evidence.page.valid);
+    if (consentV2) enrichConsentV2Evidence(consentV2, evidence.page.valid, false);
     await closeSession();
     const completedEvidence = evidenceCollector.complete(startedMs);
     const replayed = replayEvidence(completedEvidence);
@@ -2060,7 +2147,7 @@ export async function runStorefrontAudit(
     evidence.product.discovery_executed = true;
     currentPhase = 'product_discovery';
     addTrace('product_context_started', { max_pdp_urls_to_audit: 1, max_candidate_attempts: pdpCandidateAttemptLimit });
-    let pdpCandidates: string[] = [];
+    let pdpCandidates: DiscoveredPdpCandidate[] = [];
     try {
       const homepageHtml = await homepage!.content();
       const applicability = classifyProductApplicability({ html: homepageHtml, cmsSignals: evidence.page.cms_signals });
@@ -2071,11 +2158,25 @@ export async function runStorefrontAudit(
       } else {
         // Inconclusive remains eligible for the existing bounded discovery path;
         // it can never produce a definitive negative downstream.
-        pdpCandidates = await withinPhaseBudget(
+        const discovery = await withinPhaseBudget(
           'product_discovery',
           Math.max(1, Math.min(productDiscoveryBudgetMs, productBudgetRemaining())),
           () => discoverPdp(homepage!, effectiveDomain, check, pdpCandidateAttemptLimit)
         );
+        pdpCandidates = discovery.candidates;
+        evidence.product.homepage_candidate_count = discovery.homepage_candidate_count;
+        evidence.product.sitemap_candidate_count = discovery.sitemap_candidate_count;
+        evidence.product.sitemap_enrichment_status = discovery.sitemap_enrichment_status;
+        evidence.product.candidate_discovered_count = pdpCandidates.length;
+        evidence.product.candidate_queued_count = pdpCandidates.length;
+        evidence.product.candidate_attempted_count = 0;
+        evidence.product.candidate_completed_count = 0;
+        evidence.product.candidate_promoted_count = 0;
+        if (discovery.sitemap_enrichment_status !== 'completed') addTrace('product_sitemap_enrichment_incomplete', {
+          status: discovery.sitemap_enrichment_status,
+          homepage_candidate_count: discovery.homepage_candidate_count,
+          sitemap_candidate_count: discovery.sitemap_candidate_count
+        }, { module: 'product', severity: 'warning' });
         addTrace('product_applicability_decided', { status: applicability.applicability, reason_code: applicability.reason_code });
       }
       evidence.product.discovery_completed = true;
@@ -2090,7 +2191,7 @@ export async function runStorefrontAudit(
         error_family: isPhaseTimeout(error) ? undefined : runtimeErrorFamily(error)
       });
     }
-    evidence.product.pdp_candidates = pdpCandidates.map((url) => safeUrl(url) || '').filter(Boolean);
+    evidence.product.pdp_candidates = pdpCandidates.map((candidate) => safeUrl(candidate.url) || '').filter(Boolean);
     if (!pdpCandidates.length) {
       addTrace('product_payload_status_decision', evidence.product.applicability === 'not_applicable'
         ? { status: 'not_tested', reason_code: 'PRODUCT_NOT_APPLICABLE' }
@@ -2195,8 +2296,23 @@ export async function runStorefrontAudit(
       await attachAuthorizedAccessHeader(context!, pdpPage, effectiveDomain);
       let selectedPdp = false;
       let pdpNavigationCommitted = false;
-      const maxPdpCandidates = Math.min(3, pdpCandidateAttemptLimit, pdpCandidates.length);
-      for (const [candidateIndex, pdpUrl] of pdpCandidates.slice(0, maxPdpCandidates).entries()) {
+      const maxPdpCandidates = Math.min(3, pdpCandidateAttemptLimit);
+      const candidateQueue = [...pdpCandidates];
+      const knownCandidateUrls = new Set(candidateQueue.map((candidate) => candidate.url));
+      const recordCandidateOutcome = (outcome: NonNullable<EvidenceBundle['product']['candidate_outcomes']>[number]) => {
+        evidence.product.candidate_outcomes?.push(outcome);
+        evidence.product.candidate_completed_count = (evidence.product.candidate_completed_count || 0) + 1;
+      };
+      const candidateCounters = () => ({
+        discovered: evidence.product.candidate_discovered_count || 0,
+        queued: evidence.product.candidate_queued_count || 0,
+        promoted: evidence.product.candidate_promoted_count || 0,
+        attempted: evidence.product.candidate_attempted_count || 0,
+        completed: evidence.product.candidate_completed_count || 0
+      });
+      for (let candidateIndex = 0; candidateIndex < candidateQueue.length && candidateIndex < maxPdpCandidates; candidateIndex += 1) {
+        const candidate = candidateQueue[candidateIndex];
+        const pdpUrl = candidate.url;
         try { checkProductBudget(); } catch (error) {
           if (!isPhaseTimeout(error)) throw error;
           finalStatus = 'partial';
@@ -2205,12 +2321,14 @@ export async function runStorefrontAudit(
           break;
         }
         currentPhase = 'product_pdp_load';
+        evidence.product.candidate_attempted_count = (evidence.product.candidate_attempted_count || 0) + 1;
         const viewItemStart = evidence.product.ga4_view_item_hits.length;
         const dataLayerViewItemStart = (evidence.product.data_layer_view_item_hits || []).length;
         addTrace('pdp_navigation_started', {
           pdp_url: safeUrl(pdpUrl),
           candidate_attempt: candidateIndex + 1,
-            candidate_limit: maxPdpCandidates
+            candidate_limit: maxPdpCandidates, candidate_source: candidate.source, candidate_sources: candidate.sources, candidate_score: candidate.score,
+            candidate_counters: candidateCounters()
         });
         let pdpOperation = 'pdp_navigation_commit';
         try {
@@ -2270,10 +2388,14 @@ export async function runStorefrontAudit(
               signals: {
                 json_ld_product: false, og_product: false, product_form: false, visible_product_heading: false,
                 visible_price: false, enabled_add_to_cart: false, structured_in_stock: false,
-                structured_out_of_stock: false, unavailable_message: false, disabled_sold_out_control: false
+                structured_out_of_stock: false, unavailable_message: false, disabled_sold_out_control: false,
+                product_card_link_count: 0, multiple_add_to_cart_controls: false, item_list_json_ld: false,
+                listing_semantics: false, view_item_list: false
               },
               is_product: false,
-              out_of_stock: false
+              out_of_stock: false,
+              page_role: 'UNKNOWN',
+              pdp_semantic_strength: false
             };
             addTrace('pdp_candidate_assessment_failed', {
               pdp_url: safeUrl(pdpUrl),
@@ -2300,8 +2422,34 @@ export async function runStorefrontAudit(
           const finalPdpUrlValid = Boolean(
             productPatternPdpCandidate(finalPdpUrl, effectiveDomain) || twoLevelPdpCandidate(finalPdpUrl, effectiveDomain)
           );
+          if (!assessmentUnavailable && assessment.page_role === 'PRODUCT_LISTING') {
+            const children = candidate.promoted_from ? [] : await discoverListingChildren(pdpPage, effectiveDomain, check, finalPdpUrl);
+            const promoted = children.filter((child) => !knownCandidateUrls.has(child.url));
+            for (const child of promoted) knownCandidateUrls.add(child.url);
+            // Insert immediately after the listing so strong card evidence wins
+            // over generic homepage fallbacks, without widening the attempt cap.
+            candidateQueue.splice(candidateIndex + 1, 0, ...promoted);
+            evidence.product.pdp_candidates = candidateQueue.map((queued) => safeUrl(queued.url) || '').filter(Boolean);
+            evidence.product.candidate_promoted_count = (evidence.product.candidate_promoted_count || 0) + promoted.length;
+            evidence.product.candidate_queued_count = candidateQueue.length;
+            recordCandidateOutcome({
+              url: finalPdpUrl, final_url: finalPdpUrl, rank: candidateIndex + 1, score: candidate.score,
+              source: candidate.source, sources: candidate.sources, promoted_from: candidate.promoted_from || null,
+              page_role: 'PRODUCT_LISTING', semantic_result: 'PRODUCT_LISTING', navigation_complete: true,
+              observation_complete: true, strong_commerce_signals: [],
+              supporting_signals: ['product_card_links', ...(assessment.signals.view_item_list ? ['view_item_list'] : [])],
+              reason_code: promoted.length ? 'PRODUCT_LISTING_CHILD_PROMOTED' : candidate.promoted_from ? 'PRODUCT_LISTING_RECURSION_BLOCKED' : 'PRODUCT_LISTING_NO_CHILD',
+              outcome: 'PRODUCT_LISTING'
+            });
+            addTrace('product_listing_classified', {
+              candidate_url: safeUrl(pdpUrl), product_card_link_count: assessment.signals.product_card_link_count || 0,
+              view_item_list: assessment.signals.view_item_list === true, promoted_child_count: promoted.length,
+              recursion_blocked: Boolean(candidate.promoted_from), candidate_counters: candidateCounters()
+            }, { module: 'product', severity: 'info' });
+            continue;
+          }
           const needsTrackingEvidence = assessmentUnavailable || assessment.out_of_stock ||
-            !pdpReadinessSatisfied(assessment, candidateHits.some((hit) => hit.has_product));
+            !assessment.pdp_semantic_strength && !candidateHits.some((hit) => hit.has_product);
           if (needsTrackingEvidence && !candidateHits.some((hit) => hit.has_product)) {
             pdpOperation = 'pdp_candidate_tracking_observation';
             addTrace('pdp_candidate_tracking_observation_started', {
@@ -2359,7 +2507,7 @@ export async function runStorefrontAudit(
           }
           const hasValidCandidateViewItem = candidateHits.some((hit) => hit.has_product);
           if (!canKeepTimedOutPdp({ navigationTimedOut, finalPdpUrlValid, assessment, hasValidViewItem: hasValidCandidateViewItem })) {
-            evidence.product.candidate_outcomes?.push({ url: finalPdpUrl, rank: candidateIndex + 1, navigation_complete: false, observation_complete: false, reason_code: 'PDP_NAV_TIMEOUT', outcome: 'TIMEOUT' });
+            recordCandidateOutcome({ url: finalPdpUrl, rank: candidateIndex + 1, score: candidate.score, source: candidate.source, sources: candidate.sources, promoted_from: candidate.promoted_from || null, page_role: assessment.page_role, navigation_complete: false, observation_complete: false, reason_code: 'PDP_NAV_TIMEOUT', outcome: 'TIMEOUT' });
             evidence.product.observation!.timeout = true;
             addTrace('pdp_candidate_rejected', { candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl, reason_code: 'PDP_NAV_TIMEOUT' });
             continue;
@@ -2368,8 +2516,9 @@ export async function runStorefrontAudit(
             ? 'PDP_ASSESSMENT_UNAVAILABLE'
             : pdpCandidateRejectionReason(assessment, hasValidCandidateViewItem);
           if (rejectionReason) {
-            evidence.product.candidate_outcomes?.push({
-              url: finalPdpUrl, rank: candidateIndex + 1, final_url: finalPdpUrl,
+            recordCandidateOutcome({
+              url: finalPdpUrl, rank: candidateIndex + 1, score: candidate.score, source: candidate.source, sources: candidate.sources, final_url: finalPdpUrl,
+              promoted_from: candidate.promoted_from || null, page_role: assessment.page_role,
               semantic_result: assessmentUnavailable ? 'INCOMPLETE' : 'INVALID_PRODUCT',
               navigation_complete: true, observation_complete: !assessmentUnavailable,
               strong_commerce_signals: assessmentUnavailable ? [] : Object.entries(assessment.signals).filter(([key, value]) => value && ['json_ld_product', 'og_product', 'product_form', 'enabled_add_to_cart', 'structured_in_stock', 'structured_out_of_stock', 'disabled_sold_out_control'].includes(key)).map(([key]) => key),
@@ -2429,10 +2578,11 @@ export async function runStorefrontAudit(
           const finalDataLayerViewItems = candidateDataLayerViewItemHits();
           const finalViewItems = [...finalNetworkViewItems, ...finalDataLayerViewItems];
           const candidateHasViewItem = finalViewItems.some((hit) => hit.has_product);
-          evidence.product.candidate_outcomes?.push({
+          recordCandidateOutcome({
             url: finalPdpUrl,
             final_url: finalPdpUrl,
             rank: candidateIndex + 1,
+            score: candidate.score, source: candidate.source, sources: candidate.sources, promoted_from: candidate.promoted_from || null, page_role: assessment.page_role,
             semantic_result: 'VALID_PRODUCT',
             navigation_complete: true,
             observation_complete: evidence.product.observation!.minimum_observation_satisfied && !evidence.product.observation!.transport_failure && !evidence.product.observation!.timeout,
@@ -2493,7 +2643,7 @@ export async function runStorefrontAudit(
             page_closed: pdpPage.isClosed()
           });
           const outcome = isNavigationTimeout(error) ? 'TIMEOUT' as const : isProxyFailure(error) ? 'TRANSPORT_FAILED' as const : 'OBSERVATION_INCOMPLETE' as const;
-          evidence.product.candidate_outcomes?.push({ url: safeUrl(pdpUrl) || pdpUrl, rank: candidateIndex + 1, navigation_complete: false, observation_complete: false, reason_code: outcome === 'TIMEOUT' ? 'PDP_NAV_TIMEOUT' : 'PDP_OBSERVATION_INCOMPLETE', outcome });
+          recordCandidateOutcome({ url: safeUrl(pdpUrl) || pdpUrl, rank: candidateIndex + 1, score: candidate.score, source: candidate.source, sources: candidate.sources, promoted_from: candidate.promoted_from || null, page_role: 'UNKNOWN', navigation_complete: false, observation_complete: false, reason_code: outcome === 'TIMEOUT' ? 'PDP_NAV_TIMEOUT' : 'PDP_OBSERVATION_INCOMPLETE', outcome });
           if (outcome === 'TRANSPORT_FAILED') evidence.product.observation!.transport_failure = true;
           if (outcome === 'TIMEOUT') evidence.product.observation!.timeout = true;
           if (isProxyFailure(error) && proxyAttempt < maxProxyRetries) {
@@ -2550,10 +2700,11 @@ export async function runStorefrontAudit(
           }
         }
       }
+      addTrace('product_candidate_queue_finalized', { candidate_counters: candidateCounters() }, { module: 'product', severity: 'info' });
       if (!selectedPdp) {
         evidence.product.navigation_succeeded = pdpNavigationCommitted;
         addTrace('pdp_navigation_failed', {
-          candidates_attempted: maxPdpCandidates,
+          candidates_attempted: evidence.product.candidate_attempted_count || 0,
           reason: 'No accessible in-stock product candidate was confirmed',
           reason_code: 'PDP_NO_USABLE_CANDIDATE'
         });
@@ -2610,7 +2761,7 @@ export async function runStorefrontAudit(
           addTrace(readiness.status !== 'ready' ? 'consent_fresh_navigation_blocked_or_challenged' : compatibility.cmp_provider ? 'cmp_provider_detected' : 'cmp_not_found', {
             provider: compatibility.cmp_provider, reason_codes: consentV2.result.reason_codes
           });
-          addTrace('consent_pdp_reject_completed', { pdp_url: safeUrl(consentTarget), provider: compatibility.cmp_provider, reason_codes: consentV2.result.reason_codes });
+          addTrace('consent_v2_session_completed', { target_type: confirmedPdpUrl ? 'pdp' : 'homepage', pdp_url: safeUrl(consentTarget), provider: compatibility.cmp_provider, action_attempted: evidence.consent.interaction_attempted, rejection_verified: evidence.consent.rejection_verified, reason_codes: consentV2.result.reason_codes }, { module: 'consent', severity: 'info' });
         } catch (error) {
           consentCapture?.dispose();
           finalStatus = 'partial';

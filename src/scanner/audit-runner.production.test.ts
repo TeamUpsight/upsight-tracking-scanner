@@ -13,12 +13,13 @@ vi.mock('./version', async (importOriginal) => {
 
 const resolvedFixtureHost = async () => ({ status: 'resolved' as const, sources: { fixture: 'resolved' as const } });
 
-type FixtureHtml = string | Record<string, string> | ((path: string) => string);
+type FixtureHtml = string | Record<string, string | null> | ((path: string) => string | null);
 
 async function fixtureServer(status: number, html: FixtureHtml) {
   const server = createServer((request, response) => {
     const path = new URL(request.url || '/', 'http://fixture.example').pathname;
-    const body = typeof html === 'function' ? html(path) : typeof html === 'string' ? html : html[path] || html['/'] || '';
+    const body = typeof html === 'function' ? html(path) : typeof html === 'string' ? html : Object.prototype.hasOwnProperty.call(html, path) ? html[path] : html['/'] ?? '';
+    if (body === null) return;
     response.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
     response.end(body);
   });
@@ -32,12 +33,12 @@ async function closeServer(server: Server) {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-async function auditFixture(status: number, html: FixtureHtml, consentV2Enabled = true, selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent']) {
+async function auditFixture(status: number, html: FixtureHtml, consentV2Enabled = true, selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent'], actionsEnabled = consentV2Enabled) {
   vi.stubEnv('BROWSER_PROVIDER', 'local');
   vi.stubEnv('CONSENT_V2_ENABLED', consentV2Enabled ? 'true' : 'false');
-  vi.stubEnv('CONSENT_V2_ACTIONS_ENABLED', consentV2Enabled ? 'true' : 'false');
-  vi.stubEnv('CONSENT_ONETRUST_ACTIONS_ENABLED', consentV2Enabled ? 'true' : 'false');
-  vi.stubEnv('CONSENT_V2_ACTION_SAMPLE_PERCENT', consentV2Enabled ? '100' : '0');
+  vi.stubEnv('CONSENT_V2_ACTIONS_ENABLED', actionsEnabled ? 'true' : 'false');
+  vi.stubEnv('CONSENT_ONETRUST_ACTIONS_ENABLED', actionsEnabled ? 'true' : 'false');
+  vi.stubEnv('CONSENT_V2_ACTION_SAMPLE_PERCENT', actionsEnabled ? '100' : '0');
   const fixture = await fixtureServer(status, html);
   const updates: Array<Record<string, unknown>> = [];
   try {
@@ -97,6 +98,48 @@ describe('runStorefrontAudit production browser wiring', () => {
     const result = await auditFixture(200, `<head><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G111';</script></head>${oneTrust}`);
     expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'prior_consent_violation', scan_status: 'completed' });
   }, 30_000);
+
+  it('RUNNER-TESCO-OBS-01 keeps homepage PDP discovery when sitemap enrichment hangs and records an observation-only OneTrust session', async () => {
+    const customOneTrust = `<script>window.OneTrust={RejectAll(){window.__rejectCalled=true},AllowAll(){}};</script><script src="/otSDKStub.js"></script>
+      <div role="dialog" aria-modal="true"><p>We use cookies and value your privacy.</p><button>Accept all</button><button>Reject all</button></div>`;
+    const result = await auditFixture(200, {
+      '/': `${customOneTrust}<a href="/products/widget">Widget</a><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G100';</script>`,
+      '/products/widget': `${customOneTrust}<form action="/cart/add"><button>Add to cart</button></form><script>window.dataLayer=[{event:'view_item',ecommerce:{items:[{item_id:'widget',item_name:'Widget'}]}}]</script>`,
+      '/sitemap.xml': null
+    }, true, ['consent', 'tracking'], false);
+    const evidence = result.evidence_bundle as { consent: { banner_visible: boolean; reject_action_available: boolean; interaction_attempted: boolean }; product: { pdp_candidates: string[]; sitemap_enrichment_status: string; candidate_outcomes: Array<{ source?: string }> }; decision_summary: Array<{ decision_name: string; status: unknown; blocking_uncertainty: string[] }> };
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive', product_payload_status: 'pass', site_ga4_detected: true, scan_status: 'completed' });
+    expect(evidence.consent).toMatchObject({ banner_visible: true, reject_action_available: true, interaction_attempted: false });
+    expect(evidence.product).toMatchObject({ sitemap_enrichment_status: 'timed_out' });
+    expect(evidence.product.pdp_candidates).toEqual(expect.arrayContaining([expect.stringContaining('/products/widget')]));
+    expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ source: 'homepage_link' })]));
+    expect(trace.filter((item) => item.step === 'consent_context_started')).toHaveLength(1);
+    expect(trace.some((item) => item.step === 'cmp_reject_executed' || item.step === 'consent_pdp_reject_completed')).toBe(false);
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'consent_observation_only' })]));
+    expect(evidence.decision_summary.find((item) => item.decision_name === 'ga4')).toMatchObject({ status: true, blocking_uncertainty: [] });
+  }, 45_000);
+
+  it('LISTING-01 through LISTING-06 promote one bounded child PDP without spending PDP grace on the listing', async () => {
+    const customOneTrust = `<script>window.OneTrust={RejectAll(){},AllowAll(){}};</script><script src="/otSDKStub.js"></script>
+      <div role="dialog" aria-modal="true"><p>We use cookies and value your privacy.</p><button>Accept all</button><button>Reject all</button></div>`;
+    const result = await auditFixture(200, {
+      '/': `${customOneTrust}<a href="/collections/all">Shop all products</a><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G100';</script>`,
+      '/collections/all': `${customOneTrust}<main class="collection"><script>window.dataLayer=[{event:'view_item_list', ecommerce:{items:[{item_id:'a'},{item_id:'b'}]}}]</script><article class="product-card"><a href="/products/widget">Buy product Widget</a><span>$10</span></article><article class="product-card"><a href="/products/other">Other</a><span>$12</span></article><button>Add to cart</button><button>Add to cart</button></main>`,
+      '/products/other': `<main>Not used</main>`,
+      '/products/widget': `${customOneTrust}<form action="/cart/add"><button>Add to cart</button></form><script>window.dataLayer=[{event:'view_item', ecommerce:{items:[{item_id:'widget',item_name:'Widget'}]}}]</script>`,
+      '/sitemap.xml': null
+    }, true, ['consent', 'tracking'], false);
+    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ page_role?: string; outcome: string; promoted_from?: string | null }>; candidate_discovered_count: number; candidate_queued_count: number; candidate_promoted_count: number; candidate_attempted_count: number; candidate_completed_count: number } };
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string; candidate_url?: string }>;
+    expect(result).toMatchObject({ consent_status: 'inconclusive', product_payload_status: 'pass', site_ga4_detected: true });
+    expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ page_role: 'PRODUCT_LISTING', outcome: 'PRODUCT_LISTING' }),
+      expect.objectContaining({ outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM', promoted_from: expect.stringContaining('/collections/all') })
+    ]));
+    expect(evidence.product).toMatchObject({ candidate_promoted_count: 2, candidate_attempted_count: 2, candidate_completed_count: 2 });
+    expect(trace.filter((item) => item.step === 'pdp_candidate_tracking_observation_started')).toHaveLength(0);
+  }, 45_000);
 
   it('RUNNER-DISABLED-01 keeps the full runner on the legacy detector without an interaction', async () => {
     const result = await auditFixture(200, oneTrust, false);

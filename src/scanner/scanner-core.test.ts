@@ -23,7 +23,7 @@ import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } f
 import {
   assessPdpCandidate, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
   canKeepTimedOutPdp, isStrongProductPath, isViewItemForPdp, parseEgressCountry, pdpCandidateRejectionReason,
-  acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, classifyProductApplicability, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, sharedPreConsentMeasurementState, trustArcPreferenceControls, twoLevelPdpCandidate
+  acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, classifyProductApplicability, classifyProductPageRole, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, sharedPreConsentMeasurementState, trustArcPreferenceControls, twoLevelPdpCandidate
 } from './audit-runner';
 import { AuditRuntimeBudget } from './audit-runtime-budget';
 import { parseRetryAfterMs, resolveAccessDecision, resolveHostnameEvidence, resolveHostnameStatus } from './navigation';
@@ -330,6 +330,13 @@ describe('PDP candidate selection', () => {
     expect(pdpCandidateRejectionReason({ is_product: false, out_of_stock: false }, true)).toBeNull();
     expect(isStrongProductPath('https://example.com/product/model-a')).toBe(true);
     expect(isStrongProductPath('https://example.com/shop/replacement-parts')).toBe(false);
+  });
+
+  it('classifies product listings separately from PDP semantic strength', () => {
+    expect(classifyProductPageRole({ json_ld_product: false, og_product: false, product_form: false, enabled_add_to_cart: false, visible_product_heading: false, visible_price: false, structured_in_stock: false, structured_out_of_stock: false, unavailable_message: false, disabled_sold_out_control: false, product_card_link_count: 8, multiple_add_to_cart_controls: true, item_list_json_ld: true, listing_semantics: true, view_item_list: true }))
+      .toEqual({ page_role: 'PRODUCT_LISTING', pdp_semantic_strength: false });
+    expect(classifyProductPageRole({ json_ld_product: true, og_product: false, product_form: false, enabled_add_to_cart: false, visible_product_heading: true, visible_price: true, structured_in_stock: true, structured_out_of_stock: false, unavailable_message: false, disabled_sold_out_control: false }))
+      .toEqual({ page_role: 'PDP', pdp_semantic_strength: true });
   });
 
   it('accepts hydrated product content and scopes a view_item to the candidate PDP', () => {
@@ -1181,6 +1188,15 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     });
     expect(JSON.parse(String(files['access-summary.json']))).toMatchObject({ page: { valid: null, access_category: 'none' } });
     expect(JSON.parse(String(files['decisions.json']))).toEqual(replayed.evidence_bundle?.decision_summary);
+    const decisions = JSON.parse(String(files['decisions.json'])) as Array<{ decision_name: string; status: unknown; blocking_uncertainty: string[] }>;
+    const decision = (name: string) => decisions.find((item) => item.decision_name === name)!;
+    const summary = JSON.parse(String(files['summary.json']));
+    const consentSummary = JSON.parse(String(files['consent-summary.json']));
+    const serverSummary = JSON.parse(String(files['server-summary.json']));
+    expect(summary.final).toMatchObject({ consent: decision('consent').status, product: decision('product_payload').status, ga4: decision('ga4').status, server_side: decision('server_side').status });
+    expect(consentSummary.final_decision).toEqual(decision('consent'));
+    expect(serverSummary.final_decision).toEqual(decision('server_side'));
+    expect(serverSummary.blocking_uncertainty).toEqual(decision('server_side').blocking_uncertainty);
   });
 });
 

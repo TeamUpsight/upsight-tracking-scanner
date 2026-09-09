@@ -49,7 +49,7 @@ export interface PreparedConsentV2Session {
 export async function prepareConsentV2Session(page: Page): Promise<PreparedConsentV2Session> {
   await installConsentCommandBootstrap(page);
   const timeline: ConsentV2Timeline = { session_started_at: Date.now(), navigation_started_at: null, dom_content_loaded_at: null, initial_observation_completed_at: null, action_attempt_started_at: null, user_choice_at: null, reject_started_at: null, reject_completed_at: null, reload_started_at: null };
-  const ledger = new ConsentEvidenceLedger(); const requests: TrackingRequestEvidence[] = []; const gcm = new GoogleConsentModeObserver();
+  const ledger = new ConsentEvidenceLedger(); const requests: TrackingRequestEvidence[] = []; const gcm = new GoogleConsentModeObserver({ timestamp_tolerance_ms: 50 });
   const listener = (request: Request) => {
     const timestamp = Date.now(); const url = request.url();
     // postData is immediately reduced by the owning observers/classifier and

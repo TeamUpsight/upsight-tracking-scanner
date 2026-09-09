@@ -159,7 +159,7 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     candidateOutcomes.some((candidate) => candidate.semantic_result === 'VALID_PRODUCT' || candidate.outcome === 'VALID_PRODUCT_WITH_VIEW_ITEM' || candidate.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM');
   const productApplicability = positiveProductEvidence ? 'applicable' : evidence.product.applicability || (evidence.product.pdp_candidates.length > 0 || evidence.product.pdp_url ? 'applicable' : 'inconclusive');
   evidence.product.applicability = productApplicability;
-  const relevantCandidates = candidateOutcomes.filter((candidate) => !(candidate.outcome === 'INVALID_PRODUCT' && candidate.semantic_result === 'INVALID_PRODUCT' && candidate.observation_complete === true));
+  const relevantCandidates = candidateOutcomes.filter((candidate) => !(candidate.outcome === 'INVALID_PRODUCT' && candidate.semantic_result === 'INVALID_PRODUCT' && candidate.observation_complete === true) && candidate.page_role !== 'PRODUCT_LISTING' && candidate.outcome !== 'PRODUCT_LISTING');
   const candidateObservationComplete = relevantCandidates.length > 0
     ? relevantCandidates.every((candidate) => candidate.observation_complete === true &&
       ['VALID_PRODUCT_WITH_VIEW_ITEM', 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'].includes(candidate.outcome))
@@ -262,10 +262,21 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
       .filter(([name]) => (name === 'cmp' || name === 'consent') ? consentSelected : (name === 'ga4' || name === 'meta' || name === 'product') ? trackingSelected : name === 'server_side' ? serverSelected : false)
       .map(([, finding]) => finding.reason_code).filter(Boolean)
   ])];
-  const decision = (decision_name: string, status: string | boolean | null, finding: StorefrontAudit['finding_confidence'][keyof StorefrontAudit['finding_confidence']] | undefined, applicable: boolean | null, observation_complete: boolean | null) => ({
+  const decision = (decision_name: string, status: string | boolean | null, finding: StorefrontAudit['finding_confidence'][keyof StorefrontAudit['finding_confidence']] | undefined, applicable: boolean | null, observation_complete: boolean | null) => {
+    const positiveProof = status === true || ['pass', 'prior_consent_violation', 'strong_server_side_evidence', 'likely_server_side', 'first_party_collection_detected'].includes(String(status));
+    const uncertaintyByDecision: Record<string, string> = { consent: 'CONSENT_OBSERVATION_INCOMPLETE', cmp: 'CMP_OBSERVATION_INCOMPLETE', product_payload: 'PDP_OBSERVATION_INCOMPLETE', ga4: 'GA4_OBSERVATION_INCOMPLETE', meta: 'META_OBSERVATION_INCOMPLETE', server_side: 'SERVER_OBSERVATION_INCOMPLETE' };
+    return {
     decision_name, status, confidence: finding?.confidence || 'low', reason_code: finding?.reason_code || 'NOT_TESTED', applicable, observation_complete,
-    evidence_codes: finding?.evidence || [], blocking_uncertainty: observation_complete === false ? [finding?.reason_code || 'OBSERVATION_INCOMPLETE'] : []
-  });
+    evidence_codes: finding?.evidence || [], blocking_uncertainty: observation_complete === false && !positiveProof ? [uncertaintyByDecision[decision_name] || 'OBSERVATION_INCOMPLETE'] : [],
+    ...(decision_name === 'product_payload' ? { candidate_counters: {
+      discovered: evidence.product.candidate_discovered_count ?? 0,
+      queued: evidence.product.candidate_queued_count ?? 0,
+      promoted: evidence.product.candidate_promoted_count ?? 0,
+      attempted: evidence.product.candidate_attempted_count ?? 0,
+      completed: evidence.product.candidate_completed_count ?? 0
+    } } : {})
+    };
+  };
   evidence.decision_summary = [
     decision('consent', corrected.consent_status ?? null, corrected.finding_confidence?.consent, consentSelected, evidence.consent.post_reject_observation_completed),
     decision('cmp', corrected.cmp_provider ?? null, corrected.finding_confidence?.cmp, consentSelected, evidence.consent.executed),

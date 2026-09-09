@@ -92,6 +92,14 @@ describe('Google Consent Mode observer', () => {
     expect(observer.result()).toMatchObject({ classification: 'ambiguous', default_issued_late: true });
   });
 
+  it('tolerates only bounded cross-process dispatch skew when explicitly configured', () => {
+    const observer = new GoogleConsentModeObserver({ timestamp_tolerance_ms: 50 });
+    observer.observeMeasurementRequest({ url: googleMeasurementUrl('gcs=G100'), timestamp: 1000 });
+    observer.observeGtagCall('consent', 'default', { ad_storage: 'denied' }, 1025);
+    observer.markUserChoice(1030);
+    expect(observer.result()).toMatchObject({ classification: 'advanced_candidate', default_issued_late: false });
+  });
+
   it('normalizes wait_for_update without retaining non-consent command fields', () => {
     const observer = new GoogleConsentModeObserver();
     observer.observeGtagCall('consent', 'default', { ad_storage: 'denied', wait_for_update: 500, identifier: 'do-not-store' }, 10);

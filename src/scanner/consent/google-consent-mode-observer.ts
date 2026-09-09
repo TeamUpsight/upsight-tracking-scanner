@@ -78,6 +78,8 @@ export interface GoogleConsentModeResult {
 export interface GoogleConsentModeObserverOptions {
   max_commands?: number;
   max_network_observations?: number;
+  /** Small tolerance for browser-to-Node event dispatch skew; defaults to exact ordering. */
+  timestamp_tolerance_ms?: number;
 }
 
 /** Produces the additive Consent V2 mechanism owned by the GCM observer. */
@@ -230,6 +232,7 @@ export class GoogleConsentModeObserver {
   private readonly network: GoogleConsentNetworkObservation[] = [];
   private readonly maxCommands: number;
   private readonly maxNetworkObservations: number;
+  private readonly timestampToleranceMs: number;
   private nextSequence = 1;
   private userChoiceTimestamp: number | null = null;
   private trackingGated = false;
@@ -238,6 +241,7 @@ export class GoogleConsentModeObserver {
   constructor(options: GoogleConsentModeObserverOptions = {}) {
     this.maxCommands = boundedLimit(options.max_commands, 100);
     this.maxNetworkObservations = boundedLimit(options.max_network_observations, 200);
+    this.timestampToleranceMs = Math.max(0, Math.min(100, Math.floor(options.timestamp_tolerance_ms || 0)));
   }
 
   observeGtagCall(command: unknown, action: unknown, state: unknown, timestamp?: number) {
@@ -294,7 +298,7 @@ export class GoogleConsentModeObserver {
     const choiceTimestamp = this.userChoiceTimestamp;
     const preChoiceNetwork = choiceTimestamp === null ? [] : network.filter((item) => item.timestamp < choiceTimestamp);
     const postChoiceNetwork = choiceTimestamp === null ? [] : network.filter((item) => item.timestamp >= choiceTimestamp);
-    const defaultIssuedLate = Boolean(firstDefault && network.some((item) => item.timestamp < firstDefault.timestamp));
+    const defaultIssuedLate = Boolean(firstDefault && network.some((item) => item.timestamp + this.timestampToleranceMs < firstDefault.timestamp));
     const defaultDenied = defaults.some(hasDeniedState);
     const positiveUpdate = updates.some((command) => hasGrantedState(command) && (choiceTimestamp === null || command.timestamp >= choiceTimestamp));
     const lifecycle = defaults.length && updates.length ? 'default_and_update'

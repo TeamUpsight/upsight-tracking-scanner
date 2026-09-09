@@ -69,6 +69,8 @@ export interface OneTrustAdapterContext {
   public_methods?: readonly string[];
   active_group_ids?: readonly string[];
   provider_events?: readonly string[];
+  generic_surfaces?: readonly { visible: boolean; privacy_or_cookie_semantics: boolean; intent: string }[];
+  generic_controls?: readonly { visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string }[];
   tcf_active?: boolean;
   gpp_active?: boolean;
   action_executed?: boolean;
@@ -175,6 +177,12 @@ export function oneTrustBannerState(context: OneTrustAdapterContext): BannerStat
     const surface = visible.selector === '#onetrust-pc-sdk' ? 'preference_center' : 'banner';
     return { surface, visibility: 'visible', evidence: ['onetrust_standard_root'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
   }
+  const strongProviderEvidence = Boolean(scoreProviderCandidates(oneTrustProviderEvidence(context)).find((candidate) => candidate.provider_id === 'onetrust')?.high_confidence);
+  const visibleConsentSurface = context.generic_surfaces?.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent !== 'privacy_policy_only');
+  const visibleConsentControl = context.generic_controls?.some((control) => control.visible && /accept|allow|agree|reject|decline|necessary|preferences|settings/i.test(control.accessible_name));
+  if (strongProviderEvidence && visibleConsentSurface && visibleConsentControl) {
+    return { surface: 'banner', visibility: 'visible', evidence: ['onetrust_strong_provider_evidence', 'visible_consent_surface', 'visible_consent_control'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
+  }
   if (roots.length) {
     return { surface: 'none', visibility: 'not_visible', evidence: ['onetrust_standard_root'], reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] };
   }
@@ -182,9 +190,10 @@ export function oneTrustBannerState(context: OneTrustAdapterContext): BannerStat
 }
 
 export function oneTrustActionInventory(context: OneTrustAdapterContext): OneTrustActionInventory {
-  const directAccept = actionableControl(context, ONETRUST_DOCUMENTED_CONTROLS.accept);
-  const directReject = actionableControl(context, ONETRUST_DOCUMENTED_CONTROLS.reject);
-  const directPreferences = actionableControl(context, ONETRUST_DOCUMENTED_CONTROLS.preferences);
+  const visibleGeneric = (pattern: RegExp) => Boolean(context.generic_controls?.some((control) => control.visible && control.enabled && control.actionable && pattern.test(control.accessible_name)));
+  const directAccept = actionableControl(context, ONETRUST_DOCUMENTED_CONTROLS.accept) || visibleGeneric(/accept|allow|agree/i);
+  const directReject = actionableControl(context, ONETRUST_DOCUMENTED_CONTROLS.reject) || visibleGeneric(/reject|decline|necessary/i);
+  const directPreferences = actionableControl(context, ONETRUST_DOCUMENTED_CONTROLS.preferences) || visibleGeneric(/preferences|settings|customi[sz]e/i);
   const apiAccept = hasPublicMethod(context, 'AllowAll');
   const apiReject = hasPublicMethod(context, 'RejectAll');
   const apiPreferences = hasPublicMethod(context, 'ToggleInfoDisplay');

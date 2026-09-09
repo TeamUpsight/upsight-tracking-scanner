@@ -106,6 +106,7 @@ function v2TraceEvents(result: FinalConsentAuditResult, tracking: TrackingConsis
   if (result.banner.visibility === 'visible') events.add('cmp_banner_visible');
   if (result.available_actions.length > 0) events.add('cmp_actions_resolved');
   const rejectAttempt = result.interactions.some((attempt) => attempt.action === 'reject_all' || attempt.action === 'only_necessary');
+  if (!rejectAttempt) events.add('consent_observation_only');
   if (rejectAttempt) events.add('cmp_reject_started');
   if (result.interactions.some((attempt) => (attempt.action === 'reject_all' || attempt.action === 'only_necessary') && attempt.outcome === 'executed')) events.add('cmp_reject_executed');
   if (result.rejection_verification.status === 'verified') events.add('cmp_reject_verified');
