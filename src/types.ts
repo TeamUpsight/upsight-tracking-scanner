@@ -289,6 +289,17 @@ export interface EvidenceBundle {
     candidate_attempted_count?: number;
     candidate_completed_count?: number;
     candidate_promoted_count?: number;
+    /** Bounded allocation telemetry for the product module; it never drives replay. */
+    product_runtime?: {
+      discovery_ms: number;
+      candidate_total_ms: number;
+      candidate_navigation_ms: number;
+      minimum_observation_ms: number;
+      extended_observation_ms: number;
+      diagnostic_overhead_ms: number;
+      product_total_ms: number;
+      product_budget_ms: number;
+    };
     /** PDP crawling is skipped when completed storefront evidence proves it is not commerce. */
     applicability?: ProductApplicability;
     applicability_reason_code?: string;
@@ -310,6 +321,11 @@ export interface EvidenceBundle {
       data_layer_capture_complete?: boolean;
       performance_capture_complete?: boolean;
       observation_elapsed_ms?: number;
+      navigation_elapsed_ms?: number;
+      minimum_observation_ms?: number;
+      extended_observation_ms?: number;
+      diagnostic_overhead_ms?: number;
+      extended_observation_used?: boolean;
       view_item_detected?: boolean;
       reason_code?: string;
       outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' | 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' | 'INVALID_PRODUCT' | 'PRODUCT_LISTING' | 'TRANSPORT_FAILED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT';

@@ -13,14 +13,16 @@ vi.mock('./version', async (importOriginal) => {
 
 const resolvedFixtureHost = async () => ({ status: 'resolved' as const, sources: { fixture: 'resolved' as const } });
 
-type FixtureHtml = string | Record<string, string | null> | ((path: string) => string | null);
+type FixtureRoute = string | null | { body: string; status: number };
+type FixtureHtml = string | Record<string, FixtureRoute> | ((path: string) => FixtureRoute);
 
 async function fixtureServer(status: number, html: FixtureHtml) {
   const server = createServer((request, response) => {
     const path = new URL(request.url || '/', 'http://fixture.example').pathname;
-    const body = typeof html === 'function' ? html(path) : typeof html === 'string' ? html : Object.prototype.hasOwnProperty.call(html, path) ? html[path] : html['/'] ?? '';
-    if (body === null) return;
-    response.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+    const route = typeof html === 'function' ? html(path) : typeof html === 'string' ? html : Object.prototype.hasOwnProperty.call(html, path) ? html[path] : html['/'] ?? '';
+    if (route === null) return;
+    const body = typeof route === 'string' ? route : route.body;
+    response.writeHead(typeof route === 'string' ? status : route.status, { 'content-type': 'text/html; charset=utf-8' });
     response.end(body);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -181,6 +183,80 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(evidence.product.candidate_outcomes.map((item) => item.outcome)).toEqual([
       'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', 'VALID_PRODUCT_WITH_VIEW_ITEM'
     ]);
+  }, 45_000);
+
+  it('PRODUCT-RUNTIME-01 advances from the minimum checkpoint to a strong alternate PDP with delayed view_item', async () => {
+    const product = (body = '') => `<form action="/cart/add"><button>Add to cart</button></form>${body}`;
+    const result = await auditFixture(200, {
+      '/': `<a href="/products/a">A</a><a href="/products/b">B</a><a href="/products/c">Fallback</a>`,
+      '/products/a': product(),
+      '/products/b': product(`<script>setTimeout(() => { window.dataLayer=[{event:'view_item', ecommerce:{items:[{item_id:'b', item_name:'B'}]}}]; }, 300)</script>`),
+      '/products/c': product()
+    }, true, ['tracking']);
+    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ url: string; outcome: string; minimum_observation_ms?: number; extended_observation_used?: boolean }>; product_runtime: { candidate_total_ms: number; minimum_observation_ms: number; extended_observation_ms: number; product_budget_ms: number } } };
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string; candidate_attempt?: number }>;
+    expect(result.product_payload_status).toBe('pass');
+    expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ url: expect.stringContaining('/products/a'), outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', extended_observation_used: false }),
+      expect.objectContaining({ url: expect.stringContaining('/products/b'), outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' })
+    ]));
+    expect(evidence.product.candidate_outcomes).not.toEqual(expect.arrayContaining([expect.objectContaining({ url: expect.stringContaining('/products/c') })]));
+    expect(evidence.product.candidate_outcomes[0].minimum_observation_ms).toBeGreaterThanOrEqual(250);
+    expect(evidence.product.product_runtime).toMatchObject({ product_budget_ms: expect.any(Number), candidate_total_ms: expect.any(Number) });
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_extended_observation_skipped_for_reserve', candidate_attempt: 1 })]));
+  }, 45_000);
+
+  it('PRODUCT-RUNTIME-02 stops after two complete negative PDPs and emits missing_view_item', async () => {
+    const product = `<form action="/cart/add"><button>Add to cart</button></form>`;
+    const result = await auditFixture(200, {
+      '/': `<script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view';</script><a href="/products/a">A</a><a href="/products/b">B</a><a href="/products/c">Fallback</a>`,
+      '/products/a': product,
+      '/products/b': product,
+      '/products/c': product
+    }, true, ['tracking'], false);
+    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ url: string; outcome: string; observation_complete: boolean }> } };
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    expect(result.product_payload_status).toBe('missing_view_item');
+    expect(evidence.product.candidate_outcomes.filter((outcome) => outcome.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' && outcome.observation_complete)).toHaveLength(2);
+    expect(evidence.product.candidate_outcomes).not.toEqual(expect.arrayContaining([expect.objectContaining({ url: expect.stringContaining('/products/c') })]));
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_negative_evidence_sufficient' })]));
+  }, 45_000);
+
+  it('PRODUCT-RUNTIME-03 keeps an incomplete second PDP from becoming a negative finding', async () => {
+    const product = `<form action="/cart/add"><button>Add to cart</button></form>`;
+    const result = await auditFixture(200, {
+      '/': `<script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view';</script><a href="/products/a">A</a><a href="/products/b">B</a>`,
+      '/products/a': product,
+      '/products/b': { status: 503, body: '<main>Temporarily unavailable</main>' }
+    }, true, ['tracking']);
+    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ outcome: string; observation_complete: boolean }> } };
+    expect(result.product_payload_status).toBe('inconclusive');
+    expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', observation_complete: true }),
+      expect.objectContaining({ outcome: 'OBSERVATION_INCOMPLETE', observation_complete: false })
+    ]));
+  }, 45_000);
+
+  it('PRODUCT-RUNTIME-04 does not wait for DOMContentLoaded when committed PDP semantics are already ready', async () => {
+    const result = await auditFixture(200, {
+      '/': `<a href="/products/stalled">Stalled</a>`,
+      '/products/stalled': `<form action="/cart/add"><button>Add to cart</button></form><script>window.dataLayer=[{event:'view_item', ecommerce:{items:[{item_id:'stalled', item_name:'Stalled'}]}}]</script><script src="/dcl-stall.js"></script>`,
+      '/dcl-stall.js': null
+    }, true, ['tracking']);
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    expect(result.product_payload_status).toBe('pass');
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_domcontentloaded_bypassed_for_semantic_readiness' })]));
+    expect(trace).not.toEqual(expect.arrayContaining([expect.objectContaining({ step: 'domcontentloaded_wait_timed_out_continuing', phase: 'product_pdp_load' })]));
+  }, 45_000);
+
+  it('PRODUCT-RUNTIME-05 waits for slow JS hydration when initial product semantics are absent', async () => {
+    const result = await auditFixture(200, {
+      '/': `<a href="/products/hydrated">Hydrated</a>`,
+      '/products/hydrated': `<main id="app">Loading</main><script>setTimeout(() => { document.querySelector('#app').innerHTML = '<form action="/cart/add"><button>Add to cart</button></form>'; window.dataLayer=[{event:"view_item", ecommerce:{items:[{item_id:"hydrated", item_name:"Hydrated"}]}}]; }, 300)</script>`
+    }, true, ['tracking']);
+    expect(result.product_payload_status).toBe('pass');
+    expect((result.evidence_bundle as { product: { candidate_outcomes: Array<{ outcome: string }> } }).product.candidate_outcomes)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' })]));
   }, 45_000);
 
   it('ACCEPT-E2E-01 runs clean-context Accept for Tracking-only and retains post-Accept view_item', async () => {

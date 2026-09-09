@@ -1349,7 +1349,7 @@ export async function runStorefrontAudit(
     merged.qa_priority = calculateQaPriority(merged, completedEvidence, merged.consistency_violations || []);
     trace.push({
       step: 'scan_finalized',
-      status: 'completed',
+      status: finalStatus,
       module: 'runtime',
       severity: finalError !== 'none' ? 'error' : 'success',
       scan_status: finalStatus,
@@ -2137,6 +2137,8 @@ export async function runStorefrontAudit(
     // never a replacement for the global audit deadline.
     const productDeadline = Math.min(startedMs + timeoutMs - 2_000, productStarted + Math.min(TRACKING_PRODUCT_MODULE_BUDGET_MS, runtimeBudget.requiredAllowance(PDP_MIN_TRACKING_OBSERVATION_MS)));
     const productBudgetRemaining = () => Math.max(0, productDeadline - Date.now());
+    const productRuntime = evidence.product.product_runtime!;
+    productRuntime.product_budget_ms = Math.max(0, productDeadline - productStarted);
     const checkProductBudget = () => {
       check();
       if (productBudgetRemaining() <= 0) throw new PhaseTimeout('tracking_product');
@@ -2172,6 +2174,7 @@ export async function runStorefrontAudit(
         evidence.product.candidate_attempted_count = 0;
         evidence.product.candidate_completed_count = 0;
         evidence.product.candidate_promoted_count = 0;
+        productRuntime.discovery_ms = Date.now() - productStarted;
         if (discovery.sitemap_enrichment_status !== 'completed') addTrace('product_sitemap_enrichment_incomplete', {
           status: discovery.sitemap_enrichment_status,
           homepage_candidate_count: discovery.homepage_candidate_count,
@@ -2299,6 +2302,13 @@ export async function runStorefrontAudit(
       const maxPdpCandidates = Math.min(3, pdpCandidateAttemptLimit);
       const candidateQueue = [...pdpCandidates];
       const knownCandidateUrls = new Set(candidateQueue.map((candidate) => candidate.url));
+      const isMeaningfulAlternate = (queued: DiscoveredPdpCandidate) =>
+        queued.source === 'product_sitemap' || queued.source === 'promoted_child' ||
+        queued.score >= 60 || isStrongProductPath(queued.url);
+      // This covers committed navigation, a semantic pass, and the required
+      // minimum observation for one next meaningful PDP without enlarging the
+      // product module or global audit budget.
+      const nextCandidateReserveMs = PDP_MIN_TRACKING_OBSERVATION_MS + 4_000;
       const recordCandidateOutcome = (outcome: NonNullable<EvidenceBundle['product']['candidate_outcomes']>[number]) => {
         evidence.product.candidate_outcomes?.push(outcome);
         evidence.product.candidate_completed_count = (evidence.product.candidate_completed_count || 0) + 1;
@@ -2322,6 +2332,8 @@ export async function runStorefrontAudit(
         }
         currentPhase = 'product_pdp_load';
         evidence.product.candidate_attempted_count = (evidence.product.candidate_attempted_count || 0) + 1;
+        const candidateStarted = Date.now();
+        let candidateNavigationElapsedMs = 0;
         const viewItemStart = evidence.product.ga4_view_item_hits.length;
         const dataLayerViewItemStart = (evidence.product.data_layer_view_item_hits || []).length;
         addTrace('pdp_navigation_started', {
@@ -2347,6 +2359,8 @@ export async function runStorefrontAudit(
               candidate_url: safeUrl(pdpUrl), current_url: safeUrl(pdpPage!.url()), candidate_attempt: candidateIndex + 1
             });
           }
+          candidateNavigationElapsedMs = Date.now() - candidateStarted;
+          productRuntime.candidate_navigation_ms += candidateNavigationElapsedMs;
           const finalPdpUrl = safeUrl(pdpPage!.url()) || safeUrl(pdpUrl)!;
           evidence.product.candidate_url = safeUrl(pdpUrl);
           evidence.product.final_pdp_url = finalPdpUrl;
@@ -2358,9 +2372,6 @@ export async function runStorefrontAudit(
             pdpNavigationCommitted = true;
             evidence.product.observation!.pdp_navigation_committed = true;
           }
-          pdpOperation = 'pdp_domcontentloaded';
-          await waitForDomContentSoft(pdpPage, 'product_pdp_load', 12_000);
-          checkProductBudget();
           pdpOperation = 'pdp_access_inspection';
           const pdpAccess = await inspectPageAccess(pdpPage, pdpResponse, evidence, [...accessNetworkSignals]);
           if ((!navigationTimedOut && !isValidStorefrontStatus(pdpResponse?.status() || null)) || pdpAccess.category !== 'none') {
@@ -2373,9 +2384,6 @@ export async function runStorefrontAudit(
             });
             throw new Error(`PDP access invalid (${pdpAccess.reasonCode})`);
           }
-          pdpOperation = 'pdp_settlement_wait';
-          await wait(750, pdpPage);
-          checkProductBudget();
           pdpOperation = 'pdp_candidate_assessment';
           let assessmentUnavailable = false;
           let assessment: Awaited<ReturnType<typeof inspectPdpCandidate>>;
@@ -2402,6 +2410,36 @@ export async function runStorefrontAudit(
               candidate_attempt: candidateIndex + 1,
               error_family: runtimeErrorFamily(error)
             });
+          }
+          // Commit plus strong PDP semantics is sufficient to begin the
+          // bounded observation. A slow JS storefront remains on the soft
+          // DOMContentLoaded path until it exposes that semantic evidence.
+          if (pdpNavigationCommitted && !assessmentUnavailable && assessment.pdp_semantic_strength) {
+            addTrace('pdp_domcontentloaded_bypassed_for_semantic_readiness', {
+              pdp_url: finalPdpUrl,
+              candidate_attempt: candidateIndex + 1,
+              navigation_elapsed_ms: candidateNavigationElapsedMs
+            });
+          } else {
+            pdpOperation = 'pdp_domcontentloaded';
+            await waitForDomContentSoft(pdpPage, 'product_pdp_load', Math.max(1, Math.min(12_000, productBudgetRemaining())));
+            checkProductBudget();
+            pdpOperation = 'pdp_settlement_wait';
+            await wait(Math.min(750, productBudgetRemaining()), pdpPage);
+            checkProductBudget();
+            pdpOperation = 'pdp_candidate_assessment';
+            try {
+              assessment = await inspectPdpCandidate(pdpPage);
+              assessmentUnavailable = false;
+            } catch (error) {
+              assessmentUnavailable = true;
+              evidence.runtime.failed_phase ||= 'product_pdp_assessment';
+              addTrace('pdp_candidate_assessment_failed', {
+                pdp_url: safeUrl(pdpUrl),
+                candidate_attempt: candidateIndex + 1,
+                error_family: runtimeErrorFamily(error)
+              });
+            }
           }
           check();
           if (!assessmentUnavailable) {
@@ -2554,31 +2592,65 @@ export async function runStorefrontAudit(
           addTrace('pdp_hydration_engagement_completed', { interaction: 'bounded_scroll' });
           pdpOperation = 'pdp_post_load_observation';
           addTrace('pdp_post_load_observation_started', {
-            wait_ms: PDP_POST_LOAD_OBSERVATION_MS,
+            wait_ms: PDP_MIN_TRACKING_OBSERVATION_MS,
             minimum_tracking_settlement_ms: PDP_MIN_TRACKING_OBSERVATION_MS
           });
           const observationStart = Date.now();
           evidence.product.observation!.observation_started_at = observationStart;
-          while (Date.now() - observationStart < PDP_POST_LOAD_OBSERVATION_MS) {
-            const latest = candidateViewItemHits();
-            if (latest.some((hit) => hit.has_product) && Date.now() - observationStart >= PDP_MIN_TRACKING_OBSERVATION_MS) break;
+          while (Date.now() - observationStart < PDP_MIN_TRACKING_OBSERVATION_MS) {
             await wait(100, pdpPage);
             checkProductBudget();
           }
+          const minimumObservationMs = Date.now() - observationStart;
           pdpOperation = 'pdp_data_layer_capture';
           const dataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector);
           if (dataLayerCaptured > 0) addTrace('ga4_data_layer_view_item_captured', { phase: 'product_pdp_load', count: dataLayerCaptured });
           pdpOperation = 'pdp_performance_capture';
           const pdpTimingRecovered = await capturePerformanceTrackingRequests(pdpPage, 'product_pdp_load', evidenceCollector);
           if (pdpTimingRecovered > 0) addTrace('performance_tracking_requests_recovered', { phase: 'product_pdp_load', count: pdpTimingRecovered });
+          let finalNetworkViewItems = candidateNetworkViewItemHits();
+          let finalDataLayerViewItems = candidateDataLayerViewItemHits();
+          let finalViewItems = [...finalNetworkViewItems, ...finalDataLayerViewItems];
+          let candidateHasViewItem = finalViewItems.some((hit) => hit.has_product);
+          const strongAlternateQueued = candidateQueue.slice(candidateIndex + 1, maxPdpCandidates)
+            .some(isMeaningfulAlternate);
+          let extendedObservationUsed = false;
+          if (!candidateHasViewItem) {
+            if (strongAlternateQueued && productBudgetRemaining() >= nextCandidateReserveMs) {
+              addTrace('pdp_extended_observation_skipped_for_reserve', {
+                pdp_url: finalPdpUrl,
+                candidate_attempt: candidateIndex + 1,
+                remaining_ms: productBudgetRemaining(),
+                reserve_ms: nextCandidateReserveMs
+              });
+            } else {
+              extendedObservationUsed = true;
+              addTrace('pdp_extended_observation_started', {
+                pdp_url: finalPdpUrl,
+                candidate_attempt: candidateIndex + 1,
+                max_observation_ms: PDP_POST_LOAD_OBSERVATION_MS,
+                reserve_reason: strongAlternateQueued ? 'reserve_unavailable' : 'no_meaningful_alternate'
+              });
+              while (Date.now() - observationStart < PDP_POST_LOAD_OBSERVATION_MS) {
+                const latest = candidateViewItemHits();
+                if (latest.some((hit) => hit.has_product)) break;
+                await wait(100, pdpPage);
+                checkProductBudget();
+              }
+              pdpOperation = 'pdp_data_layer_capture';
+              await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector);
+              pdpOperation = 'pdp_performance_capture';
+              await capturePerformanceTrackingRequests(pdpPage, 'product_pdp_load', evidenceCollector);
+              finalNetworkViewItems = candidateNetworkViewItemHits();
+              finalDataLayerViewItems = candidateDataLayerViewItemHits();
+              finalViewItems = [...finalNetworkViewItems, ...finalDataLayerViewItems];
+              candidateHasViewItem = finalViewItems.some((hit) => hit.has_product);
+            }
+          }
           evidence.product.observation_ms = Date.now() - observationStart;
           evidence.product.observation!.observation_elapsed_ms = evidence.product.observation_ms;
           evidence.product.observation!.minimum_observation_satisfied = evidence.product.observation_ms >= PDP_MIN_TRACKING_OBSERVATION_MS;
-          const finalNetworkViewItems = candidateNetworkViewItemHits();
-          const finalDataLayerViewItems = candidateDataLayerViewItemHits();
-          const finalViewItems = [...finalNetworkViewItems, ...finalDataLayerViewItems];
-          const candidateHasViewItem = finalViewItems.some((hit) => hit.has_product);
-          recordCandidateOutcome({
+          const candidateOutcome: NonNullable<EvidenceBundle['product']['candidate_outcomes']>[number] = {
             url: finalPdpUrl,
             final_url: finalPdpUrl,
             rank: candidateIndex + 1,
@@ -2590,12 +2662,20 @@ export async function runStorefrontAudit(
             data_layer_capture_complete: evidence.network.observation?.data_layer_capture_completed === true,
             performance_capture_complete: evidence.network.observation?.performance_capture_completed === true,
             observation_elapsed_ms: evidence.product.observation_ms,
+            navigation_elapsed_ms: candidateNavigationElapsedMs,
+            minimum_observation_ms: minimumObservationMs,
+            extended_observation_ms: Math.max(0, evidence.product.observation_ms - minimumObservationMs),
+            diagnostic_overhead_ms: 0,
+            extended_observation_used: extendedObservationUsed,
             view_item_detected: candidateHasViewItem,
             strong_commerce_signals: Object.entries(assessment.signals).filter(([key, value]) => value && ['json_ld_product', 'og_product', 'product_form', 'enabled_add_to_cart', 'structured_in_stock', 'structured_out_of_stock', 'disabled_sold_out_control'].includes(key)).map(([key]) => key),
             supporting_signals: Object.entries(assessment.signals).filter(([key, value]) => value && ['visible_product_heading', 'visible_price', 'unavailable_message'].includes(key)).map(([key]) => key),
             reason_code: candidateHasViewItem ? 'GA4_VIEW_ITEM_VALID' : 'GA4_NO_VIEW_ITEM',
             outcome: candidateHasViewItem ? 'VALID_PRODUCT_WITH_VIEW_ITEM' : 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'
-          });
+          };
+          recordCandidateOutcome(candidateOutcome);
+          productRuntime.minimum_observation_ms += minimumObservationMs;
+          productRuntime.extended_observation_ms += candidateOutcome.extended_observation_ms || 0;
           // EvidenceCollector is append-only. Candidate-local slices above are
           // used for classification; later failures must never erase a prior hit.
           if (candidateHasViewItem) {
@@ -2609,19 +2689,37 @@ export async function runStorefrontAudit(
             });
             addTrace('product_payload_status_decision', { status: 'pass', reason_code: 'GA4_VIEW_ITEM_VALID' });
           }
-          pdpOperation = 'pdp_installation_capture';
-          const pdpHtml = await pdpPage.content().catch(() => '');
-          await capturePageTrackingInstallations(pdpPage, pdpHtml, 'product_pdp_load', evidenceCollector);
-          check();
-          if (evidence.mode === 'diagnostic') {
+          const diagnosticStarted = Date.now();
+          if (productBudgetRemaining() > 750) {
+            pdpOperation = 'pdp_installation_capture';
+            const pdpHtml = await pdpPage.content().catch(() => '');
+            await capturePageTrackingInstallations(pdpPage, pdpHtml, 'product_pdp_load', evidenceCollector);
+          } else {
+            addTrace('pdp_optional_diagnostics_deferred', { candidate_attempt: candidateIndex + 1, remaining_ms: productBudgetRemaining() });
+          }
+          checkProductBudget();
+          if (evidence.mode === 'diagnostic' && productBudgetRemaining() > 1_000) {
             const image = await pdpPage.screenshot({ type: 'jpeg', quality: 55, fullPage: false }).catch(() => null);
             if (image) evidenceCollector.addScreenshot({ name: 'pdp.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
           }
+          candidateOutcome.diagnostic_overhead_ms = Date.now() - diagnosticStarted;
+          productRuntime.diagnostic_overhead_ms += candidateOutcome.diagnostic_overhead_ms;
+          productRuntime.candidate_total_ms += Date.now() - candidateStarted;
           if (candidateHasViewItem) break;
           addTrace('pdp_candidate_complete_without_view_item', {
             pdp_url: finalPdpUrl, candidate_attempt: candidateIndex + 1,
             remaining_candidate_attempts: maxPdpCandidates - candidateIndex - 1
           });
+          const completeNegativeCandidates = (evidence.product.candidate_outcomes || []).filter((outcome) =>
+            outcome.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' && outcome.observation_complete === true
+          ).length;
+          if (completeNegativeCandidates >= 2) {
+            addTrace('pdp_negative_evidence_sufficient', {
+              completed_candidates: completeNegativeCandidates,
+              reason_code: 'GA4_NO_VIEW_ITEM'
+            });
+            break;
+          }
           continue;
         } catch (error) {
           if (error instanceof ScanTermination) throw error;
@@ -2711,6 +2809,8 @@ export async function runStorefrontAudit(
       }
     }
     evidence.runtime.module_durations_ms.product = Date.now() - productStarted;
+    productRuntime.product_total_ms = evidence.runtime.module_durations_ms.product;
+    if (productRuntime.discovery_ms === 0) productRuntime.discovery_ms = Math.min(productRuntime.product_total_ms, Date.now() - productStarted);
     } else {
       addTrace('tracking_module_skipped');
     }
@@ -2882,7 +2982,7 @@ export async function runStorefrontAudit(
         strict_duplicate_count: classification.strict_duplicate_count
       });
       addTrace('ss_collection_type_decision', { ss_collection_type: classification.collection_type, reason_code: classification.reason_code });
-      addTrace('server_side_status_decision', { server_side_status: classification.status, reason_code: classification.reason_code });
+      addTrace('server_side_provisional_decision', { server_side_status: classification.status, reason_code: classification.reason_code });
     }
     evidence.runtime.module_durations_ms.server_side = Date.now() - serverStarted;
 

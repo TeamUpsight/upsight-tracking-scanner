@@ -171,6 +171,16 @@ export class EvidenceCollector {
         discovery_completed: undefined,
         discovery_inconclusive: undefined,
         candidate_outcomes: [],
+        product_runtime: {
+          discovery_ms: 0,
+          candidate_total_ms: 0,
+          candidate_navigation_ms: 0,
+          minimum_observation_ms: 0,
+          extended_observation_ms: 0,
+          diagnostic_overhead_ms: 0,
+          product_total_ms: 0,
+          product_budget_ms: 0
+        },
         observation: {
           pdp_navigation_committed: false,
           product_semantics_checked: false,

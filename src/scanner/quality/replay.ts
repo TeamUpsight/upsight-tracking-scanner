@@ -165,6 +165,9 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
       ['VALID_PRODUCT_WITH_VIEW_ITEM', 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'].includes(candidate.outcome))
     : candidateOutcomes.length === 0 && evidence.product.observation?.minimum_observation_satisfied === true &&
       evidence.product.observation.transport_failure !== true && evidence.product.observation.timeout !== true;
+  const completeNegativeCandidateCount = relevantCandidates.filter((candidate) =>
+    candidate.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' && candidate.observation_complete === true
+  ).length;
   const product = trackingSelected ? resolveProductPayloadStatus({
     executed: evidence.product.executed,
     page_valid: evidence.page.valid,
@@ -177,7 +180,9 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     runtime_failure: evidence.runtime.failed_phase?.startsWith('product_') === true,
     pdp_discovery_completed: evidence.product.discovery_inconclusive === true ? false : evidence.product.discovery_completed === true ? true : undefined,
     pdp_observation_complete: candidateObservationComplete,
-    ga4_observation_complete: trackingObservationEligible && candidateObservationComplete,
+    // Two complete, candidate-local negative checkpoints are sufficient
+    // product evidence even when an optional consent comparison is unresolved.
+    ga4_observation_complete: (trackingObservationEligible || completeNegativeCandidateCount >= 2) && candidateObservationComplete,
     product_applicability: productApplicability,
     candidate_outcomes: candidateOutcomes
   }) : { status: 'not_tested' as const, confidence: 'low' as const, evidence: [], reason_code: 'PRODUCT_NOT_TESTED' };

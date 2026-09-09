@@ -138,7 +138,13 @@ export function resolveProductPayloadStatus(input: {
   if (input.pdp_observation_complete !== true || !requiredCandidatesComplete) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'PDP_OBSERVATION_INCOMPLETE', evidence: ['observation_incomplete'] };
   }
-  if (input.consent_status === 'inconclusive') {
+  // A separate optional consent comparison cannot erase two independently
+  // complete, valid PDP negatives. One candidate (or any incomplete candidate)
+  // still remains conservative when consent evidence is unresolved.
+  const completeNegativeCandidateCount = productCandidates.filter((candidate) =>
+    candidate.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' && candidate.observation_complete === true
+  ).length;
+  if (input.consent_status === 'inconclusive' && completeNegativeCandidateCount < 2) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'CONSENT_INCONCLUSIVE', evidence: [] };
   }
   if ((input.site_ga4_detected || input.site_ga4_collection_hit_detected) && input.ga4_observation_complete === true) {
