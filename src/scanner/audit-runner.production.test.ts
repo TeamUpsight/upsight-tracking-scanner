@@ -143,6 +143,72 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(trace.filter((item) => item.step === 'pdp_candidate_tracking_observation_started')).toHaveLength(0);
   }, 45_000);
 
+  it('PRODUCT-CHILD-01 rejects legal and generic listing links while retaining strong product-card children', async () => {
+    const result = await auditFixture(200, {
+      '/': '<a href="/collections/top-picks">Top picks</a>',
+      '/collections/top-picks': `<main class="collection">
+        <article class="product-card" data-product-id="one"><a href="/products/one">Product one</a><span>£10</span></article>
+        <article class="product-card" data-product-id="two"><a href="/products/two">Product two</a><span>£12</span></article>
+        <article class="product-card"><a href="/zone/grocery-terms-and-conditions/">Terms and conditions</a><span>£1</span></article>
+        <article class="product-card"><a href="/promotions/weekly">Promotions</a><span>£1</span></article>
+        <a href="/help">Help</a><script>window.dataLayer=[{event:'view_item_list',ecommerce:{items:[{item_id:'one'},{item_id:'two'}]}}]</script>
+      </main>`,
+      '/products/one': `<form action="/cart/add"><button>Add to cart</button></form><script>window.dataLayer=[{event:'view_item', ecommerce:{items:[{item_id:'one',item_name:'One'}]}}]</script>`,
+      '/products/two': '<main>Not reached after confirmed first child</main>',
+      '/sitemap.xml': null
+    }, true, ['tracking']);
+    const evidence = result.evidence_bundle as { product: { pdp_candidates: string[]; candidate_promoted_count: number } };
+    expect(evidence.product.candidate_promoted_count).toBe(2);
+    expect(evidence.product.pdp_candidates.join(' ')).not.toMatch(/terms|promotions|help/);
+    expect(result.pdp_url_tested).toContain('/products/one');
+  }, 45_000);
+
+  it('PRODUCT-CHILD-02 and PRODUCT-CHILD-03 promote zero or one child without forcing the cap', async () => {
+    const noProduct = await auditFixture(200, {
+      '/': '<a href="/collections/legal">Legal collection</a>',
+      '/collections/legal': '<main class="collection"><article class="product-card"><a href="/zone/terms">Terms and conditions</a><span>£10</span></article><a href="/privacy">Privacy</a></main>',
+      '/sitemap.xml': null
+    }, true, ['tracking']);
+    const oneProduct = await auditFixture(200, {
+      '/': '<a href="/collections/one">One product</a>',
+      '/collections/one': `<main class="collection"><script>window.dataLayer=[{event:'view_item_list', ecommerce:{items:[{item_id:'one'}]}}]</script><article class="product-card" data-product-id="one"><a href="/products/one">Product one</a><span>£10</span></article><button>Add to cart</button><button>Add to cart</button><a href="/support">Support</a></main>`,
+      '/products/one': `<form action="/cart/add"><button>Add to cart</button></form><script>window.dataLayer=[{event:'view_item', ecommerce:{items:[{item_id:'one',item_name:'One'}]}}]</script>`,
+      '/sitemap.xml': null
+    }, true, ['tracking']);
+    expect((noProduct.evidence_bundle as { product: { candidate_promoted_count: number } }).product.candidate_promoted_count).toBe(0);
+    expect(noProduct.pdp_url_tested).toBeNull();
+    expect((oneProduct.evidence_bundle as { product: { candidate_promoted_count: number } }).product.candidate_promoted_count).toBe(1);
+    expect(oneProduct.pdp_url_tested).toContain('/products/one');
+  }, 60_000);
+
+  it('PDP-URL-01 through PDP-URL-03 persist only a confirmed PDP after later invalid candidates', async () => {
+    const product = '<form action="/cart/add"><button>Add to cart</button></form>';
+    const result = await auditFixture(200, {
+      '/': '<a href="/products/confirmed">Confirmed</a><a href="/products/not-a-product">Not a product</a>',
+      '/products/confirmed': product,
+      '/products/not-a-product': '<main>Terms and conditions</main>'
+    }, true, ['tracking']);
+    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ url: string; outcome: string; semantic_result?: string }> } };
+    expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ url: expect.stringContaining('/products/confirmed'), semantic_result: 'VALID_PRODUCT' }),
+      expect.objectContaining({ url: expect.stringContaining('/products/not-a-product'), outcome: 'INVALID_PRODUCT' })
+    ]));
+    expect(result.pdp_url_tested).toContain('/products/confirmed');
+    expect(result.pdp_url_tested).not.toContain('not-a-product');
+  }, 45_000);
+
+  it('ACCESS-01 preserves an Akamai PDP challenge as ACCESS_BLOCKED without persisting its URL', async () => {
+    const result = await auditFixture(200, {
+      '/': '<a href="/products/blocked">Blocked product</a>',
+      '/products/blocked': { status: 403, body: '<title>Access denied</title><main class="akamai">Akamai request blocked</main>' }
+    }, true, ['tracking']);
+    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ outcome: string; reason_code?: string }> } };
+    expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ outcome: 'ACCESS_BLOCKED', reason_code: 'AKAMAI_CHALLENGE' })
+    ]));
+    expect(result.pdp_url_tested).toBeNull();
+  }, 45_000);
+
   it('RUNNER-DISABLED-01 keeps the full runner on the legacy detector without an interaction', async () => {
     const result = await auditFixture(200, oneTrust, false);
     const trace = JSON.parse(String(result.trace_steps));

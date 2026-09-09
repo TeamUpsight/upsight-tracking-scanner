@@ -109,6 +109,14 @@ class PhaseTimeout extends Error {
   }
 }
 
+/** A candidate may be reachable enough to identify a known challenge, but it
+ * must never be flattened into an unrelated navigation error. */
+class PdpAccessBlocked extends Error {
+  constructor(readonly decision: AccessDecision) {
+    super(`PDP access blocked (${decision.reasonCode})`);
+  }
+}
+
 function isPhaseTimeout(error: unknown): error is PhaseTimeout {
   return error instanceof PhaseTimeout;
 }
@@ -862,18 +870,43 @@ type CandidateSource = 'homepage_link' | 'sitemap' | 'product_sitemap' | 'promot
 type DiscoveredPdpCandidate = { url: string; score: number; source: CandidateSource; sources: CandidateSource[]; promoted_from?: string | null };
 type PdpDiscoveryResult = { candidates: DiscoveredPdpCandidate[]; homepage_candidate_count: number; sitemap_candidate_count: number; sitemap_enrichment_status: 'completed' | 'timed_out' | 'failed' | 'not_attempted' };
 
+const GENERIC_LISTING_CHILD_PATH = /\/(?:terms?|conditions?|privacy|legal|help|faq|support|zone|categories?|promotions?|collections?|search|account|login|delivery|stores?|store-locator|brands?)(?:\/|$)/i;
+const GENERIC_LISTING_CHILD_LABEL = /\b(?:terms?(?:\s+and\s+conditions)?|privacy|legal|help|faq|support|promotions?|collections?|search|account|log\s*in|delivery|store\s*locator|brands?)\b/i;
+
 async function discoverListingChildren(page: Page, domain: string, check: () => void, parentUrl: string): Promise<DiscoveredPdpCandidate[]> {
   const links = await page.$$eval('a[href]', (elements) => elements.map((element) => {
     const card = element.closest('[data-product-id], [data-product-card], .product-card, .product-item, li.product, [class*="product-card" i]');
     const context = `${card?.textContent || ''} ${(element.textContent || '')}`.trim().slice(0, 300);
-    return { href: (element as HTMLAnchorElement).href, text: context, product_card: Boolean(card) };
-  })).catch(() => [] as Array<{ href: string; text: string; product_card: boolean }>);
+    const label = (element.textContent || '').trim().slice(0, 160);
+    const cardText = (card?.textContent || '').trim().slice(0, 500);
+    const cardTitle = card?.querySelector('[data-product-title], .product-title, .product-name, [class*="product-title" i], h2, h3, h4')?.textContent?.trim() || label;
+    const hasPrice = /(?:[$£€]\s?\d[\d,.]*|\d[\d,.]*\s?(?:usd|gbp|eur))\b/i.test(cardText);
+    const hasAddToCart = Boolean(card?.querySelector('form[action*="/cart/add"] button, button[name*="add" i], button[class*="add-to-cart" i], [data-add-to-cart]'));
+    const hasProductIdentity = Boolean(card?.querySelector('[data-product-id], [data-product-sku], [data-sku], [data-item-id]'));
+    return {
+      href: (element as HTMLAnchorElement).href,
+      text: context,
+      label,
+      product_card: Boolean(card),
+      product_identity: hasProductIdentity,
+      title_and_price: Boolean(cardTitle && cardTitle.length >= 2 && hasPrice),
+      add_to_cart: hasAddToCart
+    };
+  })).catch(() => [] as Array<{ href: string; text: string; label: string; product_card: boolean; product_identity: boolean; title_and_price: boolean; add_to_cart: boolean }>);
   check();
   const best = new Map<string, number>();
   for (const link of links) {
     const url = canonicalPdpCandidate(link.href, domain)?.toString();
     if (!url) continue;
-    const score = scorePdpCandidate(url, domain, { source: 'homepage_link', linkText: link.text }) + (link.product_card ? 30 : 0);
+    const pathname = new URL(url).pathname;
+    // Legal, navigational, and category links can live inside visual cards.
+    // Card containment alone is deliberately not product identity.
+    if (GENERIC_LISTING_CHILD_PATH.test(pathname) || GENERIC_LISTING_CHILD_LABEL.test(link.label)) continue;
+    const directProductUrl = Boolean(productPatternPdpCandidate(url, domain));
+    const strongCardAssociation = link.product_card && (link.product_identity || link.title_and_price || link.add_to_cart);
+    if (!directProductUrl && !strongCardAssociation) continue;
+    const score = scorePdpCandidate(url, domain, { source: 'homepage_link', linkText: link.text }) +
+      (strongCardAssociation ? 30 : 0) + (directProductUrl ? 20 : 0);
     if (score < 20) continue;
     best.set(url, Math.max(score, best.get(url) ?? Number.NEGATIVE_INFINITY));
   }
@@ -2374,7 +2407,17 @@ export async function runStorefrontAudit(
           }
           pdpOperation = 'pdp_access_inspection';
           const pdpAccess = await inspectPageAccess(pdpPage, pdpResponse, evidence, [...accessNetworkSignals]);
-          if ((!navigationTimedOut && !isValidStorefrontStatus(pdpResponse?.status() || null)) || pdpAccess.category !== 'none') {
+          if (pdpAccess.category !== 'none') {
+            addTrace('pdp_access_invalid', {
+              pdp_url: safeUrl(pdpUrl),
+              status: pdpResponse?.status() || null,
+              error_category: pdpAccess.category,
+              reason_code: pdpAccess.reasonCode,
+              bot_provider: pdpAccess.botProvider
+            });
+            throw new PdpAccessBlocked(pdpAccess);
+          }
+          if (!navigationTimedOut && !isValidStorefrontStatus(pdpResponse?.status() || null)) {
             addTrace('pdp_access_invalid', {
               pdp_url: safeUrl(pdpUrl),
               status: pdpResponse?.status() || null,
@@ -2729,19 +2772,23 @@ export async function runStorefrontAudit(
             addTrace('tracking_product_budget_exhausted', { reason_code: 'TRACKING_PRODUCT_TIMEOUT', candidate_attempt: candidateIndex + 1 });
             break;
           }
+          const accessBlocked = error instanceof PdpAccessBlocked ? error.decision : null;
           const connectionFailure = classifyBrowserConnectionError(error);
+          const reasonCode = accessBlocked
+            ? accessBlocked.reasonCode
+            : isProxyFailure(error) ? connectionFailure : isNavigationTimeout(error) ? 'PDP_NAV_TIMEOUT' : 'PDP_NAV_ERROR';
           addTrace('pdp_candidate_navigation_failed', {
             pdp_url: safeUrl(pdpUrl),
             candidate_attempt: candidateIndex + 1,
-            reason: isProxyFailure(error) ? 'Proxy transport failed during PDP navigation' : safeUnhandledFailureReason(error),
-            reason_code: isProxyFailure(error) ? connectionFailure : isNavigationTimeout(error) ? 'PDP_NAV_TIMEOUT' : 'PDP_NAV_ERROR',
-            error_family: runtimeErrorFamily(error),
+            reason: accessBlocked ? 'PDP access challenge detected' : isProxyFailure(error) ? 'Proxy transport failed during PDP navigation' : safeUnhandledFailureReason(error),
+            reason_code: reasonCode,
+            error_family: accessBlocked ? 'ACCESS_BLOCKED' : runtimeErrorFamily(error),
             navigation_code: classifyNavigationError(error),
             operation: pdpOperation,
             page_closed: pdpPage.isClosed()
           });
-          const outcome = isNavigationTimeout(error) ? 'TIMEOUT' as const : isProxyFailure(error) ? 'TRANSPORT_FAILED' as const : 'OBSERVATION_INCOMPLETE' as const;
-          recordCandidateOutcome({ url: safeUrl(pdpUrl) || pdpUrl, rank: candidateIndex + 1, score: candidate.score, source: candidate.source, sources: candidate.sources, promoted_from: candidate.promoted_from || null, page_role: 'UNKNOWN', navigation_complete: false, observation_complete: false, reason_code: outcome === 'TIMEOUT' ? 'PDP_NAV_TIMEOUT' : 'PDP_OBSERVATION_INCOMPLETE', outcome });
+          const outcome = accessBlocked ? 'ACCESS_BLOCKED' as const : isNavigationTimeout(error) ? 'TIMEOUT' as const : isProxyFailure(error) ? 'TRANSPORT_FAILED' as const : 'OBSERVATION_INCOMPLETE' as const;
+          recordCandidateOutcome({ url: safeUrl(pdpUrl) || pdpUrl, final_url: evidence.product.final_pdp_url, rank: candidateIndex + 1, score: candidate.score, source: candidate.source, sources: candidate.sources, promoted_from: candidate.promoted_from || null, page_role: 'UNKNOWN', navigation_complete: false, observation_complete: false, reason_code: accessBlocked ? accessBlocked.reasonCode : outcome === 'TIMEOUT' ? 'PDP_NAV_TIMEOUT' : outcome === 'TRANSPORT_FAILED' ? connectionFailure : 'PDP_OBSERVATION_INCOMPLETE', outcome });
           if (outcome === 'TRANSPORT_FAILED') evidence.product.observation!.transport_failure = true;
           if (outcome === 'TIMEOUT') evidence.product.observation!.timeout = true;
           if (isProxyFailure(error) && proxyAttempt < maxProxyRetries) {

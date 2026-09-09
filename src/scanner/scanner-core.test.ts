@@ -1498,6 +1498,21 @@ describe('decision hardening regression pack', () => {
     expect(result.evidence_bundle?.decision_summary?.find((item) => item.decision_name === 'product_payload')).toMatchObject({ applicable: true, observation_complete: true });
   });
 
+  it('PDP-URL-REPLAY-01 never projects a listing, invalid page, or access-blocked candidate as pdp_url_tested', () => {
+    const evidence = baseEvidence('pdp-url.example');
+    evidence.selected_modules = ['tracking']; evidence.page.valid = true; evidence.product.executed = true;
+    evidence.product.pdp_candidates = ['https://pdp-url.example/collections/all', 'https://pdp-url.example/products/confirmed', 'https://pdp-url.example/zone/terms'];
+    evidence.product.final_pdp_url = evidence.product.pdp_candidates[2];
+    evidence.product.pdp_url = evidence.product.pdp_candidates[1];
+    evidence.product.navigation_succeeded = true;
+    evidence.product.candidate_outcomes = [
+      { url: evidence.product.pdp_candidates[0], page_role: 'PRODUCT_LISTING', semantic_result: 'PRODUCT_LISTING', navigation_complete: true, observation_complete: true, outcome: 'PRODUCT_LISTING' },
+      { url: evidence.product.pdp_candidates[1], final_url: evidence.product.pdp_candidates[1], page_role: 'PDP', semantic_result: 'VALID_PRODUCT', navigation_complete: true, observation_complete: true, outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' },
+      { url: evidence.product.pdp_candidates[2], final_url: evidence.product.pdp_candidates[2], page_role: 'UNKNOWN', navigation_complete: false, observation_complete: false, reason_code: 'AKAMAI_CHALLENGE', outcome: 'ACCESS_BLOCKED' }
+    ];
+    expect(replayEvidence(evidence).pdp_url_tested).toBe('https://pdp-url.example/products/confirmed');
+  });
+
   it('keeps server absence independent of DataLayer and performance capture', () => {
     const evidence = baseEvidence('server-independence.example');
     evidence.selected_modules = ['server_side']; evidence.page.valid = true; evidence.server_side.executed = true;

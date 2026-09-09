@@ -155,6 +155,21 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     technical_blocker_reason: evidence.consent.technical_blocker_reason
   }) : { status: 'not_tested' as const, confidence: 'low' as const, evidence: [], reason_code: 'CONSENT_NOT_TESTED' };
   const candidateOutcomes = evidence.product.candidate_outcomes || [];
+  // The product evidence is append-only, so a later rejected candidate may be
+  // the browser's final URL. Persist only the most recent confirmed PDP, never
+  // a listing, legal page, failed navigation, or access challenge.
+  const confirmedPdpCandidate = [...candidateOutcomes].reverse().find((candidate) =>
+    candidate.semantic_result === 'VALID_PRODUCT' &&
+    candidate.navigation_complete === true &&
+    (candidate.page_role === 'PDP' || ['VALID_PRODUCT_WITH_VIEW_ITEM', 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'].includes(candidate.outcome))
+  );
+  // Bundles produced before candidate outcomes existed stored the selected PDP
+  // directly. Retain that compatible, already-confirmed representation only
+  // when there is no candidate-level evidence to contradict it.
+  const confirmedPdpUrl = confirmedPdpCandidate?.final_url || confirmedPdpCandidate?.url ||
+    (candidateOutcomes.length === 0 && evidence.product.navigation_succeeded === true
+      ? evidence.product.final_pdp_url || evidence.product.pdp_url
+      : null);
   const positiveProductEvidence = [...evidence.product.ga4_view_item_hits, ...dataLayerViewItems].some((hit) => hit.event === 'view_item' && hit.has_product) ||
     candidateOutcomes.some((candidate) => candidate.semantic_result === 'VALID_PRODUCT' || candidate.outcome === 'VALID_PRODUCT_WITH_VIEW_ITEM' || candidate.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM');
   const productApplicability = positiveProductEvidence ? 'applicable' : evidence.product.applicability || (evidence.product.pdp_candidates.length > 0 || evidence.product.pdp_url ? 'applicable' : 'inconclusive');
@@ -208,7 +223,7 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     consent_status: consent.status,
     cmp_provider: consentSelected ? cmp.provider : null,
     product_payload_status: product.status,
-    pdp_url_tested: trackingSelected ? evidence.product.final_pdp_url || evidence.product.pdp_url : null,
+    pdp_url_tested: trackingSelected ? confirmedPdpUrl : null,
     server_side_status: server.status,
     ss_collection_type: server.collection_type,
     site_ga4_detected: trackingSelected && evidence.page.valid === true ? ga4Installed ? true : trackingObservationEligible ? false : null : null,

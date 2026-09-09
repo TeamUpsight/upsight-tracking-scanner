@@ -328,7 +328,7 @@ export interface EvidenceBundle {
       extended_observation_used?: boolean;
       view_item_detected?: boolean;
       reason_code?: string;
-      outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' | 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' | 'INVALID_PRODUCT' | 'PRODUCT_LISTING' | 'TRANSPORT_FAILED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT';
+      outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' | 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' | 'INVALID_PRODUCT' | 'PRODUCT_LISTING' | 'TRANSPORT_FAILED' | 'ACCESS_BLOCKED' | 'OBSERVATION_INCOMPLETE' | 'TIMEOUT';
     }>;
     observation?: {
       pdp_navigation_committed: boolean;
