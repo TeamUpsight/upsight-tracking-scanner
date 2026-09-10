@@ -2407,7 +2407,10 @@ export async function runStorefrontAudit(
           }
           pdpOperation = 'pdp_access_inspection';
           const pdpAccess = await inspectPageAccess(pdpPage, pdpResponse, evidence, [...accessNetworkSignals]);
-          if (pdpAccess.category !== 'none') {
+          // Only a detected bot challenge has a canonical provider reason to
+          // preserve. Other invalid HTTP responses retain their established
+          // incomplete-observation classification.
+          if (pdpAccess.category === 'bot_protection') {
             addTrace('pdp_access_invalid', {
               pdp_url: safeUrl(pdpUrl),
               status: pdpResponse?.status() || null,
@@ -2417,7 +2420,7 @@ export async function runStorefrontAudit(
             });
             throw new PdpAccessBlocked(pdpAccess);
           }
-          if (!navigationTimedOut && !isValidStorefrontStatus(pdpResponse?.status() || null)) {
+          if ((!navigationTimedOut && !isValidStorefrontStatus(pdpResponse?.status() || null)) || pdpAccess.category !== 'none') {
             addTrace('pdp_access_invalid', {
               pdp_url: safeUrl(pdpUrl),
               status: pdpResponse?.status() || null,
