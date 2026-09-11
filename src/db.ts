@@ -1,5 +1,5 @@
 import pg from 'pg';
-import type { AuditModule, AuditQueueOptions, QaFeedback, ScanMode, StorefrontAudit } from './types';
+import type { AuditListFilter, AuditListQuery, AuditListResponse, AuditModule, AuditQueueOptions, AuditSummary, QaFeedback, ScanMode, StorefrontAudit } from './types';
 import { selectedAuditModules } from './audit-modules';
 import { normalizeQueueOptions } from './audit-lifecycle';
 import { boundedInteger } from './shared/config';
@@ -14,6 +14,89 @@ const AUDIT_COLUMNS = new Set([
   'site_meta_collection_hit_detected', 'evidence_bundle', 'finding_confidence', 'reason_codes',
   'failure_fingerprints', 'consistency_violations', 'qa_priority', 'qa_review_status', 'qa_reviewed_at', 'runtime_metrics'
 ]);
+
+// Keep history/list traffic small. Evidence and traces are only selected by getAudit().
+const AUDIT_SUMMARY_COLUMNS = [
+  'audit_id', 'domain', 'group_label', 'scan_started_at', 'scan_completed_at', 'scan_status', 'scan_mode',
+  'error_category', 'terminal_runtime_phase', 'terminal_reason_code', 'tested_geos', 'cms_platform_detected',
+  'overall_status', 'overall_confidence', 'consent_status', 'cmp_provider', 'product_payload_status',
+  'pdp_url_tested', 'server_side_status', 'ss_collection_type', 'site_ga4_detected',
+  'site_ga4_collection_hit_detected', 'site_google_ads_detected', 'site_meta_detected',
+  'site_meta_collection_hit_detected', 'failure_fingerprints', 'consistency_violations', 'qa_priority',
+  'qa_review_status', 'qa_reviewed_at'
+].join(', ');
+
+const AUDIT_EXPORT_COLUMNS = [
+  'audit_id', 'domain', 'group_label', 'scan_started_at', 'scan_completed_at', 'scan_status', 'scan_mode',
+  'selected_modules', 'error_category', 'terminal_runtime_phase', 'terminal_reason_code', 'tested_geos',
+  'cms_platform_detected', 'overall_status', 'overall_confidence', 'consent_status', 'cmp_provider',
+  'site_ga4_detected', 'site_ga4_measurement_ids', 'site_ga4_collection_hit_detected', 'site_meta_detected',
+  'site_meta_collection_hit_detected', 'product_payload_status', 'pdp_url_tested', 'server_side_status',
+  'ss_collection_type', 'reason_codes', 'failure_fingerprints', 'qa_priority'
+].join(', ');
+
+// Used by queue restoration and stale-audit requeueing; neither path needs evidence.
+const AUDIT_QUEUE_COLUMNS = [
+  'audit_id', 'domain', 'group_label', 'tested_geos', 'scan_status', 'scan_mode',
+  'selected_modules', 'queue_options'
+].join(', ');
+
+// Aggregate Quality metrics need access timing/attempts and a few runtime/page flags,
+// not the complete network, consent, product, screenshot, or trace payloads.
+const AUDIT_ANALYTICS_COLUMNS = `${AUDIT_SUMMARY_COLUMNS},
+  jsonb_strip_nulls(jsonb_build_object(
+    'geo', evidence_bundle -> 'geo',
+    'access', evidence_bundle -> 'access',
+    'page', jsonb_strip_nulls(jsonb_build_object(
+      'valid', evidence_bundle #> '{page,valid}',
+      'challenge_cleared', evidence_bundle #> '{page,challenge_cleared}',
+      'status_code', evidence_bundle #> '{page,status_code}',
+      'cross_domain_redirect_accepted', evidence_bundle #> '{page,cross_domain_redirect_accepted}'
+    ))
+  )) AS evidence_bundle,
+  jsonb_strip_nulls(jsonb_build_object(
+    'total_duration_ms', COALESCE(runtime_metrics -> 'total_duration_ms', evidence_bundle #> '{runtime,total_duration_ms}'),
+    'proxy_retry_count', COALESCE(runtime_metrics -> 'proxy_retry_count', evidence_bundle #> '{runtime,proxy_retry_count}'),
+    'proxy_retry_recovered', COALESCE(runtime_metrics -> 'proxy_retry_recovered', evidence_bundle #> '{runtime,proxy_retry_recovered}'),
+    'consent_v2', COALESCE(runtime_metrics -> 'consent_v2', evidence_bundle #> '{runtime,consent_v2}')
+  )) AS runtime_metrics`;
+
+const AUDIT_LIST_FILTERS = new Set<AuditListFilter>([
+  'all', 'review', 'failed', 'timeout', 'proxy', 'access', 'runtime', 'fallback_candidate',
+  'bot_unresolved', 'rate_limited', 'fallback_recovered', 'active'
+]);
+
+function toAuditSummary(audit: StorefrontAudit): AuditSummary {
+  const {
+    trace_steps: _traceSteps,
+    evidence_bundle: _evidenceBundle,
+    finding_confidence: _findingConfidence,
+    reason_codes: _reasonCodes,
+    runtime_metrics: _runtimeMetrics,
+    queue_options: _queueOptions,
+    selected_modules: _selectedModules,
+    site_ga4_measurement_ids: _measurementIds,
+    qa_priority_signals: _prioritySignals,
+    qa_feedback: _feedback,
+    ...summary
+  } = audit;
+  return summary;
+}
+
+function toAuditExport(audit: StorefrontAudit): StorefrontAudit {
+  const {
+    trace_steps: _traceSteps,
+    evidence_bundle: _evidenceBundle,
+    finding_confidence: _findingConfidence,
+    runtime_metrics: _runtimeMetrics,
+    queue_options: _queueOptions,
+    qa_priority_signals: _prioritySignals,
+    qa_feedback: _feedback,
+    consistency_violations: _consistencyViolations,
+    ...exportRow
+  } = audit;
+  return exportRow as StorefrontAudit;
+}
 
 export class AuditDatabase {
   private pool: pg.Pool | null = null;
@@ -290,7 +373,7 @@ export class AuditDatabase {
   async claimPendingAudit(id: string | number): Promise<StorefrontAudit | null> {
     if (this.pool) {
       const result = await this.pool.query(
-        `UPDATE storefront_audits_v2 SET scan_status = 'scanning', scan_started_at = NOW() WHERE audit_id = $1 AND scan_status = 'pending' RETURNING *`,
+        `UPDATE storefront_audits_v2 SET scan_status = 'scanning', scan_started_at = NOW() WHERE audit_id = $1 AND scan_status = 'pending' RETURNING audit_id, domain, group_label, tested_geos, scan_status`,
         [id]
       );
       return result.rows[0] || null;
@@ -310,7 +393,7 @@ export class AuditDatabase {
         `UPDATE storefront_audits_v2
          SET scan_status = $2, scan_started_at = $3, scan_completed_at = $4, trace_steps = $5
          WHERE audit_id = $1 AND scan_status = 'scanning'
-         RETURNING *`,
+         RETURNING ${AUDIT_QUEUE_COLUMNS}`,
         [id, updates.scan_status, updates.scan_started_at, updates.scan_completed_at, updates.trace_steps]
       );
       return result.rows[0] || null;
@@ -334,11 +417,87 @@ export class AuditDatabase {
     return audit ? { ...audit, qa_feedback: await this.getQaFeedback(id) } : null;
   }
 
-  async getAllAudits(limit = boundedInteger(process.env.AUDIT_LIST_LIMIT, 1000, 1, 5000)): Promise<StorefrontAudit[]> {
+  async getAuditPage(query: AuditListQuery = {}): Promise<AuditListResponse> {
+    const page = Math.max(1, Math.trunc(Number(query.page) || 1));
+    const pageSize = Math.max(1, Math.min(Math.trunc(Number(query.page_size) || 25), 100));
+    const filter = AUDIT_LIST_FILTERS.has(query.filter || 'all') ? query.filter || 'all' : 'all';
+    const search = String(query.search || '').trim().slice(0, 120);
+    const offset = (page - 1) * pageSize;
+    const params: unknown[] = [];
+    const where: string[] = [];
+    const add = (condition: string, value?: unknown) => {
+      if (value !== undefined) params.push(value);
+      where.push(condition.replace('?', `$${params.length}`));
+    };
+
+    if (search) {
+      const terms = Array.from({ length: 4 }, () => {
+        params.push(`%${search}%`);
+        return `$${params.length}`;
+      });
+      where.push(`(domain ILIKE ${terms[0]} OR COALESCE(group_label, '') ILIKE ${terms[1]} OR COALESCE(cms_platform_detected, '') ILIKE ${terms[2]} OR array_to_string(COALESCE(failure_fingerprints, ARRAY[]::TEXT[]), ' ') ILIKE ${terms[3]})`);
+    }
+    if (filter === 'review') add(`qa_review_status IS DISTINCT FROM 'correct' AND (qa_priority > 0 OR overall_confidence = 'low' OR cardinality(COALESCE(consistency_violations, ARRAY[]::TEXT[])) > 0)`);
+    if (filter === 'failed') add(`scan_status = 'failed'`);
+    if (filter === 'timeout') add(`error_category = 'scan_timeout'`);
+    if (filter === 'proxy') add(`error_category = 'proxy_error'`);
+    if (filter === 'access') add(`error_category = ANY(ARRAY['rate_limited', 'access_blocked', 'bot_protection', 'dns_error', 'ssl_error'])`);
+    if (filter === 'runtime') add(`scan_status = 'failed' AND error_category NOT IN ('scan_timeout', 'proxy_error', 'rate_limited', 'access_blocked', 'bot_protection', 'dns_error', 'ssl_error')`);
+    if (filter === 'rate_limited') add(`error_category = 'rate_limited'`);
+    if (filter === 'active') add(`scan_status = ANY(ARRAY['pending', 'scanning'])`);
+    if (filter === 'fallback_candidate') add(`COALESCE((runtime_metrics ->> 'proxy_fallback_candidate')::BOOLEAN, FALSE) OR COALESCE((evidence_bundle #>> '{access,proxy_fallback_used}')::BOOLEAN, FALSE)`);
+    if (filter === 'fallback_recovered') add(`COALESCE((evidence_bundle #>> '{access,proxy_fallback_recovered}')::BOOLEAN, FALSE)`);
+    if (filter === 'bot_unresolved') add(`COALESCE((evidence_bundle #>> '{access,challenge_detected}')::BOOLEAN, FALSE) AND COALESCE(evidence_bundle #>> '{access,challenge_solver_result}', 'not_used') <> 'succeeded' AND COALESCE((evidence_bundle #>> '{access,valid_storefront}')::BOOLEAN, FALSE) = FALSE`);
+
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    if (this.pool) {
+      const pageParams = [...params, pageSize, offset];
+      const [rows, count] = await Promise.all([
+        this.pool.query(`SELECT ${AUDIT_SUMMARY_COLUMNS} FROM storefront_audits_v2 ${whereClause} ORDER BY scan_started_at DESC, audit_id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, pageParams),
+        this.pool.query(`SELECT COUNT(*)::INTEGER AS total FROM storefront_audits_v2 ${whereClause}`, params)
+      ]);
+      const total = Number(count.rows[0]?.total || 0);
+      return {
+        items: rows.rows as AuditSummary[],
+        pagination: { page, page_size: pageSize, total, total_pages: Math.ceil(total / pageSize), has_next: offset + pageSize < total, has_previous: page > 1 }
+      };
+    }
+    if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
+    const matches = this.memoryDb.filter((audit) => {
+      const term = search.toLowerCase();
+      const textMatch = !term || [audit.domain, audit.group_label, audit.cms_platform_detected, ...(audit.failure_fingerprints || [])]
+        .some((value) => String(value || '').toLowerCase().includes(term));
+      const access = audit.evidence_bundle?.access;
+      const filterMatch = filter === 'all'
+        || filter === 'review' && audit.qa_review_status !== 'correct' && ((audit.qa_priority || 0) > 0 || audit.overall_confidence === 'low' || (audit.consistency_violations || []).length > 0)
+        || filter === 'failed' && audit.scan_status === 'failed'
+        || filter === 'timeout' && audit.error_category === 'scan_timeout'
+        || filter === 'proxy' && audit.error_category === 'proxy_error'
+        || filter === 'access' && ['rate_limited', 'access_blocked', 'bot_protection', 'dns_error', 'ssl_error'].includes(audit.error_category)
+        || filter === 'runtime' && audit.scan_status === 'failed' && !['scan_timeout', 'proxy_error', 'rate_limited', 'access_blocked', 'bot_protection', 'dns_error', 'ssl_error'].includes(audit.error_category)
+        || filter === 'rate_limited' && audit.error_category === 'rate_limited'
+        || filter === 'active' && ['pending', 'scanning'].includes(audit.scan_status)
+        || filter === 'fallback_candidate' && Boolean(access?.proxy_fallback_used || audit.runtime_metrics?.proxy_fallback_candidate)
+        || filter === 'fallback_recovered' && Boolean(access?.proxy_fallback_recovered)
+        || filter === 'bot_unresolved' && Boolean(access?.challenge_detected && access.challenge_solver_result !== 'succeeded' && access.valid_storefront !== true);
+      return textMatch && filterMatch;
+    }).sort((a, b) => new Date(b.scan_started_at).getTime() - new Date(a.scan_started_at).getTime() || Number(b.audit_id) - Number(a.audit_id));
+    const total = matches.length;
+    return {
+      items: matches.slice(offset, offset + pageSize).map(toAuditSummary),
+      pagination: { page, page_size: pageSize, total, total_pages: Math.ceil(total / pageSize), has_next: offset + pageSize < total, has_previous: page > 1 }
+    };
+  }
+
+  /**
+   * Quality metrics deliberately use only the compact evidence fragments they aggregate.
+   * Full audit evidence remains exclusive to getAudit() and debug/replay operations.
+   */
+  async getAllAuditsForAnalytics(limit = 5000): Promise<StorefrontAudit[]> {
     const boundedLimit = Math.max(1, Math.min(limit, 5000));
     if (this.pool) {
       const result = await this.pool.query(
-        'SELECT * FROM storefront_audits_v2 ORDER BY scan_started_at DESC LIMIT $1',
+        `SELECT ${AUDIT_ANALYTICS_COLUMNS} FROM storefront_audits_v2 ORDER BY scan_started_at DESC, audit_id DESC LIMIT $1`,
         [boundedLimit]
       );
       return result.rows;
@@ -352,7 +511,7 @@ export class AuditDatabase {
     const boundedLimit = Math.max(1, Math.min(limit, 5_000));
     if (this.pool) {
       const result = await this.pool.query(
-        `SELECT * FROM storefront_audits_v2
+        `SELECT audit_id, scan_status, trace_steps FROM storefront_audits_v2
          WHERE scan_status = 'scanning'
            AND scan_started_at < NOW() - make_interval(mins => $1)
          ORDER BY scan_started_at ASC
@@ -372,7 +531,7 @@ export class AuditDatabase {
     const boundedLimit = Math.max(1, Math.min(limit, 5_000));
     if (this.pool) {
       const result = await this.pool.query(
-        `SELECT * FROM storefront_audits_v2 WHERE scan_status = 'pending' ORDER BY scan_started_at ASC LIMIT $1`,
+        `SELECT ${AUDIT_QUEUE_COLUMNS} FROM storefront_audits_v2 WHERE scan_status = 'pending' ORDER BY scan_started_at ASC LIMIT $1`,
         [boundedLimit]
       );
       return result.rows;
@@ -381,32 +540,30 @@ export class AuditDatabase {
     return this.memoryDb.filter((audit) => audit.scan_status === 'pending').slice(0, boundedLimit);
   }
 
-  async getAuditsByGroup(groupLabel: string): Promise<StorefrontAudit[]> {
+  async getAuditsForExportByGroup(groupLabel: string): Promise<StorefrontAudit[]> {
     if (this.pool) {
       const result = await this.pool.query(
-        'SELECT * FROM storefront_audits_v2 WHERE group_label = $1 ORDER BY scan_started_at DESC LIMIT 5000',
+        `SELECT ${AUDIT_EXPORT_COLUMNS} FROM storefront_audits_v2 WHERE group_label = $1 ORDER BY scan_started_at DESC, audit_id DESC LIMIT 5000`,
         [groupLabel]
       );
       return result.rows;
     }
     if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
-    return this.memoryDb.filter((audit) => audit.group_label === groupLabel);
+    return this.memoryDb.filter((audit) => audit.group_label === groupLabel).map(toAuditExport);
   }
 
-  async getReviewCandidates(limit = 100): Promise<StorefrontAudit[]> {
-    const bounded = Math.max(1, Math.min(limit, 500));
+  async getAllAuditSummariesForReview(limit = 5000): Promise<StorefrontAudit[]> {
+    const bounded = Math.max(1, Math.min(limit, 5000));
     if (this.pool) {
       const result = await this.pool.query(
-        `SELECT * FROM storefront_audits_v2
-         WHERE qa_priority > 0 OR overall_confidence = 'low' OR cardinality(COALESCE(consistency_violations, ARRAY[]::TEXT[])) > 0
-         ORDER BY qa_priority DESC, scan_started_at DESC LIMIT $1`,
+        `SELECT ${AUDIT_SUMMARY_COLUMNS} FROM storefront_audits_v2
+         ORDER BY scan_started_at DESC, audit_id DESC LIMIT $1`,
         [bounded]
       );
       return result.rows;
     }
     if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
-    return this.memoryDb.filter((audit) => (audit.qa_priority || 0) > 0 || audit.overall_confidence === 'low')
-      .sort((a, b) => (b.qa_priority || 0) - (a.qa_priority || 0)).slice(0, bounded);
+    return this.memoryDb.slice(0, bounded).map(toAuditSummary) as StorefrontAudit[];
   }
 
   async addQaFeedback(feedback: Omit<QaFeedback, 'created_at'>): Promise<QaFeedback> {

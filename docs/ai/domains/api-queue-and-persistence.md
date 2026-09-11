@@ -15,13 +15,15 @@ Owns the REST boundary, optional internal authentication, request/file validatio
 
 ## API groups
 
-- Scan lifecycle: create single/bulk, bulk rerun, diagnostic/difficult rerun, list/detail, cancel, bulk delete.
+- Scan lifecycle: create single/bulk, bulk rerun, diagnostic/difficult rerun, paginated summary list/detail, cancel, bulk delete.
 - Results and QA: CSV export, debug package, QA feedback, mark correct.
 - Quality: metrics, review candidates, deterministic review, replay.
 - Operations: proxy metrics/readiness and queue state.
 - `/api/health` is public and intentionally minimal; `/api/v1` is protected when `INTERNAL_API_TOKEN` is set.
 
 The UI sends Bearer authentication through `src/ui/api.ts`. The server also accepts `X-Internal-API-Token`. Input controls include JSON byte limits, in-memory Multer upload, CSV parsing/deduplication, allowed geo/mode, maximum batch size, and bounded environment values.
+
+`GET /api/v1/scans` is a server-paginated summary endpoint: it defaults to `page=1&page_size=25`, caps page size at 100, accepts the existing `filter` and `search` parameters, and never selects audit evidence, trace, or runtime/debug blobs. It returns `{ items, pagination }`, ordered by `scan_started_at DESC, audit_id DESC`. `GET /api/v1/scans/:id` is the explicit on-demand full-detail route; the browser caches an opened audit for the session and deduplicates concurrent detail requests. CSV exports also select only their declared CSV fields.
 
 ## Queue and lifecycle
 

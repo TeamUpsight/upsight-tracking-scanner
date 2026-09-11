@@ -1,21 +1,21 @@
-import { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   Activity, BarChart3, Bug, Check, CheckCircle2, ChevronRight, CircleHelp, Database, Download,
   ExternalLink, FileSearch, FlaskConical, Gauge, Globe2, Info, Loader2, Play, RefreshCw, RotateCcw,
   Search, Settings2, ShieldCheck, Square, Trash2, Upload, X
 } from 'lucide-react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
-import type { AuditModule, FindingConfidence, QaFeedback, StorefrontAudit } from './types';
+import type { AuditListFilter, AuditListResponse, AuditModule, AuditSummary, FindingConfidence, QaFeedback, StorefrontAudit } from './types';
 import { AnalysisPanel, DecisionObservability, type AnalysisResult, TraceTimeline } from './ui/AuditInsights';
 import { MetricCard, ProxyDashboard, QualityDashboard, formatDuration } from './ui/Analytics';
 import { apiFetch, downloadBlob } from './ui/api';
+import { AuditDetailCache } from './ui/audit-detail-cache';
 import { formatLabel, websiteUrl } from './ui/format';
 import { StatusBadge } from './ui/StatusBadge';
 
 type View = 'audits' | 'quality' | 'review' | 'proxy';
-type AuditFilter = 'all' | 'review' | 'failed' | 'timeout' | 'proxy' | 'access' | 'runtime' | 'fallback_candidate' | 'bot_unresolved' | 'rate_limited' | 'fallback_recovered' | 'active';
+type AuditFilter = AuditListFilter;
 const ACTIVE_STATUSES = new Set(['pending', 'scanning']);
-const ACCESS_FAILURES = new Set(['rate_limited', 'access_blocked', 'bot_protection', 'dns_error', 'ssl_error']);
 const QA_CATEGORIES: QaFeedback['category'][] = ['CMP', 'Consent', 'GA4', 'Meta', 'view_item', 'PDP discovery', 'server-side', 'CMS', 'bot/access', 'other'];
 
 function ExplainedAction({ help, children, className = '', iconOnly = false, ...buttonProps }: {
@@ -125,20 +125,6 @@ function accessAttemptResult(attempt: NonNullable<StorefrontAudit['evidence_bund
   return formatLabel(attempt.target_result);
 }
 
-function failureMatches(audit: StorefrontAudit, filter: AuditFilter) {
-  const access = audit.evidence_bundle?.access;
-  if (filter === 'fallback_candidate') return Boolean(access?.proxy_fallback_used || audit.runtime_metrics?.proxy_fallback_candidate);
-  if (filter === 'bot_unresolved') return Boolean(access?.challenge_detected && access.challenge_solver_result !== 'succeeded' && access.valid_storefront !== true);
-  if (filter === 'rate_limited') return audit.error_category === 'rate_limited';
-  if (filter === 'fallback_recovered') return Boolean(access?.proxy_fallback_recovered);
-  if (audit.scan_status !== 'failed') return false;
-  if (filter === 'failed') return true;
-  if (filter === 'timeout') return audit.error_category === 'scan_timeout';
-  if (filter === 'proxy') return audit.error_category === 'proxy_error';
-  if (filter === 'access') return ACCESS_FAILURES.has(audit.error_category);
-  return filter === 'runtime' && audit.error_category !== 'scan_timeout' && audit.error_category !== 'proxy_error' && !ACCESS_FAILURES.has(audit.error_category);
-}
-
 function EvidenceCodeGroup({ title, codes, tone }: { title: string; codes: string[]; tone: 'decision' | 'review' | 'fingerprint' | 'issue' }) {
   if (!codes.length) return null;
   const styles = tone === 'issue'
@@ -169,11 +155,17 @@ export default function App() {
   const [selectedModules, setSelectedModules] = useState<AuditModule[]>(['consent', 'tracking', 'server_side']);
   const [csv, setCsv] = useState<File | null>(null);
   const [captcha, setCaptcha] = useState(false);
-  const [scans, setScans] = useState<StorefrontAudit[]>([]);
+  const [scans, setScans] = useState<AuditSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | number | null>(null);
+  const [selectedAudit, setSelectedAudit] = useState<StorefrontAudit | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [search, setSearch] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
   const [reviewSearch, setReviewSearch] = useState('');
   const [auditFilter, setAuditFilter] = useState<AuditFilter>('all');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [pagination, setPagination] = useState<AuditListResponse['pagination']>({ page: 1, page_size: 25, total: 0, total_pages: 0, has_next: false, has_previous: false });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [quality, setQuality] = useState<any>(null);
@@ -190,22 +182,9 @@ export default function App() {
   const [qaSaved, setQaSaved] = useState<string | null>(null);
   const [markingCorrectId, setMarkingCorrectId] = useState<string | number | null>(null);
   const [selectedAuditIds, setSelectedAuditIds] = useState<Set<string>>(() => new Set());
+  const detailCache = useRef(new AuditDetailCache());
 
-  const selected = scans.find((scan) => String(scan.audit_id) === String(selectedId)) || null;
-  const filteredScans = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return scans.filter((scan) => {
-      const matchesTerm = !term || scan.domain.toLowerCase().includes(term) ||
-        String(scan.group_label || '').toLowerCase().includes(term) ||
-        String(scan.cms_platform_detected || '').toLowerCase().includes(term) ||
-        String(scan.failure_fingerprints || '').toLowerCase().includes(term);
-      const matchesFilter = auditFilter === 'all' ||
-        auditFilter === 'review' && scan.qa_review_status !== 'correct' && ((scan.qa_priority || 0) > 0 || scan.overall_confidence === 'low') ||
-        ['failed', 'timeout', 'proxy', 'access', 'runtime', 'fallback_candidate', 'bot_unresolved', 'rate_limited', 'fallback_recovered'].includes(auditFilter) && failureMatches(scan, auditFilter) ||
-        auditFilter === 'active' && ACTIVE_STATUSES.has(scan.scan_status);
-      return matchesTerm && matchesFilter;
-    });
-  }, [scans, search, auditFilter]);
+  const selected = selectedAudit && String(selectedAudit.audit_id) === String(selectedId) ? selectedAudit : null;
   const filteredReviewCandidates = useMemo(() => {
     const term = reviewSearch.trim().toLowerCase();
     if (!term) return reviewCandidates;
@@ -215,49 +194,58 @@ export default function App() {
       String(scan.failure_fingerprints || '').toLowerCase().includes(term) ||
       String((scan.qa_feedback || []).map((item) => `${item.category} ${item.expected_value} ${item.notes}`)).toLowerCase().includes(term));
   }, [reviewCandidates, reviewSearch]);
-  const allFilteredSelected = filteredScans.length > 0 && filteredScans.every((scan) => selectedAuditIds.has(String(scan.audit_id)));
+  const allVisibleSelected = scans.length > 0 && scans.every((scan) => selectedAuditIds.has(String(scan.audit_id)));
 
   const request = useCallback((input: RequestInfo | URL, init?: RequestInit) => apiFetch(input, init, token), [token]);
 
   const loadScans = useCallback(async (quiet = false) => {
     if (!quiet) setBusy(true);
     try {
-      const response = await request('/api/v1/scans?limit=1000');
-      const data = await response.json();
-      setScans(data);
-      setSelectedId((current) => current ?? data[0]?.audit_id ?? null);
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), filter: auditFilter });
+      if (appliedSearch) params.set('search', appliedSearch);
+      const response = await request(`/api/v1/scans?${params}`);
+      const data = await response.json() as AuditListResponse;
+      setScans(data.items);
+      setPagination(data.pagination);
       setError(null);
     } catch (caught: any) {
       setError(caught.message);
     } finally {
       if (!quiet) setBusy(false);
     }
-  }, [request]);
+  }, [request, page, pageSize, auditFilter, appliedSearch]);
 
   useEffect(() => { void loadScans(); }, [loadScans]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setAppliedSearch(search.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  useEffect(() => { setPage(1); }, [auditFilter, appliedSearch, pageSize]);
   useEffect(() => {
     if (!scans.some((scan) => ACTIVE_STATUSES.has(scan.scan_status))) return;
     const timer = window.setInterval(() => void loadScans(true), 3000);
     return () => window.clearInterval(timer);
   }, [scans, loadScans]);
   useEffect(() => { setAnalysis(null); setQaCorrectionOpen(false); setQaSaved(null); setQaSubmitting(null); }, [selectedId]);
+  const loadSelectedAudit = useCallback(async (auditId: string | number, force = false) => {
+    const key = String(auditId);
+    setDetailLoading(true);
+    try {
+      const audit = await detailCache.current.load(auditId, () =>
+        request(`/api/v1/scans/${auditId}`).then((response) => response.json() as Promise<StorefrontAudit>), force);
+      if (String(selectedId) === key) setSelectedAudit(audit);
+      return audit;
+    } catch (caught: any) {
+      setError(caught.message);
+      throw caught;
+    } finally {
+      setDetailLoading(false);
+    }
+  }, [request, selectedId]);
   useEffect(() => {
-    if (selectedId === null) return;
-    let cancelled = false;
-    const loadSelectedAudit = async () => {
-      try {
-        const response = await request(`/api/v1/scans/${selectedId}`);
-        const audit = await response.json() as StorefrontAudit;
-        if (!cancelled) setScans((current) => current.map((item) =>
-          String(item.audit_id) === String(audit.audit_id) ? audit : item
-        ));
-      } catch (caught: any) {
-        if (!cancelled) setError(caught.message);
-      }
-    };
-    void loadSelectedAudit();
-    return () => { cancelled = true; };
-  }, [selectedId, request]);
+    if (selectedId === null) { setSelectedAudit(null); return; }
+    void loadSelectedAudit(selectedId);
+  }, [selectedId, loadSelectedAudit]);
   useEffect(() => {
     const loadView = async () => {
       try {
@@ -314,6 +302,8 @@ export default function App() {
       const response = await request(`/api/v1/scans/${selected.audit_id}/${path}`, init);
       const result = await response.json();
       await loadScans(true);
+      detailCache.current.invalidate(selected.audit_id);
+      await loadSelectedAudit(selected.audit_id, true);
       return result;
     } catch (caught: any) { setError(caught.message); return null; } finally { setBusy(false); }
   };
@@ -339,9 +329,8 @@ export default function App() {
       });
       const feedback = await response.json() as QaFeedback;
       await loadScans(true);
-      setScans((current) => current.map((scan) => String(scan.audit_id) === String(selected.audit_id)
-        ? { ...scan, qa_feedback: [feedback, ...(scan.qa_feedback || [])] }
-        : scan));
+      detailCache.current.invalidate(selected.audit_id);
+      await loadSelectedAudit(selected.audit_id, true);
       setReviewCandidates((current) => current.map((scan) => String(scan.audit_id) === String(selected.audit_id)
         ? { ...scan, qa_feedback: [feedback, ...(scan.qa_feedback || [])] }
         : scan));
@@ -363,6 +352,8 @@ export default function App() {
       const reviewed = await response.json() as StorefrontAudit;
       setReviewCandidates((current) => current.filter((item) => String(item.audit_id) !== String(audit.audit_id)));
       setScans((current) => current.map((item) => String(item.audit_id) === String(audit.audit_id) ? { ...item, ...reviewed } : item));
+      detailCache.current.invalidate(reviewed.audit_id);
+      if (String(selectedId) === String(reviewed.audit_id)) setSelectedAudit(reviewed);
       setQuality(null);
     } catch (caught: any) {
       setError(caught.message);
@@ -392,8 +383,8 @@ export default function App() {
   const toggleAllFilteredAudits = () => {
     setSelectedAuditIds((current) => {
       const next = new Set(current);
-      if (allFilteredSelected) filteredScans.forEach((scan) => next.delete(String(scan.audit_id)));
-      else filteredScans.forEach((scan) => next.add(String(scan.audit_id)));
+      if (allVisibleSelected) scans.forEach((scan) => next.delete(String(scan.audit_id)));
+      else scans.forEach((scan) => next.add(String(scan.audit_id)));
       return next;
     });
   };
@@ -495,10 +486,10 @@ export default function App() {
           <div className="grid items-start gap-5 lg:grid-cols-[minmax(360px,.78fr)_minmax(0,1.22fr)]">
             <section className="rounded-2xl border border-neutral-border bg-bg-card shadow-sm lg:sticky lg:top-24">
               <div className="border-b border-neutral-border p-4">
-                <div className="relative"><Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-600" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search domain, CMS, group or fingerprint" className="w-full rounded-lg border border-neutral-border bg-[#0d1016] py-2 pl-9 pr-10 text-xs outline-none transition focus:border-primary" /><button type="button" onClick={() => void loadScans()} aria-label="Refresh audits" className="absolute right-1.5 top-1.5 rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-white"><RefreshCw className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} /></button></div>
+                <div className="relative"><Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-600" /><input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search domain, CMS, group or fingerprint" className="w-full rounded-lg border border-neutral-border bg-[#0d1016] py-2 pl-9 pr-10 text-xs outline-none transition focus:border-primary" /><button type="button" onClick={() => void loadScans()} aria-label="Refresh audits" className="absolute right-1.5 top-1.5 rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-white"><RefreshCw className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} /></button></div>
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex gap-1 overflow-x-auto">{([['all', 'All'], ['review', 'Needs review'], ['failed', 'Failed'], ['timeout', 'Timeout'], ['proxy', 'Proxy'], ['access', 'Access'], ['runtime', 'Runtime'], ['fallback_candidate', 'Fallback candidate'], ['bot_unresolved', 'Bot unresolved'], ['rate_limited', 'Rate-limited'], ['fallback_recovered', 'Fallback recovered'], ['active', 'Active']] as const).map(([key, label]) => <button type="button" key={key} onClick={() => setAuditFilter(key)} className={`shrink-0 rounded-full px-3 py-1.5 text-[10px] font-semibold transition ${auditFilter === key ? 'bg-primary/15 text-primary' : 'text-slate-500 hover:bg-white/[0.04] hover:text-white'}`}>{label}</button>)}</div>
-                  <label className="inline-flex items-center gap-2 text-[10px] font-semibold text-slate-400"><input type="checkbox" checked={allFilteredSelected} onChange={toggleAllFilteredAudits} className="h-3.5 w-3.5 accent-primary" />Select Visible</label>
+                  <div className="flex gap-1 overflow-x-auto">{([['all', 'All'], ['review', 'Needs review'], ['failed', 'Failed'], ['timeout', 'Timeout'], ['proxy', 'Proxy'], ['access', 'Access'], ['runtime', 'Runtime'], ['fallback_candidate', 'Fallback candidate'], ['bot_unresolved', 'Bot unresolved'], ['rate_limited', 'Rate-limited'], ['fallback_recovered', 'Fallback recovered'], ['active', 'Active']] as const).map(([key, label]) => <button type="button" key={key} onClick={() => { setAuditFilter(key); setPage(1); }} className={`shrink-0 rounded-full px-3 py-1.5 text-[10px] font-semibold transition ${auditFilter === key ? 'bg-primary/15 text-primary' : 'text-slate-500 hover:bg-white/[0.04] hover:text-white'}`}>{label}</button>)}</div>
+                  <label className="inline-flex items-center gap-2 text-[10px] font-semibold text-slate-400"><input type="checkbox" checked={allVisibleSelected} onChange={toggleAllFilteredAudits} className="h-3.5 w-3.5 accent-primary" />Select Visible</label>
                 </div>
                 {selectedAuditIds.size > 0 && <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-primary/25 bg-primary/[0.06] px-3 py-2">
                   <span className="text-[10px] font-bold text-primary">{selectedAuditIds.size} Selected</span>
@@ -510,13 +501,14 @@ export default function App() {
                 </div>}
               </div>
               <div className="max-h-[760px] overflow-auto p-2">
-                {filteredScans.map((scan) => <article key={scan.audit_id} onClick={() => setSelectedId(scan.audit_id)} onKeyDown={(event) => { if (event.key === 'Enter') setSelectedId(scan.audit_id); }} role="button" tabIndex={0} className={`mb-1 w-full cursor-pointer rounded-xl border p-3 text-left transition last:mb-0 ${String(selectedId) === String(scan.audit_id) ? 'border-primary/40 bg-primary/[0.07]' : selectedAuditIds.has(String(scan.audit_id)) ? 'border-primary/20 bg-primary/[0.035]' : 'border-transparent hover:border-neutral-border hover:bg-white/[0.025]'}`}><div className="flex items-start gap-3"><input type="checkbox" aria-label={`Select audit ${scan.audit_id}`} checked={selectedAuditIds.has(String(scan.audit_id))} onClick={(event) => event.stopPropagation()} onChange={() => toggleAuditSelection(scan.audit_id)} className="mt-1 h-4 w-4 shrink-0 accent-primary" /><div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><a href={websiteUrl(scan.domain)} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="group/link inline-flex max-w-full items-center gap-1.5 truncate text-sm font-semibold text-white hover:text-primary hover:underline">{scan.domain}<ExternalLink className="h-3 w-3 shrink-0 opacity-0 transition group-hover/link:opacity-100" /></a><div className="mt-1 flex flex-wrap items-center gap-1.5 text-[9px] text-slate-400"><span>#{scan.audit_id}</span><span>·</span><span>{scan.tested_geos}</span><span>·</span><span>{scan.cms_platform_detected || 'Unknown CMS'}</span></div>{scan.group_label && <div className="mt-2 inline-flex max-w-full rounded-md border border-violet-800/35 bg-violet-950/20 px-2 py-1 text-[9px] font-medium text-violet-300"><span className="truncate">Group: {scan.group_label}</span></div>}</div><ChevronRight className={`mt-1 h-4 w-4 shrink-0 ${String(selectedId) === String(scan.audit_id) ? 'text-primary' : 'text-slate-500'}`} /></div><div className="mt-3 flex flex-wrap items-center gap-2"><StatusBadge value={scan.scan_status} /><StatusBadge value={scan.overall_status} />{(scan.qa_priority || 0) > 0 && <span className="rounded-full bg-amber-500/10 px-2 py-1 text-[9px] font-bold text-amber-300">Review {scan.qa_priority}</span>}</div></div></div></article>)}
-                {!filteredScans.length && <div className="p-10 text-center text-xs text-slate-600">No audits match this view.</div>}
+                {scans.map((scan) => <article key={scan.audit_id} onClick={() => setSelectedId(scan.audit_id)} onKeyDown={(event) => { if (event.key === 'Enter') setSelectedId(scan.audit_id); }} role="button" tabIndex={0} className={`mb-1 w-full cursor-pointer rounded-xl border p-3 text-left transition last:mb-0 ${String(selectedId) === String(scan.audit_id) ? 'border-primary/40 bg-primary/[0.07]' : selectedAuditIds.has(String(scan.audit_id)) ? 'border-primary/20 bg-primary/[0.035]' : 'border-transparent hover:border-neutral-border hover:bg-white/[0.025]'}`}><div className="flex items-start gap-3"><input type="checkbox" aria-label={`Select audit ${scan.audit_id}`} checked={selectedAuditIds.has(String(scan.audit_id))} onClick={(event) => event.stopPropagation()} onChange={() => toggleAuditSelection(scan.audit_id)} className="mt-1 h-4 w-4 shrink-0 accent-primary" /><div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><a href={websiteUrl(scan.domain)} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} className="group/link inline-flex max-w-full items-center gap-1.5 truncate text-sm font-semibold text-white hover:text-primary hover:underline">{scan.domain}<ExternalLink className="h-3 w-3 shrink-0 opacity-0 transition group-hover/link:opacity-100" /></a><div className="mt-1 flex flex-wrap items-center gap-1.5 text-[9px] text-slate-400"><span>#{scan.audit_id}</span><span>·</span><span>{scan.tested_geos}</span><span>·</span><span>{scan.cms_platform_detected || 'Unknown CMS'}</span></div>{scan.group_label && <div className="mt-2 inline-flex max-w-full rounded-md border border-violet-800/35 bg-violet-950/20 px-2 py-1 text-[9px] font-medium text-violet-300"><span className="truncate">Group: {scan.group_label}</span></div>}</div><ChevronRight className={`mt-1 h-4 w-4 shrink-0 ${String(selectedId) === String(scan.audit_id) ? 'text-primary' : 'text-slate-500'}`} /></div><div className="mt-3 flex flex-wrap items-center gap-2"><StatusBadge value={scan.scan_status} /><StatusBadge value={scan.overall_status} />{(scan.qa_priority || 0) > 0 && <span className="rounded-full bg-amber-500/10 px-2 py-1 text-[9px] font-bold text-amber-300">Review {scan.qa_priority}</span>}</div></div></div></article>)}
+                {!scans.length && <div className="p-10 text-center text-xs text-slate-600">No audits match this view.</div>}
               </div>
+              <div className="flex items-center justify-between border-t border-neutral-border px-4 py-3 text-[10px] text-slate-400"><span>{pagination.total ? `Page ${pagination.page} of ${pagination.total_pages} · ${pagination.total} audits` : 'No audits'}</span><div className="flex items-center gap-2"><select aria-label="Audits per page" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }} className="rounded border border-neutral-border bg-[#0d1016] px-1.5 py-1 text-[10px]"><option value="25">25 / page</option><option value="50">50 / page</option><option value="100">100 / page</option></select><button type="button" disabled={!pagination.has_previous} onClick={() => setPage((current) => Math.max(1, current - 1))} className="rounded border border-neutral-border px-2 py-1 disabled:opacity-40">Previous</button><button type="button" disabled={!pagination.has_next} onClick={() => setPage((current) => current + 1)} className="rounded border border-neutral-border px-2 py-1 disabled:opacity-40">Next</button></div></div>
             </section>
 
             <div className="min-w-0 space-y-4">
-              {selected ? <>
+              {detailLoading && !selected ? <div className="flex h-64 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div> : selected ? <>
                 <section className="rounded-2xl border border-neutral-border bg-bg-card p-5 shadow-sm">
                   <div className="flex flex-wrap items-start justify-between gap-4"><div><div className="flex flex-wrap items-center gap-2"><a href={websiteUrl(selected.domain)} target="_blank" rel="noreferrer" className="group inline-flex items-center gap-2 text-xl font-bold tracking-tight text-white hover:text-primary hover:underline">{selected.domain}<ExternalLink className="h-4 w-4 opacity-50 transition group-hover:opacity-100" /></a><StatusBadge value={selected.scan_status} /></div><p className="mt-1.5 text-[11px] text-slate-400">Audit #{selected.audit_id} · {selected.scan_mode || 'normal'} mode · {selected.tested_geos} · {timeLabel(selected.scan_completed_at)}</p><p className="mt-1 text-[10px] text-slate-500">Modules: {(selected.selected_modules || ['consent', 'tracking', 'server_side']).join(' · ')}</p>{selected.group_label && <div className="mt-2 inline-flex rounded-md border border-violet-800/35 bg-violet-950/20 px-2.5 py-1 text-[10px] font-medium text-violet-300">Group: {selected.group_label}</div>}</div><div className="flex items-center gap-2"><span className="text-[9px] uppercase tracking-wider text-slate-400">Overall</span><StatusBadge value={selected.overall_status} /></div></div>
                   {selected.scan_status === 'failed' && (() => { const failure = terminalFailure(selected); const proxyFailure = selected.error_category === 'proxy_error'; return <div className={`mt-4 rounded-xl border px-3 py-3 ${proxyFailure ? 'border-amber-800/50 bg-amber-950/20' : 'border-rose-800/50 bg-rose-950/20'}`} role="status"><div className={`text-[9px] font-bold uppercase tracking-[0.14em] ${proxyFailure ? 'text-amber-300' : 'text-rose-300'}`}>{proxyFailure ? 'Operational infrastructure failure' : 'Scan failed'}</div><div className="mt-1 flex flex-wrap items-center gap-2 text-xs"><span className="font-semibold text-white">Terminal phase: {failure.phase}</span><span className={`font-mono text-[10px] ${proxyFailure ? 'text-amber-200' : 'text-rose-200'}`} title={failure.reasonCode}>{formatLabel(failure.reasonCode)}</span></div>{proxyFailure && <p className="mt-1.5 text-[11px] text-amber-100">Proxy transport failed; no access or compliance conclusion was made.</p>}{failure.productPhase && <p className={`mt-1.5 text-[11px] ${proxyFailure ? 'text-amber-100' : 'text-rose-100'}`}>Homepage evidence completed; PDP/product module incomplete.</p>}</div>; })()}

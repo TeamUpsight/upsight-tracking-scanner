@@ -19,7 +19,7 @@ import { buildQualityMetrics } from './src/scanner/quality/metrics';
 import { qaPrioritySignals } from './src/scanner/quality/fingerprints';
 import { compareReplay, replayEvidence } from './src/scanner/quality/replay';
 import { buildLatestReviewQueue } from './src/scanner/quality/review-queue';
-import type { EvidenceBundle, QaFeedback, ScanMode, StorefrontAudit } from './src/types';
+import type { AuditListFilter, EvidenceBundle, QaFeedback, ScanMode, StorefrontAudit } from './src/types';
 import { normalizeAuditModules } from './src/audit-modules';
 import { isRecoverableStaleAudit, queueJobForAudit, rerunAuditOptions, shouldEnqueueAudit, type AuditQueueJob } from './src/audit-lifecycle';
 import { boundedInteger, bulkProxyRetryLimit, globalScanTimeoutMs } from './src/shared/config';
@@ -414,15 +414,24 @@ app.post('/api/v1/scans/:id/proxy-fallback-rerun', asyncRoute(async (req, res) =
 }));
 
 app.get('/api/v1/scans', asyncRoute(async (req, res) => {
-  const limit = Number(req.query.limit || 1000);
-  const [audits, feedback] = await Promise.all([db.getAllAudits(limit), db.getQaFeedback()]);
-  res.json(auditsWithCurrentQa(audits, feedback));
+  const result = await db.getAuditPage({
+    page: Number(req.query.page || 1),
+    page_size: Number(req.query.page_size || 25),
+    search: typeof req.query.search === 'string' ? req.query.search : '',
+    filter: typeof req.query.filter === 'string' ? req.query.filter as AuditListFilter : 'all'
+  });
+  if (process.env.NODE_ENV !== 'production') {
+    console.info('[API] audit_list', { rows: result.items.length, page: result.pagination.page, page_size: result.pagination.page_size, response_bytes: Buffer.byteLength(JSON.stringify(result)) });
+  }
+  res.json(result);
 }));
 
 app.get('/api/v1/scans/:id', asyncRoute(async (req, res) => {
   const audit = await db.getAudit(req.params.id);
   if (!audit) return res.status(404).json({ error: 'Audit not found.' });
-  res.json(auditsWithCurrentQa([audit], audit.qa_feedback || [])[0]);
+  const result = auditsWithCurrentQa([audit], audit.qa_feedback || [])[0];
+  if (process.env.NODE_ENV !== 'production') console.info('[API] audit_detail', { audit_id: audit.audit_id, response_bytes: Buffer.byteLength(JSON.stringify(result)) });
+  res.json(result);
 }));
 
 app.post('/api/v1/scans/:id/cancel', asyncRoute(async (req, res) => {
@@ -444,7 +453,7 @@ app.post('/api/v1/scans/delete', asyncRoute(async (req, res) => {
 app.get('/api/v1/audits/export', asyncRoute(async (req, res) => {
   const groupLabel = String(req.query.group_label || '');
   if (!groupLabel) return res.status(400).json({ error: 'group_label is required.' });
-  const audits = await db.getAuditsByGroup(groupLabel);
+  const audits = await db.getAuditsForExportByGroup(groupLabel);
   const headers: Array<keyof StorefrontAudit> = [
     'audit_id', 'domain', 'scan_started_at', 'scan_completed_at', 'scan_status', 'scan_mode', 'selected_modules', 'error_category', 'terminal_runtime_phase', 'terminal_reason_code',
     'tested_geos', 'cms_platform_detected', 'overall_status', 'overall_confidence', 'consent_status', 'cmp_provider',
@@ -536,13 +545,13 @@ app.post('/api/v1/scans/:id/mark-correct', asyncRoute(async (req, res) => {
 }));
 
 app.get('/api/v1/quality/metrics', asyncRoute(async (_req, res) => {
-  const [audits, feedback] = await Promise.all([db.getAllAudits(5000), db.getQaFeedback()]);
-  res.json(buildQualityMetrics(auditsWithCurrentQa(audits, feedback), feedback));
+  const [audits, feedback] = await Promise.all([db.getAllAuditsForAnalytics(5000), db.getQaFeedback()]);
+  res.json(buildQualityMetrics(audits, feedback));
 }));
 
 app.get('/api/v1/quality/review-candidates', asyncRoute(async (req, res) => {
-  const [audits, feedback] = await Promise.all([db.getAllAudits(5000), db.getQaFeedback()]);
-  res.json(buildLatestReviewQueue(auditsWithCurrentQa(audits, feedback), feedback, Number(req.query.limit || 100)));
+  const [audits, feedback] = await Promise.all([db.getAllAuditSummariesForReview(5000), db.getQaFeedback()]);
+  res.json(buildLatestReviewQueue(audits, feedback, Number(req.query.limit || 100)));
 }));
 
 app.post('/api/v1/scans/:id/review', asyncRoute(async (req, res) => {

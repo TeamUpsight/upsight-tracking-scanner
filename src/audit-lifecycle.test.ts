@@ -116,6 +116,44 @@ describe('audit persistence contracts', () => {
     await expect(db.claimPendingAudit(stale.audit_id)).resolves.toMatchObject({ scan_status: 'scanning' });
   });
 
+  it('returns paginated lightweight audit summaries while preserving full detail retrieval', async () => {
+    vi.stubEnv('USE_MEMORY_DB', 'true');
+    vi.stubEnv('DB_HOST', '');
+    vi.stubEnv('DB_NAME', '');
+    vi.stubEnv('DB_USER', '');
+    const db = new AuditDatabase();
+    const audits = [];
+    for (let index = 0; index < 55; index += 1) {
+      audits.push(await db.createAudit(`shop-${index}.example`, index % 2 ? 'USA' : 'EU', index % 3 ? 'batch-a' : 'batch-b'));
+    }
+    await db.updateAudit(audits[4].audit_id, {
+      scan_status: 'failed', error_category: 'proxy_error', trace_steps: JSON.stringify([{ step: 'large_trace' }]),
+      evidence_bundle: new EvidenceCollector({ auditId: 'summary-test', domain: 'shop-4.example', geo: 'USA' }).bundle
+    });
+
+    const firstPage = await db.getAuditPage();
+    const secondPage = await db.getAuditPage({ page: 2, page_size: 25 });
+    const cappedPage = await db.getAuditPage({ page_size: 999 });
+    const filtered = await db.getAuditPage({ filter: 'proxy', search: 'shop-4' });
+
+    expect(firstPage.pagination).toMatchObject({ page: 1, page_size: 25, total: 55, total_pages: 3, has_next: true, has_previous: false });
+    expect(firstPage.items).toHaveLength(25);
+    expect(secondPage.items).toHaveLength(25);
+    expect(Number(firstPage.items[0].audit_id)).toBeGreaterThan(Number(secondPage.items[0].audit_id));
+    expect(cappedPage.pagination.page_size).toBe(100);
+    expect(filtered.pagination.total).toBe(1);
+    expect(filtered.items[0]).toMatchObject({ audit_id: audits[4].audit_id, error_category: 'proxy_error' });
+    expect(filtered.items[0]).not.toHaveProperty('evidence_bundle');
+    expect(filtered.items[0]).not.toHaveProperty('trace_steps');
+    await expect(db.getAudit(audits[4].audit_id)).resolves.toMatchObject({ evidence_bundle: expect.any(Object), trace_steps: expect.any(String) });
+
+    const exported = await db.getAuditsForExportByGroup('batch-a');
+    expect(exported).not.toHaveLength(0);
+    expect(exported[0]).not.toHaveProperty('evidence_bundle');
+    expect(exported[0]).not.toHaveProperty('trace_steps');
+    expect(exported[0]).not.toHaveProperty('runtime_metrics');
+  });
+
   it('persists PDP, tracking-enablement, and safe proxy fallback evidence through the existing evidence model', () => {
     const evidence = new EvidenceCollector({ auditId: 'evidence', domain: 'example.com', geo: 'USA', selectedModules: ['tracking'] }).bundle;
     evidence.page.valid = true;

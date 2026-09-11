@@ -453,6 +453,16 @@ export interface QaPrioritySignal {
   severity: 'critical' | 'high' | 'medium' | 'low';
 }
 
+export type AuditListFilter = 'all' | 'review' | 'failed' | 'timeout' | 'proxy' | 'access' | 'runtime'
+  | 'fallback_candidate' | 'bot_unresolved' | 'rate_limited' | 'fallback_recovered' | 'active';
+
+export interface AuditListQuery {
+  page?: number;
+  page_size?: number;
+  search?: string;
+  filter?: AuditListFilter;
+}
+
 export interface StorefrontAudit {
   audit_id: string | number;
   domain: string;
@@ -494,6 +504,32 @@ export interface StorefrontAudit {
   qa_reviewed_at?: string | null;
   qa_feedback?: QaFeedback[] | null;
   runtime_metrics?: EvidenceBundle['runtime'] | null;
+}
+
+/**
+ * Deliberately excludes trace_steps and every JSON evidence/debug payload.
+ * Use the single-audit detail endpoint when an operator opens an audit.
+ */
+export type AuditSummary = Pick<StorefrontAudit,
+  'audit_id' | 'domain' | 'group_label' | 'scan_started_at' | 'scan_completed_at' | 'scan_status' | 'scan_mode'
+  | 'error_category' | 'terminal_runtime_phase' | 'terminal_reason_code' | 'tested_geos' | 'cms_platform_detected'
+  | 'overall_status' | 'overall_confidence' | 'consent_status' | 'cmp_provider' | 'product_payload_status'
+  | 'pdp_url_tested' | 'server_side_status' | 'ss_collection_type' | 'site_ga4_detected'
+  | 'site_ga4_collection_hit_detected' | 'site_google_ads_detected' | 'site_meta_detected'
+  | 'site_meta_collection_hit_detected' | 'failure_fingerprints' | 'consistency_violations' | 'qa_priority'
+  | 'qa_review_status' | 'qa_reviewed_at'
+>;
+
+export interface AuditListResponse {
+  items: AuditSummary[];
+  pagination: {
+    page: number;
+    page_size: number;
+    total: number;
+    total_pages: number;
+    has_next: boolean;
+    has_previous: boolean;
+  };
 }
 
 export interface ScanRequest {
