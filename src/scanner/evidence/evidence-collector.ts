@@ -398,7 +398,11 @@ export class EvidenceCollector {
     if (input.proxy_fallback_used !== undefined) access.proxy_fallback_used = input.proxy_fallback_used;
     if (input.proxy_fallback_recovered !== undefined) access.proxy_fallback_recovered = input.proxy_fallback_recovered;
     if (input.challenge_detected !== undefined) access.challenge_detected = input.challenge_detected;
-    if (input.challenge_type !== undefined) access.challenge_type = input.challenge_type;
+    // A positively identified WAF is evidence about the target. Later proxy
+    // transport errors are a separate fact and must not erase that identity.
+    if (input.challenge_type !== undefined && !(input.challenge_type === 'proxy_failure' && access.challenge_detected)) {
+      access.challenge_type = input.challenge_type;
+    }
     if (input.challenge_solver_used !== undefined) access.challenge_solver_used = input.challenge_solver_used;
     if (input.challenge_solver_result !== undefined) access.challenge_solver_result = input.challenge_solver_result;
     if (input.time_to_valid_storefront_ms !== undefined) access.time_to_valid_storefront_ms = input.time_to_valid_storefront_ms;

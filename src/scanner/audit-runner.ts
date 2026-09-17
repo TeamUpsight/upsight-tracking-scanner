@@ -50,6 +50,7 @@ import {
 import {
   buildProxyAttemptPlan,
   classifyConfirmedTunnelFailure,
+  shouldRetryBrowserlessResidential,
   type ProxyProvider
 } from './proxy/provider';
 import { calculateQaPriority, generateFailureFingerprints } from './quality/fingerprints';
@@ -64,10 +65,22 @@ import { AuditRuntimeBudget } from './audit-runtime-budget';
 
 const HOMEPAGE_OBSERVATION_MS = 4_000;
 const BOT_CHALLENGE_OBSERVATION_MS = 12_000;
+const KNOWN_WAF_FAST_PATH_MS = 1_500;
+const BROWSERLESS_RETRY_MIN_REMAINING_MS = 15_000;
 const DEFAULT_PRODUCT_DISCOVERY_BUDGET_MS = 15_000;
 const SITEMAP_ENRICHMENT_BUDGET_MS = 4_000;
 const DEFAULT_PRODUCT_CONSENT_BUDGET_MS = 15_000;
 const TRACKING_PRODUCT_MODULE_BUDGET_MS = 30_000;
+
+export function botChallengeObservationWindow(input: {
+  challengeType?: string | null;
+  solvingEnabled: boolean;
+  storefrontValid: boolean;
+}) {
+  const knownChallenge = ['akamai', 'cloudflare', 'datadome', 'perimeterx'].includes(input.challengeType || '');
+  return knownChallenge && !input.solvingEnabled && !input.storefrontValid
+    ? KNOWN_WAF_FAST_PATH_MS : BOT_CHALLENGE_OBSERVATION_MS;
+}
 
 export const activeScansRegistry = {
   abortedScans: new Set<string | number>(),
@@ -97,7 +110,8 @@ class ScanTermination extends Error {
   constructor(
     readonly category: ErrorCategory,
     readonly finalStatus: ScanStatus,
-    message: string
+    message: string,
+    readonly reasonCode?: string
   ) {
     super(message);
   }
@@ -1181,6 +1195,8 @@ export async function runStorefrontAudit(
   let proxyFallbackUsed = currentProxyProvider === 'browserless_residential';
   let proxyFallbackRecovered = false;
   let neutralProbeSucceeded: boolean | undefined;
+  let browserlessFallbackRetried = false;
+  let captchaTraceIdentity = '';
   let lastTunnelPhase: 'connect' | 'target' = 'connect';
   let lastProxyPort: number | null = null;
   let lastProxyRotated = false;
@@ -1501,9 +1517,13 @@ export async function runStorefrontAudit(
     const authorizedSession = await attachAuthorizedAccessHeader(context, homepage, normalizedDomain || '');
     if (process.env.BROWSER_PROVIDER !== 'local') {
       const captchaTelemetry = await context.newCDPSession(homepage).catch(() => null);
+      const captchaIdentity = `${currentProxyProvider}:${proxyAttempt + 1}`;
       captchaTelemetry?.on('Browserless.captchaFound', () => {
         evidence.runtime.captcha_found = true;
-        addTrace('browserless_captcha_found');
+        if (captchaTraceIdentity !== captchaIdentity) {
+          captchaTraceIdentity = captchaIdentity;
+          addTrace('browserless_captcha_found', { provider: currentProxyProvider, attempt: proxyAttempt + 1 });
+        }
       });
       captchaTelemetry?.on('Browserless.captchaSolved', () => {
         evidence.runtime.captcha_solved = true;
@@ -1853,17 +1873,38 @@ export async function runStorefrontAudit(
           throw new ScanTermination('proxy_error', 'failed', 'Proxy tunnel failed after bounded retry');
         }
         if (isProxyFailure(error)) {
+          const rawFailure = classifyBrowserConnectionError(error);
+          const targetTunnel = currentProxyProvider === 'browserless_residential' && isConfirmedTunnelFailure(error);
+          const classification = targetTunnel
+            ? classifyConfirmedTunnelFailure(lastTunnelPhase, neutralProbeSucceeded ?? evidence.runtime.proxy_egress_reachable)
+            : 'PROXY_PROVIDER_UNREACHABLE';
           if (proxyFallbackUsed && String(currentProxyProvider) === 'browserless_residential') {
-            addTrace('proxy_provider_fallback_failed', { provider: 'browserless_residential', failure_code: classifyBrowserConnectionError(error) });
+            addTrace('proxy_provider_fallback_failed', { provider: 'browserless_residential', raw_failure_code: rawFailure, failure_code: classification });
           }
           addTrace('proxy_failure_classified', {
-            reason_code: classifyBrowserConnectionError(error), provider: currentProxyProvider, attempt: proxyAttempt + 1
+            reason_code: classification, raw_failure_code: rawFailure, provider: currentProxyProvider, attempt: proxyAttempt + 1
           });
           evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, {
-            target_result: 'failed', failure_classification: 'PROXY_PROVIDER_UNREACHABLE'
+            target_result: 'failed', failure_classification: classification
           });
-          evidenceCollector.setAccess({ challenge_type: 'proxy_failure' });
-          throw new ScanTermination('proxy_error', 'failed', 'Proxy transport failed during browser navigation');
+          const transientFallbackFailure = currentProxyProvider === 'browserless_residential' &&
+            ['PROXY_TUNNEL_FAILED', 'PROXY_CONNECTION_RESET', 'PROXY_CONNECTION_FAILED'].includes(rawFailure);
+          if (shouldRetryBrowserlessResidential({
+            isBulk: params.is_bulk,
+            alreadyRetried: browserlessFallbackRetried,
+            rawFailure,
+            remainingMs: runtimeBudget.remaining(),
+            minRemainingMs: BROWSERLESS_RETRY_MIN_REMAINING_MS
+          })) {
+            browserlessFallbackRetried = true;
+            proxyAttempt += 1;
+            addTrace('browserless_residential_retry_started', { reason_code: classification, raw_failure_code: rawFailure, remaining_ms: runtimeBudget.remaining() });
+            continue;
+          }
+          if (transientFallbackFailure && !browserlessFallbackRetried) {
+            addTrace('browserless_residential_retry_skipped', { reason_code: classification, remaining_ms: runtimeBudget.remaining(), is_bulk: Boolean(params.is_bulk) });
+          }
+          throw new ScanTermination('proxy_error', 'failed', 'Proxy transport failed during browser navigation', classification);
         }
         if (isNavigationTimeout(error)) throw new ScanTermination('navigation_timeout', 'failed', 'Homepage navigation timed out');
         addTrace('homepage_navigation_failed', { failure_code: classifyNavigationError(error) });
@@ -1881,14 +1922,22 @@ export async function runStorefrontAudit(
           botSignals: access.botSignals,
           retryAfterMs: access.retryAfterMs
         });
+        const bqlEnabled = process.env.BROWSERLESS_CHALLENGE_SOLVING_ENABLED === 'true';
+        const solvingEnabled = Boolean(params.enable_captcha_solving && !params.is_bulk && bqlEnabled);
+        const observationMs = botChallengeObservationWindow({
+          challengeType: access.challengeType,
+          solvingEnabled,
+          storefrontValid: evidence.page.valid === true
+        });
         addTrace('bot_protection_detected_initial', {
           status,
           provider: access.botProvider,
           signals: access.botSignals,
-          observation_ms: BOT_CHALLENGE_OBSERVATION_MS
+          observation_ms: observationMs,
+          fast_path: observationMs === KNOWN_WAF_FAST_PATH_MS
         });
         const challengeStarted = Date.now();
-        while (Date.now() - challengeStarted < BOT_CHALLENGE_OBSERVATION_MS) {
+        while (Date.now() - challengeStarted < observationMs) {
           await wait(500, homepage);
           const observed = await inspectPageAccess(homepage!, null, evidence, [...accessNetworkSignals]);
           if (observed.category === 'none' && !isNonStorefrontUrl(homepage!.url())) {
@@ -1992,7 +2041,7 @@ export async function runStorefrontAudit(
           continue;
         }
         if (access.category === 'rate_limited') addTrace('http_rate_limit_confirmed', { status });
-        throw new ScanTermination(access.category, 'failed', `Storefront access failed (${access.reasonCode})`);
+        throw new ScanTermination(access.category, 'failed', `Storefront access failed (${access.reasonCode})`, access.reasonCode);
       }
 
       if (solveCaptchas) {
@@ -3043,11 +3092,11 @@ export async function runStorefrontAudit(
     if (error instanceof ScanTermination) {
       finalError = error.category;
       finalStatus = error.finalStatus;
-      terminalReasonCode = error.category === 'scan_timeout' ? 'SCAN_TIMEOUT' : error.category === 'cancelled' ? 'SCAN_CANCELLED' : 'SCAN_ABORTED';
+      terminalReasonCode = error.reasonCode || (error.category === 'scan_timeout' ? 'SCAN_TIMEOUT' : error.category === 'cancelled' ? 'SCAN_CANCELLED' : 'SCAN_ABORTED');
       addTrace(
         error.category === 'cancelled' ? 'manual_scan_cancelled' :
           error.category === 'scan_timeout' ? 'scan_timeout' : 'scan_aborted',
-        { error_category: error.category, reason: error.message, phase: currentPhase, reason_code: error.category === 'scan_timeout' ? 'SCAN_TIMEOUT' : undefined, error_family: error.category }
+        { error_category: error.category, reason: error.message, phase: currentPhase, reason_code: terminalReasonCode, error_family: error.category }
       );
     } else {
       const timedOut = Date.now() - startedMs >= timeoutMs;

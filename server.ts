@@ -426,6 +426,12 @@ app.get('/api/v1/scans', asyncRoute(async (req, res) => {
   res.json(result);
 }));
 
+app.get('/api/v1/scans/:id/status', asyncRoute(async (req, res) => {
+  const status = await db.getAuditLifecycleStatus(req.params.id);
+  if (!status) return res.status(404).json({ error: 'Audit not found.' });
+  res.json(status);
+}));
+
 app.get('/api/v1/scans/:id', asyncRoute(async (req, res) => {
   const audit = await db.getAudit(req.params.id);
   if (!audit) return res.status(404).json({ error: 'Audit not found.' });

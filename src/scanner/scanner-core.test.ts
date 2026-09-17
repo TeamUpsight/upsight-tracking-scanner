@@ -13,7 +13,7 @@ import { buildQualityMetrics } from './quality/metrics';
 import { buildLatestReviewQueue } from './quality/review-queue';
 import { calculateQaPriority, generateFailureFingerprints, qaPrioritySignals } from './quality/fingerprints';
 import { buildBrowserlessCdpUrl, buildRotatingFallbackProxy, getExternalProxyForGeo, rotateDecodoSessionUsername } from './proxy/decodo';
-import { buildProxyAttemptPlan, classifyConfirmedTunnelFailure, shouldUseBrowserlessResidentialFallback } from './proxy/provider';
+import { buildProxyAttemptPlan, classifyConfirmedTunnelFailure, shouldRetryBrowserlessResidential, shouldUseBrowserlessResidentialFallback } from './proxy/provider';
 import { decideAccessTransition } from './access-state-machine';
 import { FinalizeOnce } from './resolver/lifecycle';
 import { resolveConsentStatus, resolveProductPayloadStatus } from './resolver/status-resolver';
@@ -21,7 +21,7 @@ import { classifyCollection, findStrictDuplicates } from './server-side/classify
 import { parseGA4DataLayerEntry, parseGA4Request } from './tracking/ga4';
 import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } from './tracking/meta';
 import {
-  assessPdpCandidate, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
+  assessPdpCandidate, botChallengeObservationWindow, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
   canKeepTimedOutPdp, isStrongProductPath, isViewItemForPdp, parseEgressCountry, pdpCandidateRejectionReason,
   acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, classifyProductApplicability, classifyProductPageRole, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, sharedPreConsentMeasurementState, trustArcPreferenceControls, twoLevelPdpCandidate
 } from './audit-runner';
@@ -743,6 +743,31 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     proxyEvidence.page.access_category = 'proxy_error';
     const failed = replayEvidence(proxyEvidence);
     expect(failed.error_category).not.toMatch(/access_blocked|bot_protection|rate_limited/);
+  });
+
+  it('bounds known WAF observation and allows one fresh Browserless retry only for eligible transient failures', () => {
+    expect(botChallengeObservationWindow({ challengeType: 'akamai', solvingEnabled: false, storefrontValid: false })).toBe(1_500);
+    expect(botChallengeObservationWindow({ challengeType: 'cloudflare', solvingEnabled: true, storefrontValid: false })).toBe(12_000);
+    expect(botChallengeObservationWindow({ challengeType: 'generic_waf', solvingEnabled: false, storefrontValid: false })).toBe(12_000);
+    expect(shouldRetryBrowserlessResidential({
+      isBulk: false, alreadyRetried: false, rawFailure: 'PROXY_TUNNEL_FAILED', remainingMs: 15_000, minRemainingMs: 15_000
+    })).toBe(true);
+    expect(shouldRetryBrowserlessResidential({
+      isBulk: false, alreadyRetried: true, rawFailure: 'PROXY_TUNNEL_FAILED', remainingMs: 30_000, minRemainingMs: 15_000
+    })).toBe(false);
+    expect(shouldRetryBrowserlessResidential({
+      isBulk: true, alreadyRetried: false, rawFailure: 'PROXY_CONNECTION_RESET', remainingMs: 30_000, minRemainingMs: 15_000
+    })).toBe(false);
+    expect(shouldRetryBrowserlessResidential({
+      isBulk: false, alreadyRetried: false, rawFailure: 'BROWSERLESS_AUTH_FAILED', remainingMs: 30_000, minRemainingMs: 15_000
+    })).toBe(false);
+  });
+
+  it('preserves an identified WAF when a later proxy failure is recorded', () => {
+    const collector = new EvidenceCollector({ auditId: 'access-monotonic', domain: 'example.com', geo: 'USA' });
+    collector.setAccess({ challenge_detected: true, challenge_type: 'akamai' });
+    collector.setAccess({ challenge_type: 'proxy_failure' });
+    expect(collector.bundle.access).toMatchObject({ challenge_detected: true, challenge_type: 'akamai' });
   });
 
   it('parses flat and nested proxy egress countries without retaining the IP', () => {

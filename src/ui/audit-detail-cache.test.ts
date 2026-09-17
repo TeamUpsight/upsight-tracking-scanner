@@ -25,4 +25,33 @@ describe('AuditDetailCache', () => {
     await cache.load('42', fetchAudit);
     expect(fetchAudit).toHaveBeenCalledTimes(2);
   });
+
+  it('deduplicates concurrent forced terminal-detail refreshes after invalidation', async () => {
+    const cache = new AuditDetailCache();
+    const fetchAudit = vi.fn(async () => detail);
+    await cache.load('42', fetchAudit);
+    cache.invalidate('42');
+
+    await Promise.all([
+      cache.load('42', fetchAudit, true),
+      cache.load('42', fetchAudit, true)
+    ]);
+
+    expect(fetchAudit).toHaveBeenCalledTimes(2);
+  });
+
+  it('fetches terminal detail after an in-flight active detail response', async () => {
+    const cache = new AuditDetailCache();
+    let resolveActive: ((audit: StorefrontAudit) => void) | undefined;
+    const fetchAudit = vi.fn()
+      .mockImplementationOnce(() => new Promise<StorefrontAudit>((resolve) => { resolveActive = resolve; }))
+      .mockResolvedValue(detail);
+
+    const active = cache.load('42', fetchAudit);
+    const terminal = cache.load('42', fetchAudit, true);
+    resolveActive?.(detail);
+    await Promise.all([active, terminal]);
+
+    expect(fetchAudit).toHaveBeenCalledTimes(2);
+  });
 });

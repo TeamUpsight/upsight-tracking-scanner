@@ -520,6 +520,13 @@ export type AuditSummary = Pick<StorefrontAudit,
   | 'qa_review_status' | 'qa_reviewed_at'
 >;
 
+/** Tiny selected-audit lifecycle contract. It intentionally excludes all
+ * evidence, trace, confidence, and runtime JSON payloads. */
+export type AuditLifecycleStatus = Pick<StorefrontAudit,
+  'audit_id' | 'scan_status' | 'scan_started_at' | 'scan_completed_at' | 'overall_status'
+  | 'error_category' | 'terminal_runtime_phase' | 'terminal_reason_code'
+>;
+
 export interface AuditListResponse {
   items: AuditSummary[];
   pagination: {

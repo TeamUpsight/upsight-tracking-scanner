@@ -65,3 +65,17 @@ export function classifyConfirmedTunnelFailure(phase: 'connect' | 'target', neut
 export function shouldUseBrowserlessResidentialFallback(input: { isBulk?: boolean; enabled?: boolean }) {
   return input.isBulk !== true && input.enabled === true;
 }
+
+/** A Browserless Residential session may be freshened once for transient
+ * transport trouble. Authentication, plan, and configuration errors never
+ * meet this narrow classifier. */
+export function shouldRetryBrowserlessResidential(input: {
+  isBulk?: boolean;
+  alreadyRetried: boolean;
+  rawFailure: string;
+  remainingMs: number;
+  minRemainingMs: number;
+}) {
+  return input.isBulk !== true && !input.alreadyRetried && input.remainingMs >= input.minRemainingMs &&
+    ['PROXY_TUNNEL_FAILED', 'PROXY_CONNECTION_RESET', 'PROXY_CONNECTION_FAILED'].includes(input.rawFailure);
+}

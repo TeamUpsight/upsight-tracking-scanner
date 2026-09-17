@@ -1,5 +1,5 @@
 import pg from 'pg';
-import type { AuditListFilter, AuditListQuery, AuditListResponse, AuditModule, AuditQueueOptions, AuditSummary, QaFeedback, ScanMode, StorefrontAudit } from './types';
+import type { AuditLifecycleStatus, AuditListFilter, AuditListQuery, AuditListResponse, AuditModule, AuditQueueOptions, AuditSummary, QaFeedback, ScanMode, StorefrontAudit } from './types';
 import { selectedAuditModules } from './audit-modules';
 import { normalizeQueueOptions } from './audit-lifecycle';
 import { boundedInteger } from './shared/config';
@@ -24,6 +24,13 @@ const AUDIT_SUMMARY_COLUMNS = [
   'site_ga4_collection_hit_detected', 'site_google_ads_detected', 'site_meta_detected',
   'site_meta_collection_hit_detected', 'failure_fingerprints', 'consistency_violations', 'qa_priority',
   'qa_review_status', 'qa_reviewed_at'
+].join(', ');
+
+// Used only by the selected-audit lifecycle poll. Keep this list deliberately
+// smaller than the paginated summary and never route it through getAudit().
+const AUDIT_LIFECYCLE_COLUMNS = [
+  'audit_id', 'scan_status', 'scan_started_at', 'scan_completed_at', 'overall_status',
+  'error_category', 'terminal_runtime_phase', 'terminal_reason_code'
 ].join(', ');
 
 const AUDIT_EXPORT_COLUMNS = [
@@ -415,6 +422,20 @@ export class AuditDatabase {
     if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
     const audit = this.memoryDb.find((candidate) => String(candidate.audit_id) === String(id));
     return audit ? { ...audit, qa_feedback: await this.getQaFeedback(id) } : null;
+  }
+
+  async getAuditLifecycleStatus(id: string | number): Promise<AuditLifecycleStatus | null> {
+    if (this.pool) {
+      const result = await this.pool.query(
+        `SELECT ${AUDIT_LIFECYCLE_COLUMNS} FROM storefront_audits_v2 WHERE audit_id = $1`, [id]
+      );
+      return result.rows[0] || null;
+    }
+    if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
+    const audit = this.memoryDb.find((candidate) => String(candidate.audit_id) === String(id));
+    if (!audit) return null;
+    const { audit_id, scan_status, scan_started_at, scan_completed_at, overall_status, error_category, terminal_runtime_phase, terminal_reason_code } = audit;
+    return { audit_id, scan_status, scan_started_at, scan_completed_at, overall_status, error_category, terminal_runtime_phase, terminal_reason_code };
   }
 
   async getAuditPage(query: AuditListQuery = {}): Promise<AuditListResponse> {

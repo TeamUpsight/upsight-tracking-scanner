@@ -154,6 +154,27 @@ describe('audit persistence contracts', () => {
     expect(exported[0]).not.toHaveProperty('runtime_metrics');
   });
 
+  it('returns a tiny selected-audit lifecycle record without evidence or trace payloads', async () => {
+    vi.stubEnv('USE_MEMORY_DB', 'true');
+    vi.stubEnv('DB_HOST', '');
+    vi.stubEnv('DB_NAME', '');
+    vi.stubEnv('DB_USER', '');
+    const db = new AuditDatabase();
+    const created = await db.createAudit('lifecycle.example', 'USA');
+    await db.updateAudit(created.audit_id, {
+      scan_status: 'completed', scan_completed_at: '2026-09-17T00:00:00.000Z',
+      overall_status: 'pass', terminal_reason_code: 'SCAN_COMPLETED',
+      trace_steps: JSON.stringify([{ step: 'large_trace' }]),
+      evidence_bundle: new EvidenceCollector({ auditId: 'lifecycle', domain: 'lifecycle.example', geo: 'USA' }).bundle
+    });
+
+    const lifecycle = await db.getAuditLifecycleStatus(created.audit_id);
+    expect(lifecycle).toMatchObject({ audit_id: created.audit_id, scan_status: 'completed', overall_status: 'pass' });
+    expect(lifecycle).not.toHaveProperty('evidence_bundle');
+    expect(lifecycle).not.toHaveProperty('trace_steps');
+    expect(lifecycle).not.toHaveProperty('runtime_metrics');
+  });
+
   it('persists PDP, tracking-enablement, and safe proxy fallback evidence through the existing evidence model', () => {
     const evidence = new EvidenceCollector({ auditId: 'evidence', domain: 'example.com', geo: 'USA', selectedModules: ['tracking'] }).bundle;
     evidence.page.valid = true;
