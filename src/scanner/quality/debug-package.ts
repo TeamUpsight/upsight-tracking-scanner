@@ -15,7 +15,9 @@ function sanitizeCandidateUrl(raw: string | null | undefined) {
 
 export function buildDebugPackageFiles(audit: StorefrontAudit) {
   const measurement = audit.evidence_bundle?.runtime.consent_v2?.measurement;
-  const consentMeasurement = measurement ? reconcileConsentMeasurement(measurement.sources) : reconcileConsentMeasurement([normalizeConsentMeasurement(audit.evidence_bundle?.network.relevant_requests || [], 'shared', null, undefined, audit.evidence_bundle?.network.relevant_requests_truncated)]);
+  // New bundles persist the canonical audit-level snapshot. Only legacy
+  // bundles without that field reconstruct their bounded shared evidence.
+  const consentMeasurement = measurement || reconcileConsentMeasurement([normalizeConsentMeasurement(audit.evidence_bundle?.network.relevant_requests || [], 'shared', null, undefined, audit.evidence_bundle?.network.relevant_requests_truncated)]);
   const trace = (() => {
     try {
       return audit.trace_steps ? JSON.parse(audit.trace_steps) : [];

@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { chromium } from 'playwright-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runStorefrontAudit } from './audit-runner';
+import { runStorefrontAudit, type AuditRunnerDependencies } from './audit-runner';
 import type { StorefrontAudit } from '../types';
 import { buildDebugPackageFiles } from './quality/debug-package';
 
@@ -37,7 +37,14 @@ async function closeServer(server: Server) {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-async function auditFixture(status: number, html: FixtureHtml, consentV2Enabled = true, selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent'], actionsEnabled = consentV2Enabled) {
+async function auditFixture(
+  status: number,
+  html: FixtureHtml,
+  consentV2Enabled = true,
+  selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent'],
+  actionsEnabled = consentV2Enabled,
+  dependencies: Pick<AuditRunnerDependencies, 'createFreshConsentContext'> = {}
+) {
   vi.stubEnv('BROWSER_PROVIDER', 'local');
   vi.stubEnv('CONSENT_V2_ENABLED', consentV2Enabled ? 'true' : 'false');
   vi.stubEnv('CONSENT_V2_ACTIONS_ENABLED', actionsEnabled ? 'true' : 'false');
@@ -55,6 +62,7 @@ async function auditFixture(status: number, html: FixtureHtml, consentV2Enabled 
       storefrontUrl: fixture.url,
       resolveHostname: resolvedFixtureHost,
       consentGeoVerified: true,
+      ...dependencies,
       launchBrowser: () => chromium.launch({
         executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
         args: ['--host-resolver-rules=MAP fixture.example 127.0.0.1'],
@@ -382,6 +390,46 @@ describe('runStorefrontAudit production browser wiring', () => {
     const summary = JSON.parse(String(buildDebugPackageFiles(result)['consent-summary.json']));
     expect(summary.measurement).toEqual(measurement);
     expect(summary.pre_choice_measurement).toBe(state);
+  }, 35_000);
+
+  it('CMP-TELEM-SURVIVE-01 persists shared limited telemetry after a successful fresh session', async () => {
+    let homepageLoads = 0;
+    const result = await auditFixture(200, (path) => {
+      if (path !== '/') return '';
+      const marker = ++homepageLoads === 1 ? 'G100' : 'G100';
+      return `<script>new Image().src='/g/collect?tid=G-FIXTURE&en=page_view&gcs=${marker}';</script>${oneTrust}`;
+    }, true, ['consent'], false) as unknown as StorefrontAudit;
+    const measurement = result.runtime_metrics?.consent_v2?.measurement;
+    expect(measurement).toMatchObject({ state: 'limited_measurement', limited_measurement_count: 2 });
+    expect(result.runtime_metrics?.consent_v2).toMatchObject({ session_status: 'completed', observation_only: true });
+    expect(JSON.parse(String(buildDebugPackageFiles(result)['consent-summary.json'])).measurement).toEqual(measurement);
+  }, 35_000);
+
+  it('CMP-TELEM-SURVIVE-02 Audit 409 preserves shared telemetry when the fresh PDP context is unavailable', async () => {
+    const result = await auditFixture(
+      200,
+      `<script>new Image().src='/g/collect?tid=G-FIXTURE&en=page_view&gcs=G100';</script>${oneTrust}`,
+      true,
+      ['consent', 'tracking'],
+      false,
+      { createFreshConsentContext: async () => { throw new Error('Target page, context or browser has been closed'); } }
+    ) as unknown as StorefrontAudit;
+    const evidence = result.evidence_bundle!;
+    const telemetry = result.runtime_metrics?.consent_v2!;
+    expect(result).toMatchObject({ scan_status: 'partial' });
+    // The shared consent baseline executed; session_status distinguishes the
+    // unavailable fresh PDP session from that completed shared observation.
+    expect(evidence.consent).toMatchObject({ executed: true, pre_choice_measurement: 'limited_measurement' });
+    expect(telemetry).toMatchObject({
+      session_status: 'unavailable', observation_only: true, provider: null,
+      interaction_outcome: 'not_attempted', verification: 'inconclusive', persistence: 'inconclusive',
+      measurement: { state: 'limited_measurement', limited_measurement_count: 1, full_measurement_count: 0, unknown_measurement_count: 0, contradiction: false }
+    });
+    expect(telemetry.measurement?.sources.map((source) => source.context)).toEqual(['shared']);
+    expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([
+      expect.objectContaining({ step: 'consent_pdp_reject_inconclusive', error_family: 'PAGE_CONTEXT_UNAVAILABLE' })
+    ]));
+    expect(JSON.parse(String(buildDebugPackageFiles(result)['consent-summary.json'])).measurement).toEqual(telemetry.measurement);
   }, 35_000);
 
   it('SERVER-BUDGET-01 preserves passive server classification with the minimum global budget', async () => {

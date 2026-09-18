@@ -31,7 +31,7 @@ import {
 } from './consent/fresh-context';
 import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
 import { consentV2RolloutControls } from './consent/rollout-controls';
-import { prepareConsentV2Session, runConsentV2Session, type ConsentV2SessionOutput } from './consent/v2-session';
+import { prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput } from './consent/v2-session';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { isValidStorefrontStatus, resolveAccessDecision, resolveHostnameEvidence, type AccessDecision } from './navigation';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
@@ -106,6 +106,7 @@ export interface AuditRunnerDependencies {
   storefrontUrl?: string;
   resolveHostname?: typeof resolveHostnameEvidence;
   consentGeoVerified?: boolean | null;
+  createFreshConsentContext?: typeof createFreshConsentContext;
 }
 
 class ScanTermination extends Error {
@@ -1152,7 +1153,8 @@ export async function runStorefrontAudit(
   const selectedModules = selectedAuditModules(params.selected_modules);
   const runtimeBudget = new AuditRuntimeBudget(startedMs, timeoutMs, selectedModules);
   const consentSelected = selectedModules.includes('consent');
-  const consentV2Enabled = consentV2RolloutControls().enabled;
+  const consentV2Controls = consentV2RolloutControls();
+  const consentV2Enabled = consentV2Controls.enabled;
   const trackingSelected = selectedModules.includes('tracking');
   const serverSelected = selectedModules.includes('server_side');
   const evidenceCollector = new EvidenceCollector({
@@ -1214,11 +1216,22 @@ export async function runStorefrontAudit(
     }
   };
 
-  const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null, emitTrace = true) => {
-    const measurement = reconcileConsentMeasurement([
+  const canonicalConsentMeasurement = (freshSources = evidence.runtime.consent_v2?.measurement?.sources.filter((source) => source.context === 'fresh') || []) =>
+    reconcileConsentMeasurement([
       normalizeConsentMeasurement(sharedConsentRequests.requests, 'shared', null, sharedConsentGcm.result(), sharedConsentRequests.truncated, sharedConsentRequests.observed),
-      ...(result.telemetry.measurement?.sources.filter((source) => source.context === 'fresh') || [])
+      ...freshSources
     ]);
+
+  const persistConsentMeasurementTelemetry = (freshSources?: ReturnType<typeof canonicalConsentMeasurement>['sources']) => {
+    const measurement = canonicalConsentMeasurement(freshSources?.filter((source) => source.context === 'fresh'));
+    if (evidence.runtime.consent_v2) evidence.runtime.consent_v2.measurement = measurement;
+    else evidence.runtime.consent_v2 = unavailableConsentV2Telemetry(measurement, consentV2Controls);
+    evidence.consent.pre_choice_measurement = measurement.state;
+    return measurement;
+  };
+
+  const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null, emitTrace = true) => {
+    const measurement = persistConsentMeasurementTelemetry(result.telemetry.measurement?.sources);
     result.telemetry.measurement = measurement;
     evidence.runtime.consent_v2 = result.telemetry;
     const preChoice = measurement.state;
@@ -1373,6 +1386,7 @@ export async function runStorefrontAudit(
         new Promise((resolve) => setTimeout(resolve, 1_500))
       ]);
     }
+    if (consentSelected && consentV2Enabled) persistConsentMeasurementTelemetry();
     if (consentV2) enrichConsentV2Evidence(consentV2, evidence.page.valid, false);
     await closeSession();
     const completedEvidence = evidenceCollector.complete(startedMs);
@@ -2125,11 +2139,10 @@ export async function runStorefrontAudit(
     let cmp: ReturnType<typeof detectCMP>;
     const consentStarted = Date.now();
     if (consentSelected && consentV2Enabled && !trackingSelected) {
-      evidence.consent.executed = true;
       currentPhase = 'consent_fresh_initial_load';
       let consentCapture: Awaited<ReturnType<typeof prepareConsentV2Session>> | null = null;
       try {
-        const freshConsent = await createFreshConsentContext(browser!, {
+        const freshConsent = await (dependencies.createFreshConsentContext || createFreshConsentContext)(browser!, {
           requestedGeo: geo,
           proxyRegion: currentProxyCountry,
           independentlyVerified: dependencies.consentGeoVerified ?? (evidence.runtime.proxy_egress_reachable ? evidence.runtime.proxy_country_verified : null)
@@ -2928,7 +2941,7 @@ export async function runStorefrontAudit(
         currentPhase = 'consent_pdp_reject';
         let consentCapture: Awaited<ReturnType<typeof prepareConsentV2Session>> | null = null;
         try {
-          const freshConsent = await createFreshConsentContext(browser!, {
+          const freshConsent = await (dependencies.createFreshConsentContext || createFreshConsentContext)(browser!, {
             requestedGeo: geo, proxyRegion: currentProxyCountry,
             independentlyVerified: dependencies.consentGeoVerified ?? (evidence.runtime.proxy_egress_reachable ? evidence.runtime.proxy_country_verified : null)
           });
@@ -2979,7 +2992,7 @@ export async function runStorefrontAudit(
       currentPhase = 'accept_comparison';
       let acceptContext: BrowserContext | null = null;
       try {
-        const freshAccept = await createFreshConsentContext(browser!, {
+        const freshAccept = await (dependencies.createFreshConsentContext || createFreshConsentContext)(browser!, {
           requestedGeo: geo, proxyRegion: currentProxyCountry,
           independentlyVerified: dependencies.consentGeoVerified ?? null
         });

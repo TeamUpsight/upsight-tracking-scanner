@@ -14,7 +14,7 @@ import { shopifyCustomerPrivacyMechanism } from './shopify-customer-privacy-runt
 import { verifySameContextReloadPersistence } from './persistence-verification';
 import { verifyRequestedConsentAction } from './reject-verification-engine';
 import { collectRejectVerificationSignals } from './verification-evidence';
-import { captureConsentTrackingRequest, checkTrackingConsistency, ConsentRequestBuffer, normalizeConsentMeasurement, reconcileConsentMeasurement, type TrackingConsistencyResult } from './tracking-consistency';
+import { captureConsentTrackingRequest, checkTrackingConsistency, ConsentRequestBuffer, normalizeConsentMeasurement, reconcileConsentMeasurement, type ConsentMeasurementSummary, type TrackingConsistencyResult } from './tracking-consistency';
 import { buildUnknownCmpFingerprint } from './unknown-cmp-fingerprint';
 import { consentV2ActionsEnabledFor, consentV2RolloutControls, type ConsentV2RolloutControls, type ConsentV2RolloutProvider } from './rollout-controls';
 
@@ -199,6 +199,7 @@ function telemetry(result: FinalConsentAuditResult, tracking: TrackingConsistenc
           : interaction ? 'inconclusive' : 'not_attempted';
   return {
     measurement: reconcileConsentMeasurement([normalizeConsentMeasurement(capture.requests, 'fresh', timeline.user_choice_at, capture.gcm.result(), capture.request_buffer.truncated, capture.request_buffer.observed)]),
+    session_status: 'completed',
     enabled: controls.enabled, observation_only: !actionsEnabled,
     provider: provider || (custom ? 'generic' : null),
     provider_confidence: provider ? 'high' : custom ? 'medium' : null,
@@ -216,6 +217,48 @@ function telemetry(result: FinalConsentAuditResult, tracking: TrackingConsistenc
     consent_mode_classification: result.google_consent_mode.evidence[0] || 'unknown', tracking_consistency: tracking.status,
     unknown_cmp_fingerprint: fingerprint?.fingerprint || null, geo_unverified: result.geo_verified.status !== 'verified',
     blocked_or_challenged: blocked, timeline: { ...timeline }
+  };
+}
+
+/**
+ * Shared pre-choice measurement belongs to the audit observation even when a
+ * separate fresh page cannot be created or navigated.  Keep that provenance
+ * without fabricating provider, framework, action, or persistence results.
+ */
+export function unavailableConsentV2Telemetry(
+  measurement: ConsentMeasurementSummary,
+  controls: ConsentV2RolloutControls = consentV2RolloutControls()
+): ConsentV2Telemetry {
+  return {
+    measurement,
+    session_status: 'unavailable',
+    enabled: controls.enabled,
+    observation_only: true,
+    provider: null,
+    provider_confidence: null,
+    provider_conflict: false,
+    banner_visibility: 'unknown',
+    reject_availability: 'unknown',
+    interaction_outcome: 'not_attempted',
+    action_attempted: false,
+    preferences_opened: false,
+    reject_attempted: false,
+    reject_outcome: 'not_attempted',
+    verification: 'inconclusive',
+    persistence: 'inconclusive',
+    generic_fallback: false,
+    selector_or_action_failure: false,
+    tcf_present: false,
+    gpp_present: false,
+    tcf_lifecycle: 'unavailable',
+    gpp_lifecycle: 'unavailable',
+    usp_present: false,
+    action_status: 'not_attempted',
+    consent_mode_classification: 'unavailable',
+    tracking_consistency: 'not_applicable',
+    unknown_cmp_fingerprint: null,
+    geo_unverified: true,
+    blocked_or_challenged: false
   };
 }
 

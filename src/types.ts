@@ -395,6 +395,8 @@ export interface EvidenceBundle {
       /** Consent-only normalized provenance. Signal counts cover retained evidence;
        * observed counts include buffer overflow. Truncation never proves absence. */
       measurement?: import('./scanner/consent/tracking-consistency').ConsentMeasurementSummary;
+      /** Whether fresh Consent V2 semantics completed, independently of shared measurement capture. */
+      session_status?: 'completed' | 'unavailable';
       enabled: boolean;
       observation_only: boolean;
       provider: string | null;
@@ -414,8 +416,8 @@ export interface EvidenceBundle {
       selector_or_action_failure: boolean;
       tcf_present: boolean;
       gpp_present: boolean;
-      tcf_lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error';
-      gpp_lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error';
+      tcf_lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error' | 'unavailable';
+      gpp_lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error' | 'unavailable';
       usp_present: boolean;
       action_status: 'not_attempted' | 'unsupported' | 'not_executed' | 'executed' | 'verified' | 'inconclusive';
       consent_mode_classification: string;

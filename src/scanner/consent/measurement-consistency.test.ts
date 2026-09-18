@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { captureConsentTrackingRequest, ConsentRequestBuffer, normalizeConsentMeasurement, reconcileConsentMeasurement } from './tracking-consistency';
 import { GoogleConsentModeObserver } from './google-consent-mode-observer';
+import { unavailableConsentV2Telemetry } from './v2-session';
 import type { StorefrontAudit } from '../../types';
 import { EvidenceCollector } from '../evidence/evidence-collector';
 import { replayEvidence } from '../quality/replay';
@@ -143,5 +144,46 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
     const summary = JSON.parse(String(buildDebugPackageFiles(audit)['consent-summary.json']));
     expect(summary).toMatchObject({ pre_choice_measurement: 'limited_measurement', limited_measurement_count: 1, full_measurement_count: 0, measurement: { pre_choice_event_hits: 1 } });
     expect(summary.measurement).toEqual(measurement);
+  });
+
+  it.each([
+    ['CMP-TELEM-SURVIVE-03', 'G111', 'full_measurement'],
+    ['CMP-TELEM-SURVIVE-04', '', 'unknown'],
+    ['CMP-TELEM-SURVIVE-05', null, false]
+  ] as const)('%s retains the shared measurement snapshot when no fresh session is available', (_id, marker, expected) => {
+    const requests = marker === null ? [] : [request(marker, 'product_pdp_load')];
+    const measurement = reconcileConsentMeasurement([normalizeConsentMeasurement(requests, 'shared', null)]);
+    const telemetry = unavailableConsentV2Telemetry(measurement);
+    expect(telemetry).toMatchObject({ session_status: 'unavailable', observation_only: true, measurement: { state: expected } });
+  });
+
+  it.each([
+    ['CMP-TELEM-SURVIVE-06', 'G100', 'G111'],
+    ['CMP-TELEM-SURVIVE-07', 'G111', 'G100']
+  ])('%s preserves a shared/fresh conflict as unknown', (_id, shared, fresh) => {
+    const measurement = reconcileConsentMeasurement([
+      normalizeConsentMeasurement([request(shared, 'product_pdp_load')], 'shared', null),
+      normalizeConsentMeasurement([request(fresh)], 'fresh', null)
+    ]);
+    expect(measurement).toMatchObject({ state: 'unknown', contradiction: true });
+  });
+
+  it('CMP-TELEM-SURVIVE-08 debug summary reads persisted canonical measurement', () => {
+    const collector = new EvidenceCollector({ auditId: 'telemetry-canonical', domain: 'fixture.example', geo: 'EU', selectedModules: ['consent'] });
+    const evidence = collector.bundle;
+    const measurement = reconcileConsentMeasurement([normalizeConsentMeasurement([request('G100', 'product_pdp_load')], 'shared', null)]);
+    evidence.runtime.consent_v2 = unavailableConsentV2Telemetry(measurement);
+    evidence.consent.pre_choice_measurement = 'full_measurement';
+    const summary = JSON.parse(String(buildDebugPackageFiles({ evidence_bundle: evidence } as StorefrontAudit)['consent-summary.json']));
+    expect(summary.measurement).toEqual(measurement);
+    expect(summary.pre_choice_measurement).toBe('limited_measurement');
+  });
+
+  it('CMP-TELEM-SURVIVE-09 keeps the bounded legacy debug fallback for bundles without runtime telemetry', () => {
+    const collector = new EvidenceCollector({ auditId: 'telemetry-legacy', domain: 'fixture.example', geo: 'EU', selectedModules: ['consent'] });
+    const evidence = collector.bundle;
+    evidence.network.relevant_requests = [request('G100', 'product_pdp_load')];
+    const summary = JSON.parse(String(buildDebugPackageFiles({ evidence_bundle: evidence } as StorefrontAudit)['consent-summary.json']));
+    expect(summary.measurement).toMatchObject({ state: 'limited_measurement', limited_measurement_count: 1 });
   });
 });
