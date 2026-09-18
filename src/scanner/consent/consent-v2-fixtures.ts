@@ -125,7 +125,7 @@ export const CONSENT_V2_FIXTURES: ConsentV2Fixture[] = [
   fixture('SH-08', 'shopify', ['shopify_plus_unknown_cmp'], { provider: 'Unknown', mechanisms: ['commerce_privacy_runtime', 'custom'], external_compatibility: { cmp_provider: 'Unknown', consent_status: 'inconclusive' } }),
 
   fixture('GEN-01', 'generic', ['custom_accept_reject'], { provider: 'Unknown', mechanisms: ['custom'], banner_state: { surface: 'banner', visibility: 'visible' }, actions: [{ action: 'accept_all', availability: 'direct' }, { action: 'reject_all', availability: 'direct' }], external_compatibility: { cmp_provider: 'Unknown', consent_status: 'inconclusive' } }),
-  fixture('GEN-02', 'generic', ['preferences_only'], { provider: 'Unknown', mechanisms: ['custom'], actions: [{ action: 'open_preferences', availability: 'direct' }, { action: 'reject_all', availability: 'preferences_only' }], external_compatibility: { cmp_provider: 'Unknown', consent_status: 'inconclusive' } }),
+  fixture('GEN-02', 'generic', ['preferences_only'], { provider: 'Unknown', mechanisms: ['custom'], actions: [{ action: 'open_preferences', availability: 'direct' }], external_compatibility: { cmp_provider: 'Unknown', consent_status: 'inconclusive' } }),
   fixture('GEN-03', 'generic', ['json_cookie'], { provider: 'Unknown', mechanisms: ['custom'], external_compatibility: { cmp_provider: 'Unknown', consent_status: 'inconclusive' } }),
   fixture('GEN-04', 'generic', ['local_storage'], { provider: 'Unknown', mechanisms: ['custom'], external_compatibility: { cmp_provider: 'Unknown', consent_status: 'inconclusive' } }),
   fixture('GEN-05', 'generic', ['tcf_only_unknown'], { mechanisms: ['framework'], framework_state: { tcf: 'present', gpp: 'not_present', usp: 'not_present' } }),

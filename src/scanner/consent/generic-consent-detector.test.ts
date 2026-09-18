@@ -16,11 +16,11 @@ describe('generic custom consent mechanism fixtures', () => {
     expect(result.action_plan).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'reject_all', origin: 'semantic_ui' })]));
   });
 
-  it('detects a preferences-only banner without pretending first-layer Reject exists', () => {
+  it('detects a preferences-only banner without inventing a Reject path', () => {
     const result = detectGenericConsentMechanism([consentSurface], [control('accept_all'), control('open_preferences')]);
 
     expect(result.status).toBe('detected');
-    expect(result.actions.find((action) => action.action === 'reject_all')).toMatchObject({ availability: 'preferences_only' });
+    expect(result.actions.find((action) => action.action === 'reject_all')).toMatchObject({ availability: 'not_present' });
   });
 
   it('uses consent-shaped JSON cookie metadata only as corroboration, never a raw value', () => {
@@ -108,5 +108,48 @@ describe('generic custom consent mechanism fixtures', () => {
 
     expect(result.status).toBe('detected');
     expect(result.actions.find((action) => action.action === 'reject_all')).toMatchObject({ availability: 'direct' });
+  });
+
+  it('GENERIC-LIVE-01 recognizes a visible cookie notice with settings and acknowledgement without treating acknowledgement as Accept All', () => {
+    const result = detectGenericConsentMechanism([{ ...consentSurface, consent_management_topology: true }], [
+      { surface_id: 'consent-surface', visible: true, enabled: true, actionable: true, accessible_name: 'Manage Cookie Settings' },
+      { surface_id: 'consent-surface', visible: true, enabled: true, actionable: true, accessible_name: 'Acknowledge' }
+    ]);
+
+    expect(result).toMatchObject({ status: 'detected', mechanism: { mechanism: 'custom', provider: { attribution: 'unknown_candidate' } } });
+    expect(result.actions.find((action) => action.action === 'open_preferences')).toMatchObject({ availability: 'direct' });
+    expect(result.actions.find((action) => action.action === 'accept_all')).toMatchObject({ availability: 'not_present' });
+    expect(result.actions.find((action) => action.action === 'reject_all')).toMatchObject({ availability: 'not_present' });
+  });
+
+  it('GENERIC-LIVE-02 excludes the same hidden cookie surface', () => {
+    expect(detectGenericConsentMechanism([{ ...consentSurface, visible: false, consent_management_topology: true }], [control('open_preferences')])).toMatchObject({ status: 'not_detected' });
+  });
+
+  it('GENERIC-LIVE-03 excludes a visible newsletter modal with privacy copy and account settings', () => {
+    expect(detectGenericConsentMechanism([{ ...consentSurface, intent: 'newsletter' }], [control('open_preferences')])).toMatchObject({ status: 'not_detected' });
+  });
+
+  it('GENERIC-LIVE-04 excludes a privacy-policy informational acknowledgement', () => {
+    expect(detectGenericConsentMechanism([{ ...consentSurface, intent: 'privacy_policy_only' }], [{ surface_id: 'consent-surface', visible: true, enabled: true, actionable: true, accessible_name: 'Acknowledge' }])).toMatchObject({ status: 'not_detected' });
+  });
+
+  it('GENERIC-LIVE-05 recognizes a settings path corroborated by consent-shaped storage', () => {
+    const result = detectGenericConsentMechanism([consentSurface], [{ surface_id: 'consent-surface', visible: true, enabled: true, actionable: true, accessible_name: 'Manage Cookie Settings' }], {
+      storage: [{ storage_type: 'local_storage', key_name: 'cookie_consent', exists: true, consent_shaped: true }]
+    });
+    expect(result).toMatchObject({ status: 'detected', mechanism: { mechanism: 'custom' } });
+  });
+
+  it('GENERIC-LIVE-06 keeps TCF-only runtime evidence from creating a visible CMP', () => {
+    expect(detectGenericConsentMechanism([], [], { tcf_present: true })).toMatchObject({ status: 'not_detected', mechanism: null });
+  });
+
+  it('GENERIC-LIVE-07 preserves visible Accept All plus Reject All detection', () => {
+    expect(detectGenericConsentMechanism([consentSurface], [control('accept_all'), control('reject_all')])).toMatchObject({ status: 'detected', actions: expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'reject_all', availability: 'direct' })]) });
+  });
+
+  it('GENERIC-LIVE-08 excludes a country selector with incidental cookie footer copy', () => {
+    expect(detectGenericConsentMechanism([{ ...consentSurface, intent: 'country_selector' }], [control('open_preferences')])).toMatchObject({ status: 'not_detected' });
   });
 });

@@ -30,6 +30,8 @@ export interface GenericConsentSurface {
   /** Derived by the bounded semantic probe; page text is not retained here. */
   privacy_or_cookie_semantics: boolean;
   intent: GenericSurfaceIntent;
+  /** A bounded browser semantic probe found a settings path plus an acknowledgement control. */
+  consent_management_topology?: boolean;
 }
 
 export interface GenericConsentControl {
@@ -94,7 +96,7 @@ const DEFAULT_ACTION_LABELS: GenericConsentDetectorConfig['localized_action_labe
   accept_all: ['accept all', 'accept cookies', 'allow all', 'accept', 'alle akzeptieren'],
   reject_all: ['reject all', 'decline all', 'deny all', 'reject', 'decline', 'alle ablehnen'],
   only_necessary: ['only necessary', 'necessary only'],
-  open_preferences: ['preferences', 'manage preferences', 'cookie settings', 'customize', 'einstellungen'],
+  open_preferences: ['preferences', 'manage preferences', 'cookie settings', 'manage cookie settings', 'cookie preferences', 'manage cookie preferences', 'privacy preferences', 'customize', 'einstellungen'],
   save_preferences: ['save preferences', 'save choices', 'save settings']
 };
 
@@ -173,7 +175,9 @@ function actionResults(actions: Map<Exclude<ConsentActionType, 'set_category' | 
   const save = actions.get('save_preferences');
   const result: AvailableAction[] = [
     { action: 'accept_all', availability: accept ? 'direct' : 'not_present', category: null, evidence: accept ? ['generic_semantic_accept'] : [], reason_codes: accept ? [ConsentAuditCodes.ACCEPT_AVAILABLE] : [] },
-    { action: 'reject_all', availability: reject ? 'direct' : preferences ? 'preferences_only' : 'not_present', category: null, evidence: reject ? ['generic_semantic_reject'] : preferences ? ['generic_semantic_preferences'] : [], reason_codes: reject ? [ConsentAuditCodes.REJECT_AVAILABLE] : preferences ? [ConsentAuditCodes.REJECT_PREFERENCES_ONLY] : [ConsentAuditCodes.REJECT_NOT_AVAILABLE] },
+    // A generic preferences link establishes only that preferences can be
+    // opened. It does not prove that a Reject control exists in that layer.
+    { action: 'reject_all', availability: reject ? 'direct' : 'not_present', category: null, evidence: reject ? ['generic_semantic_reject'] : [], reason_codes: reject ? [ConsentAuditCodes.REJECT_AVAILABLE] : [ConsentAuditCodes.REJECT_NOT_AVAILABLE] },
     { action: 'only_necessary', availability: onlyNecessary ? 'direct' : 'not_present', category: null, evidence: onlyNecessary ? ['generic_semantic_only_necessary'] : [], reason_codes: [] },
     { action: 'open_preferences', availability: preferences ? 'direct' : 'not_present', category: null, evidence: preferences ? ['generic_semantic_preferences'] : [], reason_codes: preferences ? [ConsentAuditCodes.PREFERENCES_LINK_PRESENT] : [] },
     { action: 'save_preferences', availability: save ? 'direct' : 'not_present', category: null, evidence: save ? ['generic_semantic_save'] : [], reason_codes: [] }
@@ -215,7 +219,21 @@ export function detectGenericConsentMechanism(
 
   const corroborating: string[] = [];
   const addCorroboration = (value: string, present: boolean) => { if (present) corroborating.push(value); };
-  const hasActionStructure = actions.size >= 2 || (actions.has('accept_all') && actions.has('reject_all')) || (actions.has('accept_all') && actions.has('open_preferences'));
+  const hasIndependentConsentSignal = Boolean(
+    signals.storage?.some(isConsentStorage) ||
+    signals.consent_change_datalayer_event ||
+    signals.consent_mode_transition ||
+    signals.tcf_present ||
+    signals.gpp_present ||
+    signals.manual_tag_gating_marker
+  );
+  // A settings path plus acknowledgement is a valid first-layer consent
+  // topology only when the bounded browser probe has already established it
+  // on a consent-shaped surface. The acknowledgement is deliberately not an
+  // accept/reject action.
+  const hasStrongConsentManagementTopology = actions.has('open_preferences') && confirmed.some((surface) => surface.consent_management_topology === true);
+  const hasCorroboratedPreferences = actions.has('open_preferences') && (hasIndependentConsentSignal || hasStrongConsentManagementTopology);
+  const hasActionStructure = actions.size >= 2 || (actions.has('accept_all') && actions.has('reject_all')) || (actions.has('accept_all') && actions.has('open_preferences')) || hasCorroboratedPreferences;
   addCorroboration('privacy_semantics', confirmed.length > 0);
   addCorroboration('action_structure', hasActionStructure);
   addCorroboration('consent_shaped_storage', signals.storage?.some(isConsentStorage) || false);
@@ -234,6 +252,7 @@ export function detectGenericConsentMechanism(
     (actions.has('open_preferences') ? 10 : 0) +
     (actions.has('save_preferences') ? 5 : 0) +
     (hasActionStructure ? 10 : 0) +
+    (hasStrongConsentManagementTopology ? 15 : 0) +
     (signals.storage?.some(isConsentStorage) ? 15 : 0) +
     (signals.consent_change_datalayer_event ? 15 : 0) +
     (signals.consent_mode_transition ? 10 : 0) +

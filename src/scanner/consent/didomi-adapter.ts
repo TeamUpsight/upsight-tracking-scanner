@@ -50,6 +50,12 @@ export interface DidomiSurfaceObservation {
   visible: boolean;
 }
 
+export interface DidomiGenericSurfaceObservation {
+  visible: boolean;
+  privacy_or_cookie_semantics: boolean;
+  intent: string;
+}
+
 /** A privacy-safe summary of Didomi.getCurrentUserStatus(), never its identifiers or raw structure. */
 export interface DidomiUserStatusSummary {
   decision: ConsentDecision;
@@ -76,6 +82,8 @@ export interface DidomiAdapterContext {
   window_globals?: readonly string[];
   asset_urls?: readonly string[];
   surfaces?: readonly DidomiSurfaceObservation[];
+  /** Generic surface facts can corroborate visibility only after identification. */
+  generic_surfaces?: readonly DidomiGenericSurfaceObservation[];
   controls?: readonly DidomiControlObservation[];
   public_methods?: readonly string[];
   runtime?: DidomiRuntimeState | null;
@@ -178,6 +186,9 @@ export function didomiBannerState(context: DidomiAdapterContext): BannerState {
   const rootVisible = roots.some((surface) => surface.visible);
   const rootHidden = roots.length > 0 && !rootVisible;
   const apiVisible = hasPublicMethod(context, 'notice.isVisible') ? context.runtime?.notice_visible : null;
+  const genericConsentSurfaceVisible = context.generic_surfaces?.some((surface) =>
+    surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent'
+  ) || false;
   if ((rootVisible && apiVisible === false) || (rootHidden && apiVisible === true)) {
     return { surface: 'unknown', visibility: 'unknown', evidence: ['didomi_notice_visibility_contradiction'], reason_codes: [ConsentAuditCodes.STATE_CONTRADICTION, ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] };
   }
@@ -190,6 +201,15 @@ export function didomiBannerState(context: DidomiAdapterContext): BannerState {
       ],
       reason_codes: [ConsentAuditCodes.BANNER_VISIBLE]
     };
+  }
+  // Generic DOM facts are never provider attribution. Once Didomi is already
+  // positively identified, however, a visible consent-shaped surface can
+  // safely corroborate a current template that lacks the historic roots.
+  if (apiVisible === false && genericConsentSurfaceVisible) {
+    return { surface: 'unknown', visibility: 'unknown', evidence: ['didomi_notice_visibility_contradiction'], reason_codes: [ConsentAuditCodes.STATE_CONTRADICTION, ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] };
+  }
+  if (detectDidomi(context).status === 'detected' && genericConsentSurfaceVisible) {
+    return { surface: 'banner', visibility: 'visible', evidence: ['didomi_generic_consent_surface'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
   }
   if (rootHidden || apiVisible === false) {
     return {

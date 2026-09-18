@@ -508,6 +508,23 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.mechanisms.find((item) => item.mechanism === 'custom')?.provider?.reason_codes).toContain('CMP_PROVIDER_UNKNOWN');
   });
 
+  it('GENERIC-LIVE-01 captures the settings-and-acknowledgement topology without fabricating consent actions', async () => {
+    const result = await audit('<div role="dialog">Cookie Notice: manage your privacy choices.<button>Manage Cookie Settings</button><button>Acknowledge</button></div>');
+    expect(result.result.mechanisms.find((item) => item.mechanism === 'custom')?.provider?.attribution).toBe('unknown_candidate');
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'open_preferences', availability: 'direct' }),
+      expect.objectContaining({ action: 'accept_all', availability: 'not_present' }),
+      expect.objectContaining({ action: 'reject_all', availability: 'not_present' })
+    ]));
+  });
+
+  it('DIDOMI-LIVE-01 routes a positively identified Didomi template variant through generic-surface visibility corroboration', async () => {
+    const result = await auditNavigation('<script>localStorage.setItem("didomi_token", "fixture");window.Didomi={};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div role="dialog">Cookie Notice: manage your privacy choices.<button>Manage Cookie Settings</button><button>Acknowledge</button></div>');
+    expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('didomi');
+    expect(result.result.banner).toMatchObject({ visibility: 'visible', evidence: ['didomi_generic_consent_surface'] });
+  });
+
   it('TELEM-UNKNOWN-01 fingerprints the actual generic detector result stably and without raw values', async () => {
     const fixture = (host: string) => `<script src="https://${host}/consent.js"></script><div role="dialog">We use cookies.<button>Accept all</button><button>Reject all</button></div>`;
     const first = await audit(fixture('cmp-one.example'));

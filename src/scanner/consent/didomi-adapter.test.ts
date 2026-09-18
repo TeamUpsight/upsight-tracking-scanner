@@ -112,4 +112,37 @@ describe('Didomi adapter fixtures', () => {
     expect(detectDidomi(context).status).toBe('detected');
     expect(didomiBannerState(context)).toMatchObject({ surface: 'none', visibility: 'not_visible', reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] });
   });
+
+  const didomiEvidence = {
+    window_globals: ['Didomi'],
+    asset_urls: ['https://sdk.privacy-center.org/loader.js'],
+    storage: [{ key_name: 'didomi_token' as const, exists: true }]
+  };
+  const visibleGenericConsentSurface = [{ visible: true, privacy_or_cookie_semantics: true, intent: 'consent' }];
+
+  it('DIDOMI-LIVE-01 treats a visible generic consent modal as Didomi-banner corroboration after positive identification', () => {
+    expect(detectDidomi(didomiEvidence).status).toBe('detected');
+    expect(didomiBannerState({ ...didomiEvidence, generic_surfaces: visibleGenericConsentSurface })).toMatchObject({ visibility: 'visible', evidence: ['didomi_generic_consent_surface'] });
+  });
+
+  it('DIDOMI-LIVE-02 does not use a generic consent surface to identify Didomi', () => {
+    expect(detectDidomi({}).status).toBe('not_detected');
+    expect(didomiBannerState({ generic_surfaces: visibleGenericConsentSurface })).toMatchObject({ visibility: 'not_visible' });
+  });
+
+  it('DIDOMI-LIVE-03 preserves standard-root visibility', () => {
+    expect(didomiBannerState({ ...didomiEvidence, surfaces: [{ selector: '#didomi-host', visible: true }] })).toMatchObject({ visibility: 'visible', evidence: ['didomi_standard_root'] });
+  });
+
+  it('DIDOMI-LIVE-04 preserves notice.isVisible() visibility', () => {
+    expect(didomiBannerState({ ...didomiEvidence, public_methods: ['notice.isVisible'], runtime: { current_user_status: null, notice_visible: true } })).toMatchObject({ visibility: 'visible', evidence: ['didomi_notice_visible_api'] });
+  });
+
+  it('DIDOMI-LIVE-05 preserves an explicit API contradiction with a generic surface as unknown', () => {
+    expect(didomiBannerState({ ...didomiEvidence, public_methods: ['notice.isVisible'], runtime: { current_user_status: null, notice_visible: false }, generic_surfaces: visibleGenericConsentSurface })).toMatchObject({ visibility: 'unknown', reason_codes: [ConsentAuditCodes.STATE_CONTRADICTION, ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] });
+  });
+
+  it('DIDOMI-LIVE-06 excludes a visible newsletter surface from Didomi banner corroboration', () => {
+    expect(didomiBannerState({ ...didomiEvidence, generic_surfaces: [{ visible: true, privacy_or_cookie_semantics: true, intent: 'newsletter' }] })).toMatchObject({ visibility: 'not_visible' });
+  });
 });
