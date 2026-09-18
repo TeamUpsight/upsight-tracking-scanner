@@ -1,3 +1,5 @@
+import { captureConsentTrackingRequest, ConsentRequestBuffer, isSharedPreChoicePhase, normalizeConsentMeasurement, reconcileConsentMeasurement } from './consent/tracking-consistency';
+import { GoogleConsentModeObserver } from './consent/google-consent-mode-observer';
 import { createHash } from 'node:crypto';
 import { chromium, type Browser, type BrowserContext, type Page, type Request, type Response } from 'playwright-core';
 import type {
@@ -803,17 +805,7 @@ export function acceptComparisonReason(input: {
 }
 
 export function sharedPreConsentMeasurementState(evidence: EvidenceBundle): false | 'full_measurement' | 'limited_measurement' | 'unknown' {
-  const preChoice = evidence.network.relevant_requests.filter((request) =>
-    // The listener timestamps requests by the active orchestration phase.
-    // Homepage navigation therefore lands in consent_initial_load, while the
-    // overlapping tracker workflow contributes product_discovery/PDP traffic.
-    // Fresh Consent V2 contexts deliberately use consent_fresh_initial_load
-    // and must not be mistaken for the shared pre-choice baseline.
-    request.kind === 'collection' && /^(?:consent_initial_load|product_discovery|product_pdp_load)$/.test(request.phase)
-  );
-  if (preChoice.some((request) => request.consent_measurement === 'full_measurement')) return 'full_measurement';
-  if (preChoice.some((request) => request.consent_measurement === 'limited_measurement')) return 'limited_measurement';
-  return preChoice.length ? 'unknown' : false;
+  return normalizeConsentMeasurement(evidence.network.relevant_requests, 'shared', null, undefined, evidence.network.relevant_requests_truncated).state;
 }
 
 async function inspectPdpCandidate(page: Page) {
@@ -1171,6 +1163,8 @@ export async function runStorefrontAudit(
     selectedModules
   });
   const evidence = evidenceCollector.bundle;
+  const sharedConsentRequests = new ConsentRequestBuffer();
+  const sharedConsentGcm = new GoogleConsentModeObserver();
   const trace: Record<string, unknown>[] = [];
   const lifecycle = new FinalizeOnce();
   const traceLimit = evidence.mode === 'diagnostic' ? 500 : 200;
@@ -1221,16 +1215,13 @@ export async function runStorefrontAudit(
   };
 
   const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null, emitTrace = true) => {
-    const shared = sharedPreConsentMeasurementState(evidence);
-    const v2EventBeforeChoice = result.tracking.signals.some((signal) =>
-      signal.timing === 'pre_choice' && (signal.kind === 'event_hit' || signal.kind === 'conversion_hit')
-    );
-    const v2PreChoice = v2EventBeforeChoice
-      ? result.google_consent_mode.classification === 'advanced_candidate' ? 'limited_measurement' as const : 'full_measurement' as const
-      : result.tracking.signals.some((signal) => signal.timing === 'pre_choice') ? 'unknown' as const : false;
-    const measurementRank = (value: false | 'full_measurement' | 'limited_measurement' | 'unknown') =>
-      value === false ? 0 : value === 'limited_measurement' ? 1 : value === 'unknown' ? 2 : 3;
-    const preChoice = measurementRank(v2PreChoice) > measurementRank(shared) ? v2PreChoice : shared;
+    const measurement = reconcileConsentMeasurement([
+      normalizeConsentMeasurement(sharedConsentRequests.requests, 'shared', null, sharedConsentGcm.result(), sharedConsentRequests.truncated, sharedConsentRequests.observed),
+      ...(result.telemetry.measurement?.sources.filter((source) => source.context === 'fresh') || [])
+    ]);
+    result.telemetry.measurement = measurement;
+    evidence.runtime.consent_v2 = result.telemetry;
+    const preChoice = measurement.state;
     const compatibility = mapConsentV2ToExisting(result.result, {
       geo, page_valid: pageValid, tracking_before_interaction: preChoice,
       post_reject_observation_completed: result.result.persistence.post_reload_observation_completed,
@@ -1434,7 +1425,7 @@ export async function runStorefrontAudit(
         const sanitized = safeUrl(requestUrl);
         if (sanitized && cmpNetworkSignals.size < 100) cmpNetworkSignals.add(sanitized);
       }
-      evidenceCollector.captureRequest({
+      const capturedTracking = evidenceCollector.captureRequest({
         url: requestUrl,
         body: request.postData() || '',
         method: request.method(),
@@ -1442,6 +1433,11 @@ export async function runStorefrontAudit(
         timestamp: Date.now(),
         source: (request as Request & { serviceWorker?: () => unknown }).serviceWorker?.() ? 'service_worker' : 'page'
       });
+      if (consentV2Enabled && isSharedPreChoicePhase(currentPhase)) {
+        const captured = capturedTracking || captureConsentTrackingRequest({ url: requestUrl, post_data: request.postData(), resource_type: request.resourceType(), method: request.method() });
+        if (captured) sharedConsentRequests.append({ ...captured, phase: currentPhase });
+        sharedConsentGcm.observeMeasurementRequest({ url: requestUrl, body: request.postData() || undefined, timestamp: captured?.timestamp });
+      }
     });
     browserContext.on('response', (response: Response) => {
       const responsePhase = currentPhase;

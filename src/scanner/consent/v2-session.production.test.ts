@@ -529,6 +529,22 @@ describe('Consent V2 production session wiring', () => {
     expect(result.tracking.signals).toEqual(expect.arrayContaining([expect.objectContaining({ vendor: 'google_analytics', kind: 'event_hit', timing: 'pre_choice' })]));
     expect(result.telemetry.timeline?.navigation_started_at).not.toBeNull();
     expect(result.telemetry.timeline?.dom_content_loaded_at).not.toBeNull();
+    expect(result.telemetry.measurement).toMatchObject({ state: 'limited_measurement', pre_choice_event_hits: 1, limited_measurement_count: 1, full_measurement_count: 0, gcm_network_observations: 1 });
+  });
+
+  it('CMP-MEASURE-MORPHE-BROWSER preserves denied head pings and exact fresh-context counts', async () => {
+    const result = await auditNavigation(`<head><script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(['consent','default',{analytics_storage:'denied'}]);
+      new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G100';
+      new Image().src='https://www.google-analytics.com/g/collect?en=scroll&gcs=G100';
+      new Image().src='https://www.google.com/ccm/collect?gcs=G100';
+    </script><script src="https://www.googletagmanager.com/gtag/js?id=G-TEST"></script></head><body>fixture</body>`);
+    expect(result.telemetry.measurement).toMatchObject({ state: 'limited_measurement', contradiction: false,
+      tracking_requests_observed: 3, tracking_signals_classified: 3, pre_choice_event_hits: 2,
+      pre_choice_script_loads: 1, gcm_network_observations: 3, gcm_commands: 1, full_measurement_count: 0 });
+    expect(result.telemetry.observation_only).toBe(true);
+    expect(result.result.interactions).toEqual([]);
   });
 
   it('PRE-02 captures an immediate Meta conversion signal as pre-choice', async () => {

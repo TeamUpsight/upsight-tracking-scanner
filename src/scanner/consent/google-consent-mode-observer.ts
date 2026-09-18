@@ -82,6 +82,28 @@ export interface GoogleConsentModeObserverOptions {
   timestamp_tolerance_ms?: number;
 }
 
+/** Request-time semantics only; commands from a different context must never be supplied. */
+export function googleMeasurementFacts(
+  request: { timestamp: number; consent_measurement?: 'full_measurement' | 'limited_measurement' | 'unknown' },
+  observed?: GoogleConsentModeResult
+) {
+  const facts: Array<{ type: 'request_classification' | 'gcm_command'; classification: 'full_measurement' | 'limited_measurement'; timestamp: number }> = [];
+  if (request.consent_measurement === 'full_measurement' || request.consent_measurement === 'limited_measurement') {
+    facts.push({ type: 'request_classification', classification: request.consent_measurement, timestamp: request.timestamp });
+  }
+  // Apply partial commands in timestamp/sequence order, only at or before this hit.
+  // A later default/update must not retroactively classify an earlier request.
+  let analytics: { value: GoogleConsentValue; timestamp: number } | undefined;
+  for (const command of [...(observed?.commands || [])].sort((a, b) => a.timestamp - b.timestamp || a.sequence - b.sequence)) {
+    if (command.timestamp > request.timestamp) continue;
+    if (command.state.analytics_storage !== 'unset') analytics = { value: command.state.analytics_storage, timestamp: command.timestamp };
+  }
+  if (analytics?.value === 'denied') facts.push({ type: 'gcm_command', classification: 'limited_measurement', timestamp: analytics.timestamp });
+  // Granted commands alone do not establish full network measurement. The existing
+  // shared parser's explicit full classification is required for that conclusion.
+  return facts;
+}
+
 /** Produces the additive Consent V2 mechanism owned by the GCM observer. */
 export function googleConsentModeMechanism(result: GoogleConsentModeResult): MechanismResult[] {
   if (result.lifecycle === 'not_observed' && result.network.length === 0) return [];

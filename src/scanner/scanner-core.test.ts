@@ -1493,12 +1493,12 @@ describe('decision hardening regression pack', () => {
     expect(result.reason_codes).toContain('GEO_UNVERIFIED');
   });
 
-  it('preserves pre-choice measurement semantics with full > unknown > limited precedence', () => {
+  it('preserves contradictory positive pre-choice measurement facts conservatively', () => {
     const evidence = baseEvidence('measurement.example');
     evidence.network.relevant_requests = [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'analytics.google.com', path: '/g/collect', method: 'POST', phase: 'consent_initial_load', timestamp: 1, event: 'page_view', consent_measurement: 'limited_measurement' }];
     expect(sharedPreConsentMeasurementState(evidence)).toBe('limited_measurement');
     evidence.network.relevant_requests.push({ ...evidence.network.relevant_requests[0], timestamp: 2, consent_measurement: 'full_measurement' });
-    expect(sharedPreConsentMeasurementState(evidence)).toBe('full_measurement');
+    expect(sharedPreConsentMeasurementState(evidence)).toBe('unknown');
   });
 
   it('gives full pre-choice measurement priority over an incomplete later Reject interaction', () => {

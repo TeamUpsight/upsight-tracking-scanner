@@ -2,6 +2,8 @@ import { createServer, type Server } from 'node:http';
 import { chromium } from 'playwright-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runStorefrontAudit } from './audit-runner';
+import type { StorefrontAudit } from '../types';
+import { buildDebugPackageFiles } from './quality/debug-package';
 
 // Full-runner fixtures validate orchestration, not wall-clock dwell time. Keep
 // the production constants intact while making each bounded observation short
@@ -357,6 +359,29 @@ describe('runStorefrontAudit production browser wiring', () => {
     });
     expect(result).toMatchObject({ consent_status: 'prior_consent_violation', scan_status: 'completed' });
     expect((result.evidence_bundle as { consent: { post_reject_observation_completed: boolean } }).consent.post_reject_observation_completed).toBe(true);
+  }, 35_000);
+
+  it.each([
+    ['CMP-MEASURE-MORPHE-RUNNER', 'G100', 'G100', 'limited_measurement', false],
+    ['CMP-MEASURE-04-RUNNER', 'G111', 'G100', 'unknown', true],
+    ['CMP-MEASURE-05-RUNNER', 'G100', 'G111', 'unknown', true]
+  ])('%s persists coherent measurement and counts from both contexts', async (_id, shared, fresh, state, contradiction) => {
+    let homepageLoads = 0;
+    const result = await auditFixture(200, (path) => {
+      if (path !== '/') return '';
+      const marker = ++homepageLoads === 1 ? shared : fresh;
+      // Local collection route exercises the existing first-party GA4 parser.
+      return `<script>new Image().src='/g/collect?tid=G-FIXTURE&en=page_view&gcs=${marker}';</script>${oneTrust}`;
+    }, true, ['consent'], false) as unknown as StorefrontAudit;
+    expect(result).toMatchObject({ consent_status: 'inconclusive', scan_status: 'completed' });
+    expect(result.evidence_bundle?.consent.pre_choice_measurement).toBe(state);
+    const measurement = result.runtime_metrics?.consent_v2?.measurement;
+    expect(measurement).toMatchObject({ state, contradiction, pre_choice_event_hits: 2 });
+    expect(measurement?.sources.map((source) => source.context)).toEqual(['shared', 'fresh']);
+    expect(result.runtime_metrics?.consent_v2).toMatchObject({ observation_only: true, action_attempted: false });
+    const summary = JSON.parse(String(buildDebugPackageFiles(result)['consent-summary.json']));
+    expect(summary.measurement).toEqual(measurement);
+    expect(summary.pre_choice_measurement).toBe(state);
   }, 35_000);
 
   it('SERVER-BUDGET-01 preserves passive server classification with the minimum global budget', async () => {

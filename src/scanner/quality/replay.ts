@@ -1,3 +1,4 @@
+import { reconcileConsentMeasurement } from '../consent/tracking-consistency';
 import type { CmpProvider, CmsPlatform, EvidenceBundle, StorefrontAudit } from '../../types';
 import { detectCMP } from '../consent/detect-cmp';
 import { classifyCollection } from '../server-side/classify-collection';
@@ -136,6 +137,12 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     : detectedCmp;
 
   const preChoiceCollections = requests.filter((request) => request.kind === 'collection' && request.phase.includes('consent_initial'));
+  const normalizedMeasurement = evidence.runtime.consent_v2?.measurement;
+  if (normalizedMeasurement) {
+    const measurement = reconcileConsentMeasurement(normalizedMeasurement.sources);
+    evidence.runtime.consent_v2 = { ...evidence.runtime.consent_v2!, measurement };
+    evidence.consent.pre_choice_measurement = measurement.state;
+  }
   const before = evidence.consent.pre_choice_measurement ?? (preChoiceCollections.some((request) => request.consent_measurement === 'full_measurement')
     ? 'full_measurement' as const
     : preChoiceCollections.some((request) => request.consent_measurement === 'limited_measurement') || evidence.network.observation?.limited_measurement_observed

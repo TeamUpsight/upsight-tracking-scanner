@@ -392,6 +392,9 @@ export interface EvidenceBundle {
     };
     module_durations_ms: Record<string, number>;
     consent_v2?: {
+      /** Consent-only normalized provenance. Signal counts cover retained evidence;
+       * observed counts include buffer overflow. Truncation never proves absence. */
+      measurement?: import('./scanner/consent/tracking-consistency').ConsentMeasurementSummary;
       enabled: boolean;
       observation_only: boolean;
       provider: string | null;
