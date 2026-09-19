@@ -604,10 +604,33 @@ const OBVIOUS_NON_PRODUCT_PATHS = new Set([
   'resources', 'search', 'services', 'solutions', 'support', 'customer_authentication'
 ]);
 
+// PDP navigation is for HTML-like storefront documents. Keep this deliberately
+// bounded: a dotted slug and conventional .html/.htm routes remain eligible.
+// Sitemap fetches use their raw <loc> values below, so rejecting XML here does
+// not prevent sitemap discovery or nested sitemap parsing.
+const PDP_NON_PAGE_RESOURCE_EXTENSIONS = new Set([
+  '.xml', '.json', '.txt',
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.avif', '.ico',
+  '.css', '.js', '.mjs', '.map',
+  '.mp4', '.webm', '.mov', '.avi', '.mp3', '.wav', '.ogg',
+  '.pdf', '.zip', '.gz', '.tgz', '.rar', '.7z'
+]);
+
+export function isPdpCandidateUrl(raw: string, domain: string) {
+  try {
+    const url = new URL(raw);
+    if (!isSafeCanonicalRedirect(domain, url.hostname) || isNonStorefrontUrl(url.toString())) return false;
+    const terminalPath = decodeURIComponent(url.pathname).replace(/\/+$/, '').toLowerCase();
+    return ![...PDP_NON_PAGE_RESOURCE_EXTENSIONS].some((extension) => terminalPath.endsWith(extension));
+  } catch {
+    return false;
+  }
+}
+
 function canonicalPdpCandidate(raw: string, domain: string) {
   try {
     const url = new URL(raw);
-    if (!isSafeCanonicalRedirect(domain, url.hostname) || isNonStorefrontUrl(url.toString())) return null;
+    if (!isPdpCandidateUrl(raw, domain)) return null;
     const secondLevel = decodeURIComponent(url.pathname.split('/').filter(Boolean)[1] || '').toLowerCase();
     if (secondLevel.includes('-vs-') || secondLevel.includes('compare')) return null;
     url.search = '';

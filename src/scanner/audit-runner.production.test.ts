@@ -23,7 +23,7 @@ async function fixtureServer(status: number, html: FixtureHtml) {
     const path = new URL(request.url || '/', 'http://fixture.example').pathname;
     const route = typeof html === 'function' ? html(path) : typeof html === 'string' ? html : Object.prototype.hasOwnProperty.call(html, path) ? html[path] : html['/'] ?? '';
     if (route === null) return;
-    const body = typeof route === 'string' ? route : route.body;
+    const body = (typeof route === 'string' ? route : route.body).replaceAll('{{fixture_url}}', `http://${request.headers.host}`);
     response.writeHead(typeof route === 'string' ? status : route.status, { 'content-type': 'text/html; charset=utf-8' });
     response.end(body);
   });
@@ -190,6 +190,56 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect((oneProduct.evidence_bundle as { product: { candidate_promoted_count: number } }).product.candidate_promoted_count).toBe(1);
     expect(oneProduct.pdp_url_tested).toContain('/products/one');
   }, 60_000);
+
+  it('PDP-SANITIZE-01 filters homepage image candidates before queueing or navigation while retaining a product URL', async () => {
+    const result = await auditFixture(200, {
+      '/': '<a href="/wp-content/uploads/2025/03/SNF7-2-23-109-scaled.jpg">Image</a><a href="/wp-content/uploads/2025/03/SNF7-2-23-115-scaled.jpg">Image</a><a href="/products/real-product">Real product</a>',
+      '/products/real-product': '<form action="/cart/add"><button>Add to cart</button></form>',
+      '/sitemap.xml': null
+    }, true, ['tracking']);
+    const evidence = result.evidence_bundle as { product: { pdp_candidates: string[]; candidate_queued_count: number; candidate_attempted_count: number } };
+    expect(evidence.product.pdp_candidates).toEqual([expect.stringContaining('/products/real-product')]);
+    expect(evidence.product.pdp_candidates.join(' ')).not.toMatch(/\.jpg/);
+    expect(evidence.product).toMatchObject({ candidate_queued_count: 1, candidate_attempted_count: 1 });
+  }, 45_000);
+
+  it('PDP-SANITIZE-04 fetches nested sitemap sources but queues only the extracted product page', async () => {
+    const result = await auditFixture(200, {
+      '/': '<main>Store</main>',
+      '/sitemap.xml': '<sitemapindex><sitemap><loc>{{fixture_url}}/product-sitemap.xml</loc></sitemap></sitemapindex>',
+      '/product-sitemap.xml': '<urlset><url><loc>{{fixture_url}}/products/widget</loc></url></urlset>',
+      '/products/widget': '<form action="/cart/add"><button>Add to cart</button></form>'
+    }, true, ['tracking']);
+    const evidence = result.evidence_bundle as { product: { pdp_candidates: string[]; sitemap_enrichment_status: string; candidate_queued_count: number } };
+    expect(evidence.product).toMatchObject({ sitemap_enrichment_status: 'completed', candidate_queued_count: 1 });
+    expect(evidence.product.pdp_candidates).toEqual([expect.stringContaining('/products/widget')]);
+    expect(evidence.product.pdp_candidates.join(' ')).not.toMatch(/\.xml/);
+  }, 45_000);
+
+  it('PDP-SANITIZE-08 rejects static listing children while promoting the strong real product child', async () => {
+    const result = await auditFixture(200, {
+      '/': '<a href="/collections/all">Products</a>',
+      '/collections/all': '<main class="collection"><script>window.dataLayer=[{event:"view_item_list",ecommerce:{items:[{item_id:"widget"},{item_id:"asset"}]}}]</script><article class="product-card" data-product-id="widget"><a href="/products/widget">Widget</a><span>$10</span></article><article class="product-card" data-product-id="asset"><a href="/assets/widget.jpg">Image</a><span>$12</span></article><article class="product-card" data-product-id="manual"><a href="/manual.pdf">Manual</a><span>$12</span></article><button>Add to cart</button><button>Add to cart</button></main>',
+      '/products/widget': '<form action="/cart/add"><button>Add to cart</button></form>',
+      '/sitemap.xml': null
+    }, true, ['tracking']);
+    const evidence = result.evidence_bundle as { product: { pdp_candidates: string[]; candidate_promoted_count: number } };
+    expect(evidence.product).toMatchObject({ candidate_promoted_count: 1 });
+    expect(evidence.product.pdp_candidates.join(' ')).toContain('/products/widget');
+    expect(evidence.product.pdp_candidates.join(' ')).not.toMatch(/widget\.jpg|manual\.pdf/);
+  }, 45_000);
+
+  it('PDP-SANITIZE-10 never navigates an all-static discovery result', async () => {
+    const result = await auditFixture(200, {
+      '/': '<a href="/image.png">Image</a><a href="/manual.pdf">Manual</a><a href="/feed.xml">Feed</a>',
+      '/sitemap.xml': null
+    }, true, ['tracking']);
+    const evidence = result.evidence_bundle as { product: { pdp_candidates: string[]; candidate_queued_count: number; candidate_attempted_count: number } };
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    expect(evidence.product).toMatchObject({ pdp_candidates: [], candidate_queued_count: 0, candidate_attempted_count: 0 });
+    expect(trace.some((item) => item.step === 'pdp_navigation_started')).toBe(false);
+    expect(result.product_payload_status).not.toBe('fail');
+  }, 45_000);
 
   it('PDP-URL-01 through PDP-URL-03 persist only a confirmed PDP after later invalid candidates', async () => {
     const product = '<form action="/cart/add"><button>Add to cart</button></form>';

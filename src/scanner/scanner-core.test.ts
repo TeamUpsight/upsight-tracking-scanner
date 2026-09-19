@@ -23,7 +23,7 @@ import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } f
 import {
   assessPdpCandidate, botChallengeObservationWindow, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
   canKeepTimedOutPdp, isStrongProductPath, isViewItemForPdp, parseEgressCountry, pdpCandidateRejectionReason,
-  acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, classifyProductApplicability, classifyProductPageRole, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, sharedPreConsentMeasurementState, trustArcPreferenceControls, twoLevelPdpCandidate
+  acceptComparisonReason, captureDataLayerViewItems, capturePerformanceTrackingRequests, classifyProductApplicability, classifyProductPageRole, isPdpCandidateUrl, pdpReadinessSatisfied, prioritizePdpCandidatePool, productPatternPdpCandidate, scorePdpCandidate, sharedPreConsentMeasurementState, trustArcPreferenceControls, twoLevelPdpCandidate
 } from './audit-runner';
 import { AuditRuntimeBudget } from './audit-runtime-budget';
 import { parseRetryAfterMs, resolveAccessDecision, resolveHostnameEvidence, resolveHostnameStatus } from './navigation';
@@ -285,6 +285,29 @@ describe('centralized tracking parsers', () => {
 });
 
 describe('PDP candidate selection', () => {
+  it('PDP-SANITIZE-01 through PDP-SANITIZE-05 reject direct non-page resources before PDP admission', () => {
+    const resources = [
+      '/wp-content/uploads/2025/03/SNF7-2-23-109-scaled.jpg',
+      '/wp-content/uploads/accom-1.jpg.webp',
+      '/editorial/sitemap_index.xml',
+      '/image.png', '/icon.svg', '/app.js', '/styles.css', '/data.json', '/feed.xml', '/manual.pdf', '/video.mp4', '/archive.zip',
+      '/document.txt', '/bundle.mjs', '/script.js.map', '/recording.mov', '/archive.tgz', '/compressed.gz', '/backup.7z'
+    ];
+    for (const resource of resources) {
+      const url = `https://example.com${resource}`;
+      expect(isPdpCandidateUrl(url, 'example.com')).toBe(false);
+      expect(scorePdpCandidate(url, 'example.com')).toBe(Number.NEGATIVE_INFINITY);
+    }
+  });
+
+  it('PDP-SANITIZE-06, PDP-SANITIZE-07, and PDP-SANITIZE-09 preserve HTML-like routes and canonical query/hash cleanup', () => {
+    expect(isPdpCandidateUrl('https://example.com/products/widget.html', 'example.com')).toBe(true);
+    expect(productPatternPdpCandidate('https://example.com/products/widget.html', 'example.com')).toBe('https://example.com/products/widget.html');
+    expect(isPdpCandidateUrl('https://example.com/products/widget-v2.1', 'example.com')).toBe(true);
+    expect(productPatternPdpCandidate('https://example.com/products/widget-v2.1', 'example.com')).toBe('https://example.com/products/widget-v2.1');
+    expect(productPatternPdpCandidate('https://example.com/products/widget?variant=123#details', 'example.com')).toBe('https://example.com/products/widget');
+  });
+
   it('accepts safe two-level paths and rejects one-level, deeper, external, and obvious non-product paths', () => {
     expect(twoLevelPdpCandidate('https://example.com/catalog/item-one?variant=1#details', 'example.com')).toBe('https://example.com/catalog/item-one');
     expect(twoLevelPdpCandidate('https://example.com/item-one', 'example.com')).toBeNull();
