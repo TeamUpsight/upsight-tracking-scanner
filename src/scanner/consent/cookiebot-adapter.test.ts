@@ -11,6 +11,7 @@ import {
   detectCookiebot
 } from './cookiebot-adapter';
 import { ConsentAuditCodes } from './domain-types';
+import { semanticActionForConsentLabel } from './generic-consent-detector';
 
 describe('Cookiebot adapter fixtures', () => {
   it('CB-01 detects Cookiebot from independent provider-specific families', () => {
@@ -118,11 +119,51 @@ describe('Cookiebot adapter fixtures', () => {
 
   it('CB-09 keeps provider detection independent from a hidden Cookiebot banner', () => {
     const context = {
-      window_globals: ['Cookiebot'], asset_urls: ['https://consent.cookiebot.com/uc.js'],
+      window_globals: ['Cookiebot'], asset_urls: ['https://consent.cookiebot.com/uc.js'], cookies: [{ name: 'CookieConsent', exists: true }],
       surfaces: [{ selector: '#CybotCookiebotDialog', visible: false }]
     };
 
     expect(detectCookiebot(context).status).toBe('detected');
     expect(cookiebotBannerState(context)).toMatchObject({ surface: 'none', visibility: 'not_visible', reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] });
+  });
+
+  it('CMP-SURFACE-01 recognizes a confirmed Cookiebot custom surface and its localized controls', () => {
+    const context = {
+      window_globals: ['Cookiebot'], asset_urls: ['https://consent.cookiebot.com/uc.js'], cookies: [{ name: 'CookieConsent', exists: true }],
+      generic_surfaces: [{ visible: true, privacy_or_cookie_semantics: true, intent: 'consent' }],
+      generic_controls: [
+        { visible: true, enabled: true, actionable: true, accessible_name: 'ALLE AKZEPTIEREN', semantic_action: 'accept_all' as const },
+        { visible: true, enabled: true, actionable: true, accessible_name: 'NUR NOTWENDIGE', semantic_action: 'only_necessary' as const }
+      ],
+      controls: [
+        { id: 'custom-accept', visible: true, enabled: true, actionable: true, within_confirmed_cookiebot_surface: true, semantic_action: 'accept_all' as const },
+        { id: 'custom-necessary', visible: true, enabled: true, actionable: true, within_confirmed_cookiebot_surface: true, semantic_action: 'only_necessary' as const }
+      ]
+    };
+    expect(cookiebotBannerState(context)).toMatchObject({ visibility: 'visible' });
+    expect(cookiebotActionInventory(context).actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'only_necessary', availability: 'direct' })
+    ]));
+  });
+
+  it('CMP-SURFACE-02 preserves standard Cookiebot-root visibility', () => {
+    expect(cookiebotBannerState({ surfaces: [{ selector: '#CybotCookiebotDialog', visible: true }] })).toMatchObject({ visibility: 'visible', evidence: ['cookiebot_standard_root'] });
+  });
+
+  it('CMP-SURFACE-03 does not infer Cookiebot from a generic cookie surface', () => {
+    expect(detectCookiebot({ generic_surfaces: [{ visible: true, privacy_or_cookie_semantics: true, intent: 'consent' }] })).toMatchObject({ status: 'not_detected' });
+  });
+
+  it('CMP-SURFACE-04 keeps an uncorroborated custom Cookiebot surface unknown', () => {
+    expect(cookiebotBannerState({ window_globals: ['Cookiebot'], asset_urls: ['https://consent.cookiebot.com/uc.js'] })).toMatchObject({ visibility: 'unknown' });
+  });
+
+  it('CMP-SURFACE-05 maps ALLE AKZEPTIEREN to accept all', () => {
+    expect(semanticActionForConsentLabel('ALLE AKZEPTIEREN')).toBe('accept_all');
+  });
+
+  it('CMP-SURFACE-06 maps NUR NOTWENDIGE to only necessary', () => {
+    expect(semanticActionForConsentLabel('NUR NOTWENDIGE')).toBe('only_necessary');
   });
 });

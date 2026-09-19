@@ -111,6 +111,18 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'prior_consent_violation', scan_status: 'completed' });
   }, 30_000);
 
+  it('CMP-SURVIVE-01 retains completed shared OneTrust observation when fresh V2 setup is unavailable', async () => {
+    const sharedOnly = `<script>document.cookie='OptanonConsent=present; path=/'; window.OneTrust={RejectAll(){},AllowAll(){}};</script>
+      <script src="/otSDKStub.js"></script><div role="dialog" aria-modal="true"><p>We use cookies and value your privacy.</p><button>Accept All Cookies</button><button>Reject All Cookies</button><button>Cookies Settings</button></div>`;
+    const result = await auditFixture(200, sharedOnly, true, ['consent'], false, {
+      createFreshConsentContext: async () => { throw new Error('PAGE_CONTEXT_UNAVAILABLE'); }
+    });
+    const evidence = result.evidence_bundle as { consent: { banner_visible: boolean | null; accept_action_available: boolean; reject_action_available: boolean; preferences_action_available: boolean; interaction_attempted: boolean }; runtime: { consent_v2?: { session_status?: string; observation_only?: boolean; shared_observation?: { provider: string | null; banner_visibility: string } } } };
+    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive' });
+    expect(evidence.consent).toMatchObject({ banner_visible: true, accept_action_available: true, reject_action_available: true, preferences_action_available: true, interaction_attempted: false });
+    expect(evidence.runtime.consent_v2).toMatchObject({ session_status: 'unavailable', observation_only: true, shared_observation: { provider: 'onetrust', banner_visibility: 'visible' } });
+  }, 30_000);
+
   it('RUNNER-TESCO-OBS-01 keeps homepage PDP discovery when sitemap enrichment hangs and records an observation-only OneTrust session', async () => {
     const customOneTrust = `<script>window.OneTrust={RejectAll(){window.__rejectCalled=true},AllowAll(){}};</script><script src="/otSDKStub.js"></script>
       <div role="dialog" aria-modal="true"><p>We use cookies and value your privacy.</p><button>Accept all</button><button>Reject all</button></div>`;

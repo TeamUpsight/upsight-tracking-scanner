@@ -31,7 +31,7 @@ import {
 } from './consent/fresh-context';
 import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
 import { consentV2RolloutControls } from './consent/rollout-controls';
-import { prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput } from './consent/v2-session';
+import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { isValidStorefrontStatus, resolveAccessDecision, resolveHostnameEvidence, type AccessDecision } from './navigation';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
@@ -1199,6 +1199,7 @@ export async function runStorefrontAudit(
   let consentContext: BrowserContext | null = null;
   let consentHomepage: Page | null = null;
   let consentV2: ConsentV2SessionOutput | null = null;
+  let sharedConsentObservation: SharedConsentObservation | null = null;
   let consentV2Ran = false;
   let pdpPage: Page | null = null;
   let browserConnectedAt: number | null = null;
@@ -1253,6 +1254,42 @@ export async function runStorefrontAudit(
     return measurement;
   };
 
+  const legacyProviderForObservation = (provider: SharedConsentObservation['provider']) => ({
+    onetrust: 'OneTrust', cookiebot: 'Cookiebot', usercentrics: 'Usercentrics', didomi: 'Didomi', cookieyes: 'CookieYes'
+  } as const)[provider || ''] || null;
+
+  const applyMergedConsentObservation = (fresh: ConsentV2SessionOutput | null) => {
+    const merged = mergeSharedConsentObservation(sharedConsentObservation, fresh);
+    const telemetry = fresh?.telemetry || evidence.runtime.consent_v2 || unavailableConsentV2Telemetry(canonicalConsentMeasurement(), consentV2Controls);
+    const has = (action: 'accept_all' | 'reject_all' | 'only_necessary' | 'open_preferences') =>
+      merged.actions.some((item) => item.action === action && item.availability !== 'not_present' && item.availability !== 'unknown');
+    telemetry.provider = merged.provider;
+    telemetry.provider_confidence = merged.provider ? 'high' : null;
+    telemetry.provider_conflict = merged.provider_conflict;
+    telemetry.banner_visibility = merged.banner.visibility;
+    const reject = merged.actions.find((item) => item.action === 'reject_all') || merged.actions.find((item) => item.action === 'only_necessary');
+    telemetry.reject_availability = reject?.availability || (fresh ? telemetry.reject_availability : 'unknown');
+    telemetry.shared_observation = sharedConsentObservation ? {
+      provider: sharedConsentObservation.provider,
+      provider_confidence: sharedConsentObservation.provider ? 'high' : null,
+      provider_conflict: sharedConsentObservation.provider_conflict,
+      banner_visibility: sharedConsentObservation.banner.visibility,
+      accept_available: sharedConsentObservation.actions.some((item) => item.action === 'accept_all' && item.availability !== 'not_present' && item.availability !== 'unknown'),
+      reject_available: sharedConsentObservation.actions.some((item) => (item.action === 'reject_all' || item.action === 'only_necessary') && item.availability !== 'not_present' && item.availability !== 'unknown'),
+      preferences_available: sharedConsentObservation.actions.some((item) => item.action === 'open_preferences' && item.availability !== 'not_present' && item.availability !== 'unknown')
+    } : undefined;
+    evidence.runtime.consent_v2 = telemetry;
+    evidence.consent.executed = true;
+    evidence.consent.resolved_provider = legacyProviderForObservation(merged.provider);
+    evidence.consent.resolved_provider_confidence = merged.provider ? 'high' : 'low';
+    evidence.consent.banner_visible = merged.banner.visibility === 'visible' ? true : merged.banner.visibility === 'not_visible' ? false : null;
+    evidence.consent.accept_action_available = has('accept_all');
+    evidence.consent.reject_action_available = has('reject_all') || has('only_necessary');
+    evidence.consent.preferences_action_available = has('open_preferences');
+    evidence.consent.actions_rollout_enabled = !telemetry.observation_only;
+    return merged;
+  };
+
   const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null, emitTrace = true) => {
     const measurement = persistConsentMeasurementTelemetry(result.telemetry.measurement?.sources);
     result.telemetry.measurement = measurement;
@@ -1264,6 +1301,9 @@ export async function runStorefrontAudit(
       max_trace_steps: traceLimit
     }, result.tracking);
     evidence.consent.executed = true;
+    const merged = applyMergedConsentObservation(result);
+    const mergedProvider = legacyProviderForObservation(merged.provider);
+    if (mergedProvider) compatibility.cmp_provider = mergedProvider;
     evidence.consent.resolved_provider = compatibility.cmp_provider;
     evidence.consent.resolved_provider_confidence = compatibility.cmp_provider ? 'high' : 'low';
     evidence.consent.resolved_provider_evidence = result.result.reason_codes;
@@ -1273,10 +1313,10 @@ export async function runStorefrontAudit(
     evidence.consent.rejection_verified = result.result.rejection_verification.status === 'verified';
     evidence.consent.post_reject_observation_completed = Boolean(result.result.persistence.post_reload_observation_completed);
     evidence.consent.provider_evidence = result.result.reason_codes;
-    evidence.consent.banner_visible = result.result.banner.visibility === 'visible';
-    evidence.consent.accept_action_available = result.result.available_actions.some((action) => action.action === 'accept_all' && action.availability !== 'not_present');
-    evidence.consent.reject_action_available = result.result.available_actions.some((action) => action.action === 'reject_all' && action.availability !== 'not_present');
-    evidence.consent.preferences_action_available = result.result.available_actions.some((action) => action.action === 'open_preferences' && action.availability !== 'not_present');
+    evidence.consent.banner_visible = merged.banner.visibility === 'visible' ? true : merged.banner.visibility === 'not_visible' ? false : null;
+    evidence.consent.accept_action_available = merged.actions.some((action) => action.action === 'accept_all' && action.availability !== 'not_present' && action.availability !== 'unknown');
+    evidence.consent.reject_action_available = merged.actions.some((action) => (action.action === 'reject_all' || action.action === 'only_necessary') && action.availability !== 'not_present' && action.availability !== 'unknown');
+    evidence.consent.preferences_action_available = merged.actions.some((action) => action.action === 'open_preferences' && action.availability !== 'not_present' && action.availability !== 'unknown');
     evidence.consent.actions_rollout_enabled = !result.telemetry.observation_only;
     evidence.consent.cookie_names = result.result.storage_changes.map((change) => change.key_name).slice(0, 100);
     if (emitTrace) for (const step of compatibility.trace_events) addTrace(step, {}, { module: 'consent', severity: 'info' });
@@ -2950,6 +2990,22 @@ export async function runStorefrontAudit(
       evidence.network.observation?.capture_channel_errors.push('homepage_observation_failed');
       addTrace('homepage_shared_observation_incomplete', { error_family: runtimeErrorFamily(error) });
     });
+
+    // The shared homepage has now received its already-budgeted observation
+    // window. Capture passive CMP facts before a later fresh context can fail.
+    if (consentSelected && consentV2Enabled && homepage && !homepage.isClosed()) {
+      try {
+        sharedConsentObservation = await captureSharedConsentObservation(homepage, consentV2Controls);
+        applyMergedConsentObservation(consentV2);
+        addTrace('homepage_shared_cmp_observation_completed', {
+          provider: sharedConsentObservation.provider,
+          banner_visibility: sharedConsentObservation.banner.visibility,
+          action_count: sharedConsentObservation.actions.filter((action) => action.availability !== 'not_present' && action.availability !== 'unknown').length
+        }, { module: 'consent', severity: 'info' });
+      } catch (error) {
+        addTrace('homepage_shared_cmp_observation_incomplete', { error_family: runtimeErrorFamily(error) }, { module: 'consent', severity: 'warning' });
+      }
+    }
 
     // Consent V2 remains the owner of reject verification. It is now fed a
     // confirmed PDP and runs after the shared baseline rather than starving it.

@@ -397,6 +397,16 @@ export interface EvidenceBundle {
       measurement?: import('./scanner/consent/tracking-consistency').ConsentMeasurementSummary;
       /** Whether fresh Consent V2 semantics completed, independently of shared measurement capture. */
       session_status?: 'completed' | 'unavailable';
+      /** Bounded passive homepage facts, retained separately from fresh-session completion. */
+      shared_observation?: {
+        provider: string | null;
+        provider_confidence: 'high' | 'medium' | 'low' | null;
+        provider_conflict: boolean;
+        banner_visibility: 'visible' | 'not_visible' | 'unknown';
+        accept_available: boolean;
+        reject_available: boolean;
+        preferences_available: boolean;
+      };
       enabled: boolean;
       observation_only: boolean;
       provider: string | null;

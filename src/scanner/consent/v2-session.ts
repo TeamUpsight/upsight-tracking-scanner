@@ -21,6 +21,19 @@ import { consentV2ActionsEnabledFor, consentV2RolloutControls, type ConsentV2Rol
 export interface ConsentV2SessionInput { geo: 'USA' | 'EU' | 'UK'; geo_verified: boolean | null; page_valid: boolean | null; timings?: ConsentTimingValues; access_blocked?: boolean; rollout?: ConsentV2RolloutControls; rollout_key?: string; }
 export type ConsentV2Telemetry = NonNullable<EvidenceBundle['runtime']['consent_v2']>;
 export interface ConsentV2SessionOutput { result: FinalConsentAuditResult; tracking: TrackingConsistencyResult; ledger: ConsentEvidenceLedger; telemetry: ConsentV2Telemetry; google_consent_mode: ReturnType<GoogleConsentModeObserver['result']>; }
+export interface SharedConsentObservation {
+  source: 'shared';
+  provider: CmpAdapterProviderId | 'generic' | null;
+  provider_conflict: boolean;
+  banner: BannerState;
+  actions: AvailableAction[];
+}
+export interface MergedConsentObservation {
+  provider: CmpAdapterProviderId | 'generic' | null;
+  provider_conflict: boolean;
+  banner: BannerState;
+  actions: AvailableAction[];
+}
 type ProviderContexts = Map<CmpAdapterProviderId, unknown>;
 export interface ConsentV2Timeline {
   session_started_at: number;
@@ -131,6 +144,70 @@ async function providerOperations(provider: CmpAdapterProviderId | undefined, co
   if (!provider) return { state: unknownState(), banner: unknownBanner(), actions: [] as AvailableAction[], persistence: null as PersistenceResult | null };
   const context = contexts.get(provider); const [state, banner, actions, persistence] = await Promise.all([cmpAdapterRegistry.invoke<ConsentState>(provider, 'state_read', { context }), cmpAdapterRegistry.invoke<BannerState>(provider, 'banner_state', { context }), cmpAdapterRegistry.invoke<AvailableAction[]>(provider, 'available_actions', { context }), cmpAdapterRegistry.invoke<PersistenceResult>(provider, 'persistence_evidence', { context })]);
   return { state: state.value || unknownState(), banner: banner.value || unknownBanner(), actions: actions.value || [], persistence: persistence.value };
+}
+
+/**
+ * Captures passive CMP facts from the shared homepage after its existing
+ * observation window. This deliberately does not create a V2 session, make a
+ * decision, or attempt an action.
+ */
+export async function captureSharedConsentObservation(
+  page: Page,
+  controls: ConsentV2RolloutControls = consentV2RolloutControls()
+): Promise<SharedConsentObservation> {
+  const facts = await captureBrowserConsentFacts(page);
+  const frameworkObservations = await observeConsentFrameworksInPage(page);
+  const frameworks = frameworkStateFromObservations(frameworkObservations);
+  const contexts = await buildProviderContexts(page, facts, frameworkObservations);
+  const selection = await selectProvider(contexts, controls);
+  const provider = await providerOperations(selection.provider, contexts);
+  const generic = genericDetection(facts, frameworks, new GoogleConsentModeObserver());
+  const useGeneric = !selection.provider && !selection.conflict && controls.providers.generic.detection_enabled && generic.status === 'detected';
+  const banner = selection.provider
+    ? provider.banner
+    : selection.conflict
+      ? { surface: 'unknown' as const, visibility: 'unknown' as const, evidence: [], reason_codes: [ConsentAuditCodes.PROVIDER_CONFLICT, ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] }
+      : generic.action_plan.length
+        ? { surface: generic.action_plan[0].surface_type, visibility: 'visible' as const, evidence: ['generic_detector_surface'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] }
+        : { surface: 'unknown' as const, visibility: 'unknown' as const, evidence: [], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] };
+  return { source: 'shared', provider: selection.provider || (useGeneric ? 'generic' : null), provider_conflict: selection.conflict, banner, actions: selection.provider ? provider.actions : selection.conflict ? [] : generic.actions };
+}
+
+function available(action: AvailableAction | undefined) {
+  return Boolean(action && action.availability !== 'not_present' && action.availability !== 'unknown');
+}
+
+/** Positive shared facts survive an unavailable fresh context. Equal-authority
+ * visible/not-visible observations are intentionally represented as unknown. */
+export function mergeSharedConsentObservation(
+  shared: SharedConsentObservation | null,
+  fresh: Pick<ConsentV2SessionOutput, 'result' | 'telemetry'> | null
+): MergedConsentObservation {
+  if (!shared && !fresh) return { provider: null, provider_conflict: false, banner: { surface: 'unknown', visibility: 'unknown', evidence: [], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] }, actions: [] };
+  if (!fresh) return shared!;
+  const freshProvider = fresh.telemetry.provider as CmpAdapterProviderId | 'generic' | null;
+  const providerConflict = Boolean(shared?.provider_conflict || fresh.telemetry.provider_conflict || (shared?.provider && freshProvider && shared.provider !== freshProvider));
+  const provider = providerConflict ? null : freshProvider || shared?.provider || null;
+  const freshBanner = fresh.result.banner;
+  const sharedVisible = shared?.banner.visibility === 'visible';
+  const banner = sharedVisible && freshBanner.visibility === 'not_visible'
+    ? { surface: 'unknown' as const, visibility: 'unknown' as const, evidence: ['shared_visible_fresh_not_visible'], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] }
+    : sharedVisible && freshBanner.visibility === 'unknown'
+      ? shared!.banner
+      : freshBanner.visibility === 'unknown' && shared
+        ? shared.banner
+        : freshBanner;
+  const actionKeys = new Set([...shared?.actions.map((item) => `${item.action}:${item.category || ''}`) || [], ...fresh.result.available_actions.map((item) => `${item.action}:${item.category || ''}`)]);
+  const actions = [...actionKeys].map((key) => {
+    const [action, categoryValue] = key.split(':');
+    const category = categoryValue || null;
+    const sharedAction = shared?.actions.find((item) => item.action === action && item.category === category);
+    const freshAction = fresh.result.available_actions.find((item) => item.action === action && item.category === category);
+    // Completed fresh observations enrich shared facts, but a missing/unavailable
+    // fresh control never erases an already actionable shared control.
+    return available(freshAction) ? freshAction! : available(sharedAction) ? sharedAction! : freshAction || sharedAction!;
+  });
+  return { provider, provider_conflict: providerConflict, banner, actions };
 }
 
 function actionPlanFor(provider: CmpAdapterProviderId, actions: AvailableAction[], banner: BannerState, context: unknown, action: ActionPlan['action'], category: ActionPlan['category'] = null, timings?: ConsentTimingValues) {

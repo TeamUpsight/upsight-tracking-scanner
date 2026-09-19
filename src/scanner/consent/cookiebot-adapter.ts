@@ -30,7 +30,7 @@ export const COOKIEBOT_STANDARD_CONTROLS = {
 } as const;
 
 export type CookiebotControlId = typeof COOKIEBOT_STANDARD_CONTROLS[keyof typeof COOKIEBOT_STANDARD_CONTROLS] | string;
-export type CookiebotSemanticAction = 'decline_all' | 'open_preferences' | 'save_preferences' | 'set_category';
+export type CookiebotSemanticAction = 'accept_all' | 'decline_all' | 'reject_all' | 'only_necessary' | 'open_preferences' | 'save_preferences' | 'set_category';
 export type CookiebotSemanticCategory = 'preferences' | 'statistics' | 'marketing';
 
 export interface CookiebotRuntimeState {
@@ -76,6 +76,8 @@ export interface CookiebotAdapterContext {
   runtime?: CookiebotRuntimeState | null;
   provider_events?: readonly string[];
   cookies?: readonly CookiebotCookieDescriptor[];
+  generic_surfaces?: readonly { visible: boolean; privacy_or_cookie_semantics: boolean; intent: string }[];
+  generic_controls?: readonly { visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string; semantic_action?: CookiebotSemanticAction }[];
   tcf_active?: boolean;
   gpp_active?: boolean;
   consent_mode_present?: boolean;
@@ -179,8 +181,21 @@ export function detectCookiebot(context: CookiebotAdapterContext): AdapterDetect
 export function cookiebotBannerState(context: CookiebotAdapterContext): BannerState {
   const root = context.surfaces?.find((surface) => surface.selector === COOKIEBOT_STANDARD_ROOT);
   if (root?.visible) return { surface: 'dialog', visibility: 'visible', evidence: ['cookiebot_standard_root'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
+  // A confirmed Cookiebot tenant can replace the documented root with its own
+  // template.  The generic surface only corroborates visibility here; it never
+  // contributes to Cookiebot attribution.
+  const strongProviderEvidence = detectCookiebot(context).status === 'detected';
+  const visibleConsentSurface = context.generic_surfaces?.some((surface) =>
+    surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent'
+  );
+  const visibleConsentControl = context.generic_controls?.some((control) =>
+    control.visible && control.enabled && control.actionable && Boolean(control.semantic_action)
+  );
+  if (strongProviderEvidence && visibleConsentSurface && visibleConsentControl) {
+    return { surface: 'banner', visibility: 'visible', evidence: ['cookiebot_strong_provider_evidence', 'visible_consent_surface', 'visible_consent_control'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
+  }
   if (root) return { surface: 'none', visibility: 'not_visible', evidence: ['cookiebot_standard_root'], reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] };
-  return { surface: 'none', visibility: 'not_visible', evidence: [], reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] };
+  return { surface: 'unknown', visibility: 'unknown', evidence: [], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] };
 }
 
 export function cookiebotConsentState(context: CookiebotAdapterContext): ConsentState {
@@ -212,9 +227,10 @@ export function cookiebotConsentState(context: CookiebotAdapterContext): Consent
 }
 
 export function cookiebotActionInventory(context: CookiebotAdapterContext): CookiebotActionInventory {
-  const decline = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.decline, COOKIEBOT_STANDARD_CONTROLS.level_decline_all], 'decline_all');
+  const decline = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.decline, COOKIEBOT_STANDARD_CONTROLS.level_decline_all], 'decline_all') || semanticControl(context, 'reject_all');
+  const onlyNecessary = semanticControl(context, 'only_necessary');
   const preferences = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.preferences], 'open_preferences');
-  const accept = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.accept]);
+  const accept = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.accept], 'accept_all');
   const save = semanticControl(context, 'save_preferences');
   const categoryControls = (context.controls || []).filter((control) =>
     control.semantic_action === 'set_category' && control.semantic_category && isActionable(control)
@@ -228,6 +244,10 @@ export function cookiebotActionInventory(context: CookiebotAdapterContext): Cook
       action: 'reject_all', availability: decline ? 'direct' : preferences ? 'preferences_only' : 'not_present', category: null,
       evidence: decline ? ['cookiebot_decline_control'] : preferences ? ['cookiebot_preferences_control'] : [],
       reason_codes: decline ? [ConsentAuditCodes.REJECT_AVAILABLE] : preferences ? [ConsentAuditCodes.REJECT_PREFERENCES_ONLY] : [ConsentAuditCodes.REJECT_NOT_AVAILABLE]
+    },
+    {
+      action: 'only_necessary', availability: onlyNecessary ? 'direct' : 'not_present', category: null,
+      evidence: onlyNecessary ? ['cookiebot_semantic_only_necessary'] : [], reason_codes: onlyNecessary ? [ConsentAuditCodes.REJECT_AVAILABLE] : []
     },
     {
       action: 'open_preferences', availability: preferences ? 'direct' : 'not_present', category: null,
