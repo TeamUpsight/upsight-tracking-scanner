@@ -478,13 +478,14 @@ describe('runStorefrontAudit production browser wiring', () => {
     ) as unknown as StorefrontAudit;
     const evidence = result.evidence_bundle!;
     const telemetry = result.runtime_metrics?.consent_v2!;
-    expect(result).toMatchObject({ scan_status: 'partial' });
+    expect(result).toMatchObject({ scan_status: 'partial', cmp_provider: 'OneTrust' });
     // The shared consent baseline executed; session_status distinguishes the
     // unavailable fresh PDP session from that completed shared observation.
     expect(evidence.consent).toMatchObject({ executed: true, pre_choice_measurement: 'limited_measurement' });
     expect(telemetry).toMatchObject({
-      session_status: 'unavailable', observation_only: true, provider: null,
+      session_status: 'unavailable', observation_only: true, provider: 'onetrust',
       interaction_outcome: 'not_attempted', verification: 'inconclusive', persistence: 'inconclusive',
+      shared_observation: { provider: 'onetrust', banner_visibility: 'visible' },
       measurement: { state: 'limited_measurement', limited_measurement_count: 1, full_measurement_count: 0, unknown_measurement_count: 0, contradiction: false }
     });
     expect(telemetry.measurement?.sources.map((source) => source.context)).toEqual(['shared']);
