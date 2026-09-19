@@ -58,6 +58,7 @@ import {
 import { calculateQaPriority, generateFailureFingerprints } from './quality/fingerprints';
 import { replayEvidence } from './quality/replay';
 import { sanitizeValue } from './quality/sanitize';
+import { buildObservabilityConsistency } from './quality/observability';
 import { FinalizeOnce } from './resolver/lifecycle';
 import { classifyCollection } from './server-side/classify-collection';
 import { parseGA4Request } from './tracking/ga4';
@@ -898,7 +899,8 @@ async function inspectPdpCandidate(page: Page) {
 
 type CandidateSource = 'homepage_link' | 'sitemap' | 'product_sitemap' | 'promoted_child';
 type DiscoveredPdpCandidate = { url: string; score: number; source: CandidateSource; sources: CandidateSource[]; promoted_from?: string | null };
-type PdpDiscoveryResult = { candidates: DiscoveredPdpCandidate[]; homepage_candidate_count: number; sitemap_candidate_count: number; sitemap_enrichment_status: 'completed' | 'timed_out' | 'failed' | 'not_attempted' };
+type ProductRejection = NonNullable<EvidenceBundle['diagnostic_observability']>['product_rejections']['candidates'][number];
+type PdpDiscoveryResult = { candidates: DiscoveredPdpCandidate[]; homepage_candidate_count: number; sitemap_candidate_count: number; sitemap_enrichment_status: 'completed' | 'timed_out' | 'failed' | 'not_attempted'; rejection_observed_count: number; rejections: ProductRejection[] };
 
 const GENERIC_LISTING_CHILD_PATH = /\/(?:terms?|conditions?|privacy|legal|help|faq|support|zone|categories?|promotions?|collections?|search|account|login|delivery|stores?|store-locator|brands?)(?:\/|$)/i;
 const GENERIC_LISTING_CHILD_LABEL = /\b(?:terms?(?:\s+and\s+conditions)?|privacy|legal|help|faq|support|promotions?|collections?|search|account|log\s*in|delivery|store\s*locator|brands?)\b/i;
@@ -944,21 +946,30 @@ async function discoverListingChildren(page: Page, domain: string, check: () => 
     .map(([url, score]) => ({ url, score, source: 'promoted_child' as const, sources: ['promoted_child'] as CandidateSource[], promoted_from: parentUrl }));
 }
 
-async function discoverPdp(page: Page, domain: string, check: () => void, candidateLimit: number): Promise<PdpDiscoveryResult> {
+async function discoverPdp(page: Page, domain: string, check: () => void, candidateLimit: number, diagnostic = false): Promise<PdpDiscoveryResult> {
   check();
   const links = await page.$$eval('a[href]', (elements) => elements.map((element) => ({ href: (element as HTMLAnchorElement).href, text: (element.textContent || '').trim().slice(0, 160) }))).catch(() => [] as Array<{ href: string; text: string }>);
   check();
   const scored = new Map<string, { score: number; sources: Set<Exclude<CandidateSource, 'promoted_child'>> }>();
+  const rejections: ProductRejection[] = [];
+  let rejectionObservedCount = 0;
+  const reject = (raw: string, source: string, stage: string, reason_code: string, score: number | null = null) => {
+    if (!diagnostic) return;
+    rejectionObservedCount += 1;
+    if (rejections.length >= 12) return;
+    rejections.push({ sanitized_url: safeUrl(raw), source, sources: [source], stage, score, reason_code });
+  };
   const collect = (urls: string[], source: Exclude<CandidateSource, 'promoted_child'>, texts: string[] = []) => {
     urls.forEach((raw, index) => {
       const canonical = canonicalPdpCandidate(raw, domain)?.toString();
-      if (!canonical) return;
+      if (!canonical) { reject(raw, source, 'canonicalization', 'INVALID_OR_OUT_OF_SCOPE_URL'); return; }
       const listingPath = /\/(?:collections?|categories?|search)(?:\/|$)/i.test(new URL(canonical).pathname);
       const score = scorePdpCandidate(canonical, domain, { source, linkText: texts[index] });
       // A bounded listing candidate is useful only as a one-hop source for a
       // PDP. It stays below direct product URLs in the deterministic queue.
-      if (score < 0 && !listingPath) return;
+      if (score < 0 && !listingPath) { reject(canonical, source, 'path_filter', 'LOW_PRODUCT_RELEVANCE', score); return; }
       const current = scored.get(canonical);
+      if (current) reject(canonical, source, 'duplicate', 'DUPLICATE_CANDIDATE', score);
       const next = current || { score: Number.NEGATIVE_INFINITY, sources: new Set<Exclude<CandidateSource, 'promoted_child'>>() };
       next.score = Math.max(listingPath ? Math.max(1, score) : score, next.score);
       next.sources.add(source);
@@ -1002,7 +1013,8 @@ async function discoverPdp(page: Page, domain: string, check: () => void, candid
     return { url, score: details.score, source, sources };
   });
   check();
-  return { candidates: candidates.slice(0, candidateLimit), homepage_candidate_count: homepageCandidateCount, sitemap_candidate_count: Math.max(0, scored.size - homepageCandidateCount), sitemap_enrichment_status };
+  for (const candidate of candidates.slice(candidateLimit)) reject(candidate.url, candidate.source, 'candidate_limit', 'CANDIDATE_LIMIT', candidate.score);
+  return { candidates: candidates.slice(0, candidateLimit), homepage_candidate_count: homepageCandidateCount, sitemap_candidate_count: Math.max(0, scored.size - homepageCandidateCount), sitemap_enrichment_status, rejection_observed_count: rejectionObservedCount, rejections };
 }
 
 function cmsSignalsFromHtml(html: string) {
@@ -1200,6 +1212,7 @@ export async function runStorefrontAudit(
   let consentHomepage: Page | null = null;
   let consentV2: ConsentV2SessionOutput | null = null;
   let sharedConsentObservation: SharedConsentObservation | null = null;
+  let homepageScreenshotCapturedAt: number | null = null;
   let consentV2Ran = false;
   let pdpPage: Page | null = null;
   let browserConnectedAt: number | null = null;
@@ -1290,6 +1303,19 @@ export async function runStorefrontAudit(
     return merged;
   };
 
+  const recordConsentDiagnostic = (snapshot: NonNullable<EvidenceBundle['diagnostic_observability']>['consent_observations'][number], screenshotName: string | null = null, screenshotCapturedAt: number | null = null) => {
+    if (evidence.mode !== 'diagnostic') return;
+    const diagnostics = evidence.diagnostic_observability ||= { consent_observations: [], diagnostic_captures: [], product_rejections: { observed_count: 0, truncated: false, candidates: [] } };
+    if (diagnostics.consent_observations.some((item) => item.capture_id === snapshot.capture_id)) return;
+    diagnostics.consent_observations.push(snapshot);
+    diagnostics.diagnostic_captures.push({
+      capture_id: snapshot.capture_id, phase: snapshot.phase, context: snapshot.context, screenshot_name: screenshotName,
+      consent_snapshot_id: snapshot.capture_id, captured_at_ms: snapshot.captured_at_ms, observation_complete: snapshot.observation_complete,
+      screenshot_captured_at_ms: screenshotCapturedAt
+    });
+    addTrace('diagnostic_consent_snapshot_captured', { context: snapshot.context, capture_id: snapshot.capture_id, observation_complete: snapshot.observation_complete }, { module: 'consent', severity: 'info' });
+  };
+
   const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null, emitTrace = true) => {
     const measurement = persistConsentMeasurementTelemetry(result.telemetry.measurement?.sources);
     result.telemetry.measurement = measurement;
@@ -1319,6 +1345,7 @@ export async function runStorefrontAudit(
     evidence.consent.preferences_action_available = merged.actions.some((action) => action.action === 'open_preferences' && action.availability !== 'not_present' && action.availability !== 'unknown');
     evidence.consent.actions_rollout_enabled = !result.telemetry.observation_only;
     evidence.consent.cookie_names = result.result.storage_changes.map((change) => change.key_name).slice(0, 100);
+    if (result.diagnostic_observation) recordConsentDiagnostic(result.diagnostic_observation);
     if (emitTrace) for (const step of compatibility.trace_events) addTrace(step, {}, { module: 'consent', severity: 'info' });
     return compatibility;
   };
@@ -1454,6 +1481,11 @@ export async function runStorefrontAudit(
     await closeSession();
     const completedEvidence = evidenceCollector.complete(startedMs);
     const replayed = replayEvidence(completedEvidence);
+    if (completedEvidence.mode === 'diagnostic') {
+      const observability = buildObservabilityConsistency(replayed, completedEvidence);
+      addTrace('diagnostic_consistency_check_completed', { status: observability.status, mismatch_codes: observability.checks.filter((check) => check.status === 'mismatch').map((check) => check.code) }, { module: 'runtime', severity: observability.status === 'mismatch' ? 'warning' : 'info' });
+      addTrace('diagnostic_provenance_finalized', { decision_count: completedEvidence.decision_summary?.length || 0 }, { module: 'runtime', severity: 'info' });
+    }
     const merged: Partial<StorefrontAudit> = {
       ...replayed,
       scan_status: finalStatus,
@@ -2193,9 +2225,24 @@ export async function runStorefrontAudit(
       const homepageHtml = await homepage!.content();
       evidenceCollector.setPage({ cmsSignals: cmsSignalsFromHtml(homepageHtml) });
       await capturePageTrackingInstallations(homepage!, homepageHtml, 'homepage_shared_observation', evidenceCollector);
+      // Reuse this completed homepage observation point for both the passive
+      // CMP snapshot and its existing diagnostic screenshot.
+      if (consentSelected && consentV2Enabled && !homepage!.isClosed()) {
+        try {
+          sharedConsentObservation = await captureSharedConsentObservation(homepage!, consentV2Controls, evidence.mode === 'diagnostic');
+          if (sharedConsentObservation.diagnostic_observation) recordConsentDiagnostic(sharedConsentObservation.diagnostic_observation);
+        } catch (error) {
+          addTrace('homepage_shared_cmp_observation_incomplete', { error_family: runtimeErrorFamily(error) }, { module: 'consent', severity: 'warning' });
+        }
+      }
       if (evidence.mode === 'diagnostic') {
         const image = await homepage!.screenshot({ type: 'jpeg', quality: 55, fullPage: false }).catch(() => null);
-        if (image) evidenceCollector.addScreenshot({ name: 'homepage.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
+        if (image) {
+          homepageScreenshotCapturedAt = Date.now();
+          evidenceCollector.addScreenshot({ name: 'homepage.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
+          const capture = evidence.diagnostic_observability?.diagnostic_captures.find((item) => item.context === 'shared');
+          if (capture) { capture.screenshot_name = 'homepage.jpg'; capture.screenshot_captured_at_ms = homepageScreenshotCapturedAt; }
+        }
       }
     })();
 
@@ -2231,7 +2278,7 @@ export async function runStorefrontAudit(
           geo_verified: freshConsent.geo.verified,
           page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
           timings: consentTimings,
-          access_blocked: readiness.status !== 'ready'
+          access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic'
         }, consentCapture);
         consentV2Ran = true;
         evidence.runtime.consent_v2 = consentV2.telemetry;
@@ -2317,7 +2364,7 @@ export async function runStorefrontAudit(
         const discovery = await withinPhaseBudget(
           'product_discovery',
           Math.max(1, Math.min(productDiscoveryBudgetMs, productBudgetRemaining())),
-          () => discoverPdp(homepage!, effectiveDomain, check, pdpCandidateAttemptLimit)
+          () => discoverPdp(homepage!, effectiveDomain, check, pdpCandidateAttemptLimit, evidence.mode === 'diagnostic')
         );
         pdpCandidates = discovery.candidates;
         evidence.product.homepage_candidate_count = discovery.homepage_candidate_count;
@@ -2328,6 +2375,15 @@ export async function runStorefrontAudit(
         evidence.product.candidate_attempted_count = 0;
         evidence.product.candidate_completed_count = 0;
         evidence.product.candidate_promoted_count = 0;
+        if (evidence.mode === 'diagnostic') {
+          const diagnostics = evidence.diagnostic_observability ||= { consent_observations: [], diagnostic_captures: [], product_rejections: { observed_count: 0, truncated: false, candidates: [] } };
+          diagnostics.product_rejections = {
+            observed_count: discovery.rejection_observed_count,
+            truncated: discovery.rejection_observed_count > discovery.rejections.length,
+            candidates: discovery.rejections
+          };
+          addTrace('product_rejection_summary_finalized', { observed_count: discovery.rejection_observed_count, retained_count: discovery.rejections.length, truncated: discovery.rejection_observed_count > discovery.rejections.length }, { module: 'product', severity: 'info' });
+        }
         productRuntime.discovery_ms = Date.now() - productStarted;
         if (discovery.sitemap_enrichment_status !== 'completed') addTrace('product_sitemap_enrichment_incomplete', {
           status: discovery.sitemap_enrichment_status,
@@ -2995,7 +3051,10 @@ export async function runStorefrontAudit(
     // window. Capture passive CMP facts before a later fresh context can fail.
     if (consentSelected && consentV2Enabled && homepage && !homepage.isClosed()) {
       try {
-        sharedConsentObservation = await captureSharedConsentObservation(homepage, consentV2Controls);
+        if (!sharedConsentObservation) {
+          sharedConsentObservation = await captureSharedConsentObservation(homepage, consentV2Controls, evidence.mode === 'diagnostic');
+          if (sharedConsentObservation.diagnostic_observation) recordConsentDiagnostic(sharedConsentObservation.diagnostic_observation, homepageScreenshotCapturedAt ? 'homepage.jpg' : null, homepageScreenshotCapturedAt);
+        }
         applyMergedConsentObservation(consentV2);
         addTrace('homepage_shared_cmp_observation_completed', {
           provider: sharedConsentObservation.provider,
@@ -3040,7 +3099,7 @@ export async function runStorefrontAudit(
           consentV2 = await withinPhaseBudget('consent_pdp_reject', Math.min(available, 15_000), () => runConsentV2Session(consentHomepage!, {
             geo, geo_verified: freshConsent.geo.verified,
             page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
-            timings: consentTimings, access_blocked: readiness.status !== 'ready'
+            timings: consentTimings, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic'
           }, consentCapture!));
           consentV2Ran = true;
           evidence.runtime.consent_v2 = consentV2.telemetry;

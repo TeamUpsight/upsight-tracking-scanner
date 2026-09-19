@@ -162,6 +162,27 @@ export interface EvidenceBundle {
   geo: 'USA' | 'EU' | 'UK';
   mode: ScanMode;
   selected_modules?: AuditModule[];
+  /** Diagnostic-only, bounded projections of facts already captured by the audit. */
+  diagnostic_observability?: {
+    consent_observations: Array<{
+      capture_id: string;
+      context: 'shared' | 'fresh';
+      phase: string;
+      captured_at_ms: number;
+      observation_complete: boolean;
+      provider_selection: {
+        selected_provider: string | null;
+        provider_conflict: boolean;
+        candidates: Array<{ provider: string; detection_status: string; confidence: 'high' | 'medium' | 'low'; independent_evidence_families: string[]; evidence_codes: string[] }>;
+      };
+      banner: { visibility: 'visible' | 'not_visible' | 'unknown'; surface: string };
+      visible_surfaces: Array<{ surface_type: string; provider_specific: boolean; visible: boolean; privacy_or_cookie_semantics: boolean; intent: string; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
+      visible_controls: Array<{ accessible_name: string; semantic_action: string; visible: boolean; enabled: boolean; actionable: boolean; provider_specific: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
+      frameworks: { tcf: boolean; gpp: boolean; consent_mode: string };
+    }>;
+    diagnostic_captures: Array<{ capture_id: string; phase: string; context: 'shared' | 'fresh'; screenshot_name: string | null; consent_snapshot_id: string | null; captured_at_ms: number; observation_complete: boolean; screenshot_captured_at_ms?: number | null }>;
+    product_rejections: { observed_count: number; truncated: boolean; candidates: Array<{ sanitized_url: string | null; source: string; sources: string[]; stage: string; score: number | null; reason_code: string }> };
+  };
   /** Final bounded decision projection, authored by canonical replay only. */
   decision_summary?: Array<{
     decision_name: string;

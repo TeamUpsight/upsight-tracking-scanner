@@ -2,6 +2,7 @@ import { normalizeConsentMeasurement, reconcileConsentMeasurement } from '../con
 import type { EvidenceBundle, StorefrontAudit } from '../../types';
 import { sanitizeValue } from './sanitize';
 import { qaPrioritySignals } from './fingerprints';
+import { buildDecisionProvenance, buildObservabilityConsistency } from './observability';
 
 function sanitizeCandidateUrl(raw: string | null | undefined) {
   if (!raw) return null;
@@ -27,8 +28,10 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
   })();
   const evidence = audit.evidence_bundle;
   const screenshots = evidence?.runtime.screenshots || [];
+  // Observability has dedicated bounded files below; omit it from generic
+  // evidence exports so the package does not persist the same arrays twice.
   const withoutScreenshots: EvidenceBundle | null = evidence
-    ? { ...evidence, runtime: { ...evidence.runtime, screenshots: [] } }
+    ? (() => { const { diagnostic_observability: _diagnostics, ...base } = evidence; return { ...base, runtime: { ...base.runtime, screenshots: [] } } as EvidenceBundle; })()
     : null;
   const observation = evidence?.network.observation;
   const productCandidates = evidence?.product.candidate_outcomes || [];
@@ -86,6 +89,9 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
     severity: item?.severity || (/failed|error|timeout/i.test(String(item?.step)) ? 'error' : /incomplete|rejected|skipped/i.test(String(item?.step)) ? 'warning' : /completed|detected|selected|validated/i.test(String(item?.step)) ? 'success' : 'info'),
     reason_code: item?.reason_code || null, summary: String(item?.reason || item?.step || 'Audit event').slice(0, 240), duration_ms: item?.duration_ms || null, candidate_index: item?.candidate_attempt || null
   }));
+  const observability = evidence ? buildObservabilityConsistency(audit, evidence) : { status: 'consistent' as const, checks: [] };
+  const provenance = evidence ? buildDecisionProvenance(audit, evidence) : [];
+  const diagnostics = evidence?.diagnostic_observability;
   const files: Record<string, string | Buffer> = {
     'audit-result.json': JSON.stringify(sanitizeValue({ ...audit, trace_steps: undefined, evidence_bundle: undefined }), null, 2),
     'trace.jsonl': (sanitizeValue(trace) as unknown[]).map((line) => JSON.stringify(line)).join('\n'),
@@ -132,12 +138,17 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
       build_timestamp: evidence?.build_timestamp || 'unknown',
       rule_pack_version: evidence?.rule_pack_version || 'unknown'
     }, null, 2),
-    'manifest.json': JSON.stringify(sanitizeValue({ debug_schema_version: 2, scanner_version: evidence?.scanner_version || 'unknown', build_commit: evidence?.build_commit || null, build_dirty: evidence?.build_dirty ?? null, build_timestamp: evidence?.build_timestamp || null, environment_mode: evidence?.mode || null, selected_modules: evidence?.selected_modules || audit.selected_modules || [], audit_start: audit.scan_started_at, audit_end: audit.scan_completed_at }), null, 2),
+    'manifest.json': JSON.stringify(sanitizeValue({ debug_schema_version: 3, scanner_version: evidence?.scanner_version || 'unknown', build_commit: evidence?.build_commit || null, build_dirty: evidence?.build_dirty ?? null, build_timestamp: evidence?.build_timestamp || null, environment_mode: evidence?.mode || null, selected_modules: evidence?.selected_modules || audit.selected_modules || [], audit_start: audit.scan_started_at, audit_end: audit.scan_completed_at }), null, 2),
     'summary.json': JSON.stringify(sanitizeValue({ audit_id: audit.audit_id, domain: audit.domain, build_commit: evidence?.build_commit || null, build_dirty: evidence?.build_dirty ?? null, geo: audit.tested_geos, selected_modules: evidence?.selected_modules || audit.selected_modules || [], scan_status: audit.scan_status, total_duration_ms: evidence?.runtime.total_duration_ms || null, final: { overall: audit.overall_status, consent: decisionStatus('consent', audit.consent_status), product: decisionStatus('product_payload', audit.product_payload_status), ga4: decisionStatus('ga4', audit.site_ga4_detected), meta: decisionStatus('meta', audit.site_meta_detected), server_side: decisionStatus('server_side', audit.server_side_status) }, product_discovery: { homepage_candidate_count: evidence?.product.homepage_candidate_count ?? 0, sitemap_candidate_count: evidence?.product.sitemap_candidate_count ?? 0, sitemap_enrichment_status: evidence?.product.sitemap_enrichment_status || 'not_attempted', candidate_counters: candidateCounters }, product_runtime: evidence?.product.product_runtime || null, major_warnings: audit.qa_priority_signals || [], major_errors: (audit.failure_fingerprints || []), consistency_violations: audit.consistency_violations || [] }), null, 2),
     'decisions.json': JSON.stringify(sanitizeValue(decisions), null, 2),
     'product-candidates.json': JSON.stringify(sanitizeValue({ candidate_counters: candidateCounters, candidates: sanitizedProductCandidates }), null, 2),
     'tracking-summary.json': JSON.stringify(sanitizeValue({ vendors: ['ga4', 'meta'].map((vendor) => { const events = (evidence?.network.relevant_requests || []).filter((event) => event.vendor === vendor); return { vendor, final_decision: canonicalDecision(vendor), installation_observed: events.some((event) => event.kind === 'script') || events.some((event) => event.kind === 'collection'), collection_observed: events.some((event) => event.kind === 'collection'), collection_count: events.filter((event) => event.kind === 'collection').length, pre_accept_count: events.filter((event) => event.phase.includes('consent_initial')).length, post_accept_count: events.filter((event) => event.phase.includes('post_accept')).length, pre_reject_count: events.filter((event) => event.phase.includes('pre_reject')).length, post_reject_count: events.filter((event) => event.phase.includes('post_reject')).length, observation_complete: observation?.request_capture_completed === true, capture_channels: observation || {}, limited_consent_measurement_count: events.filter((event) => event.consent_measurement === 'limited_measurement').length, full_measurement_count: events.filter((event) => event.consent_measurement === 'full_measurement').length, first_party_count: events.filter((event) => event.collector !== 'third_party').length, third_party_count: events.filter((event) => event.collector === 'third_party').length }; }) }), null, 2),
     'consent-summary.json': JSON.stringify(sanitizeValue({ provider_candidates: evidence?.consent.provider_evidence || [], selected_provider: decisionStatus('cmp', audit.cmp_provider), provider_confidence: canonicalDecision('cmp')?.confidence || null, banner_visible: evidence?.consent.banner_visible ?? null, actions_available: { accept: evidence?.consent.accept_action_available ?? false, reject: evidence?.consent.reject_action_available ?? false, preferences: evidence?.consent.preferences_action_available ?? false }, actions_rollout_enabled: evidence?.consent.actions_rollout_enabled ?? false, action_attempted: evidence?.consent.interaction_attempted ?? false, verification_status: evidence?.consent.rejection_verified ?? false, post_reject_observation_complete: evidence?.consent.post_reject_observation_completed ?? false, pre_choice_measurement: consentMeasurement.state, limited_measurement_count: consentMeasurement.limited_measurement_count, full_measurement_count: consentMeasurement.full_measurement_count, unknown_measurement_count: consentMeasurement.unknown_measurement_count, measurement: consentMeasurement, final_decision: canonicalDecision('consent') }), null, 2),
+    'consent-observations.json': JSON.stringify(sanitizeValue(diagnostics?.consent_observations || []), null, 2),
+    'diagnostic-captures.json': JSON.stringify(sanitizeValue(diagnostics?.diagnostic_captures || []), null, 2),
+    'observability-consistency.json': JSON.stringify(sanitizeValue(observability), null, 2),
+    'product-rejections.json': JSON.stringify(sanitizeValue({ observed_count: diagnostics?.product_rejections.observed_count || 0, retained_count: diagnostics?.product_rejections.candidates.length || 0, truncated: diagnostics?.product_rejections.truncated || false, candidates: diagnostics?.product_rejections.candidates || [] }), null, 2),
+    'decision-provenance.json': JSON.stringify(sanitizeValue(provenance), null, 2),
     'server-summary.json': JSON.stringify(sanitizeValue({ passive_classification_complete: evidence?.server_side.passive_classification_completed ?? false, first_party_count: evidence?.server_side.first_party_collection_count ?? 0, same_origin_count: evidence?.server_side.same_origin_collection_count ?? 0, third_party_count: evidence?.server_side.third_party_collection_count ?? 0, duplicate_count: evidence?.server_side.strict_duplicate_count ?? 0, collector_cookie_detected: (evidence?.server_side.collector_cookie_names || []).length > 0, persistence_checked: evidence?.server_side.collector_cookie_persistence_checked ?? false, persistence_result: evidence?.server_side.collector_cookie_persisted ?? false, final_decision: canonicalDecision('server_side'), blocking_uncertainty: canonicalDecision('server_side')?.blocking_uncertainty || [] }), null, 2),
     'timeline.json': JSON.stringify(sanitizeValue(timeline), null, 2),
     'errors.json': JSON.stringify(sanitizeValue(normalizedErrors), null, 2)
