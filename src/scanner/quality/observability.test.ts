@@ -58,6 +58,35 @@ describe('WP10 diagnostic observability', () => {
     expect(buildObservabilityConsistency(audit(evidence), evidence).checks.find((check) => check.code === 'OBS_CONSENT_MEASUREMENT_MISMATCH')?.status).toBe('mismatch');
   });
 
+  it('OBS-SURFACE-01 through OBS-SURFACE-05 flag only strong visible consent UI that disagrees with the canonical banner', () => {
+    const check = (evidence: ReturnType<typeof fixture>) => buildObservabilityConsistency(audit(evidence), evidence).checks.find((item) => item.code === 'OBS_CONSENT_SURFACE_BANNER_MISMATCH');
+    const didomi = fixture();
+    didomi.diagnostic_observability!.consent_observations[0].provider_selection = { selected_provider: 'didomi', provider_conflict: false, candidates: [{ provider: 'didomi', detection_status: 'identified', confidence: 'high', independent_evidence_families: ['typed_provider_api'], evidence_codes: ['typed_documented_provider_api'] }] };
+    didomi.consent.banner_visible = null;
+    expect(check(didomi)?.status).toBe('mismatch');
+
+    const cookiebot = fixture();
+    cookiebot.diagnostic_observability!.consent_observations[0].provider_selection = { selected_provider: 'cookiebot', provider_conflict: false, candidates: [{ provider: 'cookiebot', detection_status: 'identified', confidence: 'high', independent_evidence_families: ['provider_asset'], evidence_codes: ['unique_provider_script_or_config'] }] };
+    cookiebot.consent.banner_visible = false;
+    expect(check(cookiebot)?.status).toBe('mismatch');
+
+    const unknown = fixture();
+    unknown.diagnostic_observability!.consent_observations[0].provider_selection.selected_provider = null;
+    unknown.diagnostic_observability!.consent_observations[0].provider_selection.candidates[0].confidence = 'low';
+    unknown.consent.banner_visible = null;
+    expect(check(unknown)?.status).toBe('not_applicable');
+
+    const sharedVisible = fixture();
+    sharedVisible.runtime.consent_v2!.banner_visibility = 'unknown';
+    sharedVisible.consent.banner_visible = true;
+    expect(check(sharedVisible)?.status).toBe('pass');
+
+    const noControl = fixture();
+    noControl.diagnostic_observability!.consent_observations[0].visible_controls = [];
+    noControl.consent.banner_visible = null;
+    expect(check(noControl)?.status).toBe('not_applicable');
+  });
+
   it('OBS-PRODUCT-01 through OBS-PRODUCT-05 expose only capped sanitized rejections', () => {
     const output = JSON.parse(String(buildDebugPackageFiles(audit())['product-rejections.json']));
     expect(output).toMatchObject({ observed_count: 14, retained_count: 12, truncated: true });

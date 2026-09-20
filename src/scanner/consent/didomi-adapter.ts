@@ -180,7 +180,7 @@ export function detectDidomi(context: DidomiAdapterContext): AdapterDetectionRes
     : { status: 'inconclusive', evidence: candidate.independent_families, reason_codes: [ConsentAuditCodes.CMP_PROVIDER_UNKNOWN, ConsentAuditCodes.DETECTION_INCONCLUSIVE] };
 }
 
-/** Runtime notice visibility and DOM visibility are distinct facts and contradictions remain inconclusive. */
+/** Runtime notice visibility and DOM visibility are distinct facts. */
 export function didomiBannerState(context: DidomiAdapterContext): BannerState {
   const roots = context.surfaces?.filter((surface) => isDidomiRoot(surface.selector)) || [];
   const rootVisible = roots.some((surface) => surface.visible);
@@ -189,6 +189,19 @@ export function didomiBannerState(context: DidomiAdapterContext): BannerState {
   const genericConsentSurfaceVisible = context.generic_surfaces?.some((surface) =>
     surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent'
   ) || false;
+  const visibleSemanticConsentControl = context.controls?.some((control) =>
+    (control.semantic_action === 'accept_all' || control.semantic_action === 'reject_all' || control.semantic_action === 'open_preferences') && isActionable(control)
+  ) || false;
+  // A false API response is retained as diagnostic evidence, but it cannot
+  // erase a directly visible, semantically actionable consent surface after
+  // Didomi has already been positively identified.
+  if (detectDidomi(context).status === 'detected' && (genericConsentSurfaceVisible || rootVisible) && visibleSemanticConsentControl) {
+    return {
+      surface: 'banner', visibility: 'visible',
+      evidence: [rootVisible ? 'didomi_standard_root' : 'didomi_generic_consent_surface', ...(apiVisible === false ? ['didomi_notice_api_dom_disagreement'] : [])],
+      reason_codes: [ConsentAuditCodes.BANNER_VISIBLE]
+    };
+  }
   if ((rootVisible && apiVisible === false) || (rootHidden && apiVisible === true)) {
     return { surface: 'unknown', visibility: 'unknown', evidence: ['didomi_notice_visibility_contradiction'], reason_codes: [ConsentAuditCodes.STATE_CONTRADICTION, ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] };
   }
@@ -205,10 +218,7 @@ export function didomiBannerState(context: DidomiAdapterContext): BannerState {
   // Generic DOM facts are never provider attribution. Once Didomi is already
   // positively identified, however, a visible consent-shaped surface can
   // safely corroborate a current template that lacks the historic roots.
-  if (apiVisible === false && genericConsentSurfaceVisible) {
-    return { surface: 'unknown', visibility: 'unknown', evidence: ['didomi_notice_visibility_contradiction'], reason_codes: [ConsentAuditCodes.STATE_CONTRADICTION, ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] };
-  }
-  if (detectDidomi(context).status === 'detected' && genericConsentSurfaceVisible) {
+  if (detectDidomi(context).status === 'detected' && genericConsentSurfaceVisible && apiVisible !== false) {
     return { surface: 'banner', visibility: 'visible', evidence: ['didomi_generic_consent_surface'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
   }
   if (rootHidden || apiVisible === false) {

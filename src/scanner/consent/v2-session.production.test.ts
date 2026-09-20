@@ -551,6 +551,41 @@ describe('Consent V2 production session wiring', () => {
     ]));
   });
 
+  it('CMP-SURFACE-11 captures Cookiebot custom descendants with interaction semantics', async () => {
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="cookie-custom" role="dialog">Cookie preferences<div onclick="void 0">ALLE AKZEPTIEREN</div><div onclick="void 0">NUR NOTWENDIGE</div></div>');
+    expect(result.telemetry.provider).toBe('cookiebot');
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'only_necessary', availability: 'direct' })
+    ]));
+  });
+
+  it('CMP-SURFACE-12 does not identify Cookiebot from the same custom descendants', async () => {
+    const result = await audit('<div id="cookie-custom" role="dialog">Cookie preferences<div onclick="void 0">ALLE AKZEPTIEREN</div><div onclick="void 0">NUR NOTWENDIGE</div></div>');
+    expect(result.telemetry.provider).not.toBe('cookiebot');
+  });
+
+  it('CMP-SURFACE-13 does not promote plain Cookiebot surface text to a control', async () => {
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="cookie-custom" role="dialog">Cookie preferences<p>ALLE AKZEPTIEREN</p><span>NUR NOTWENDIGE</span></div>');
+    expect(result.telemetry.provider).toBe('cookiebot');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'not_present' }),
+      expect.objectContaining({ action: 'only_necessary', availability: 'not_present' })
+    ]));
+  });
+
+  it('CMP-SURFACE-14 keeps a visible Didomi consent UI visible when notice.isVisible() is false', async () => {
+    const result = await audit('<script>window.Didomi={notice:{isVisible:()=>false}};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="cookie-custom" role="dialog">Cookies et confidentialite<button>Tout accepter</button><button>Continuer sans accepter</button><button>Personnaliser</button></div>');
+    expect(result.telemetry.provider).toBe('didomi');
+    expect(result.result.banner).toMatchObject({ visibility: 'visible', evidence: expect.arrayContaining(['didomi_notice_api_dom_disagreement']) });
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'reject_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'open_preferences', availability: 'direct' })
+    ]));
+  });
+
   it('TELEM-UNKNOWN-01 fingerprints the actual generic detector result stably and without raw values', async () => {
     const fixture = (host: string) => `<script src="https://${host}/consent.js"></script><div role="dialog">We use cookies.<button>Accept all</button><button>Reject all</button></div>`;
     const first = await audit(fixture('cmp-one.example'));

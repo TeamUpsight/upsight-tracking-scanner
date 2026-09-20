@@ -218,7 +218,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       }));
     };
     const genericSurfaces = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i]')).slice(0, 30);
-    const generic = { surfaces: genericSurfaces.map((surface, index) => {
+    const genericSurfaceFacts = genericSurfaces.map((surface, index) => {
       const text = normal(String((surface as HTMLElement).innerText || surface.textContent || '').slice(0, 1200));
       const actionText = controls(surface).map((control) => normal(control.accessible_name)).join(' ');
       const privacyOrCookieSemantics = /cookie|consent|privacy|tracking/.test(text);
@@ -241,7 +241,30 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
                         : /privacy notice|we value your privacy/.test(text) && !/reject|decline|manage preferences|cookie settings/.test(text) ? 'ordinary_notice'
                           : /cookie|consent|privacy|tracking/.test(text) ? 'consent' : 'unknown';
       return { id: `surface-${index}`, surface_type: surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' ? 'dialog' : 'banner', visible: visible(surface), privacy_or_cookie_semantics: privacyOrCookieSemantics, intent, consent_management_topology: consentManagementTopology };
-    }), controls: genericSurfaces.flatMap((surface, index) => controls(surface).map((control) => ({ ...control, surface_id: `surface-${index}` }))) };
+    });
+    const genericControls = genericSurfaces.flatMap((surface, index) => controls(surface).map((control) => ({ ...control, surface_id: `surface-${index}` })));
+    // This is deliberately provider-first: two independent Cookiebot-specific
+    // facts are required before inspecting non-standard descendants, and the
+    // scan is bounded to a current visible consent surface.
+    const cookiebotEvidenceFamilies = [
+      Boolean(w.Cookiebot),
+      Boolean(document.querySelector('[data-cbid]')),
+      Array.from(document.scripts).some((script) => /consent\.cookiebot\.com\/uc\.js/i.test(script.src)),
+      Boolean(document.querySelector('#CybotCookiebotDialog'))
+    ].filter(Boolean).length;
+    const cookiebotCustomControls = cookiebotEvidenceFamilies >= 2 ? genericSurfaces.flatMap((surface, index) => {
+      const surfaceFact = genericSurfaceFacts[index];
+      if (!surfaceFact?.visible || !surfaceFact.privacy_or_cookie_semantics || surfaceFact.intent !== 'consent') return [];
+      const conventional = controls(surface).map((control) => control.accessible_name);
+      // No document-wide wildcard scan: only interaction-oriented descendants
+      // of this confirmed surface are considered, and at most 100 are read.
+      return Array.from(surface.querySelectorAll('[onclick], [tabindex], [role], [contenteditable="true"], [style*="cursor"]')).slice(0, 100)
+        .filter((control) => !conventional.includes(accessibleName(control)))
+        .filter((control) => visible(control) && enabled(control))
+        .map((control) => ({ surface_id: surfaceFact.id, visible: true, enabled: true, actionable: true, accessible_name: accessibleName(control) }))
+        .filter((control) => control.accessible_name.length > 0 && knownConsentAction(control.accessible_name));
+    }).slice(0, 30) : [];
+    const generic = { surfaces: genericSurfaceFacts, controls: [...genericControls, ...cookiebotCustomControls] };
     const cb = w.Cookiebot;
     const cookiebot = cb ? { has_response: typeof cb.hasResponse === 'boolean' ? cb.hasResponse : null, consented: typeof cb.consented === 'boolean' ? cb.consented : null, declined: typeof cb.declined === 'boolean' ? cb.declined : null, consent: cb.consent ? { preferences: typeof cb.consent.preferences === 'boolean' ? cb.consent.preferences : null, statistics: typeof cb.consent.statistics === 'boolean' ? cb.consent.statistics : null, marketing: typeof cb.consent.marketing === 'boolean' ? cb.consent.marketing : null } : null } : null;
     let cookieyes: Record<string, unknown> | null = null;

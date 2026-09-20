@@ -138,8 +138,26 @@ describe('Didomi adapter fixtures', () => {
     expect(didomiBannerState({ ...didomiEvidence, public_methods: ['notice.isVisible'], runtime: { current_user_status: null, notice_visible: true } })).toMatchObject({ visibility: 'visible', evidence: ['didomi_notice_visible_api'] });
   });
 
-  it('DIDOMI-LIVE-05 preserves an explicit API contradiction with a generic surface as unknown', () => {
-    expect(didomiBannerState({ ...didomiEvidence, public_methods: ['notice.isVisible'], runtime: { current_user_status: null, notice_visible: false }, generic_surfaces: visibleGenericConsentSurface })).toMatchObject({ visibility: 'unknown', reason_codes: [ConsentAuditCodes.STATE_CONTRADICTION, ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] });
+  const visibleFrenchControls = [
+    { id: 'accept', semantic_action: 'accept_all' as const, origin: 'semantic_ui' as const, visible: true, enabled: true, actionable: true, within_confirmed_didomi_surface: true },
+    { id: 'reject', semantic_action: 'reject_all' as const, origin: 'semantic_ui' as const, visible: true, enabled: true, actionable: true, within_confirmed_didomi_surface: true },
+    { id: 'preferences', semantic_action: 'open_preferences' as const, origin: 'semantic_ui' as const, visible: true, enabled: true, actionable: true, within_confirmed_didomi_surface: true }
+  ];
+
+  it('CMP-SURFACE-14 gives directly visible semantic Didomi UI precedence over a false API result', () => {
+    expect(didomiBannerState({ ...didomiEvidence, public_methods: ['notice.isVisible'], runtime: { current_user_status: null, notice_visible: false }, generic_surfaces: visibleGenericConsentSurface, controls: visibleFrenchControls })).toMatchObject({ visibility: 'visible', evidence: expect.arrayContaining(['didomi_generic_consent_surface', 'didomi_notice_api_dom_disagreement']) });
+  });
+
+  it('CMP-SURFACE-15 preserves not-visible when Didomi API is false and no consent DOM is visible', () => {
+    expect(didomiBannerState({ ...didomiEvidence, public_methods: ['notice.isVisible'], runtime: { current_user_status: null, notice_visible: false } })).toMatchObject({ visibility: 'not_visible' });
+  });
+
+  it('CMP-SURFACE-16 does not override a false Didomi API for a privacy surface without semantic controls', () => {
+    expect(didomiBannerState({ ...didomiEvidence, public_methods: ['notice.isVisible'], runtime: { current_user_status: null, notice_visible: false }, generic_surfaces: visibleGenericConsentSurface })).toMatchObject({ visibility: 'not_visible' });
+  });
+
+  it('CMP-SURFACE-17 preserves Didomi API true visibility', () => {
+    expect(didomiBannerState({ ...didomiEvidence, public_methods: ['notice.isVisible'], runtime: { current_user_status: null, notice_visible: true } })).toMatchObject({ visibility: 'visible', evidence: ['didomi_notice_visible_api'] });
   });
 
   it('DIDOMI-LIVE-06 excludes a visible newsletter surface from Didomi banner corroboration', () => {
