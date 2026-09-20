@@ -2969,6 +2969,14 @@ export async function runStorefrontAudit(
           if (isPhaseTimeout(error)) {
             finalStatus = 'partial';
             evidence.runtime.failed_phase ||= 'product_pdp_load';
+            recordCandidateOutcome({
+              url: safeUrl(pdpPage?.url()) || safeUrl(pdpUrl) || pdpUrl,
+              final_url: safeUrl(pdpPage?.url()) || safeUrl(pdpUrl) || null,
+              rank: candidateIndex + 1, score: candidate.score, source: candidate.source, sources: candidate.sources,
+              promoted_from: candidate.promoted_from || null, page_role: 'UNKNOWN', navigation_complete: false,
+              observation_complete: false, reason_code: 'TRACKING_PRODUCT_TIMEOUT', outcome: 'TIMEOUT'
+            });
+            evidence.product.observation!.timeout = true;
             addTrace('tracking_product_budget_exhausted', { reason_code: 'TRACKING_PRODUCT_TIMEOUT', candidate_attempt: candidateIndex + 1 });
             break;
           }
