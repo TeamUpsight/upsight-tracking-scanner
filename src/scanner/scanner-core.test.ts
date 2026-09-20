@@ -362,6 +362,13 @@ describe('PDP candidate selection', () => {
       .toEqual({ page_role: 'PDP', pdp_semantic_strength: true });
   });
 
+  it('PDP-EDITORIAL-01 requires transactional corroboration beside bare Product JSON-LD', () => {
+    const editorial = { json_ld_product: true, og_product: false, product_form: false, enabled_add_to_cart: false, visible_product_heading: true, visible_price: true, structured_in_stock: false, structured_out_of_stock: false, unavailable_message: false, disabled_sold_out_control: false };
+    expect(assessPdpCandidate(editorial)).toEqual({ is_product: false, out_of_stock: false });
+    expect(classifyProductPageRole(editorial)).toEqual({ page_role: 'UNKNOWN', pdp_semantic_strength: false });
+    expect(assessPdpCandidate({ ...editorial, structured_in_stock: true })).toEqual({ is_product: true, out_of_stock: false });
+  });
+
   it('accepts hydrated product content and scopes a view_item to the candidate PDP', () => {
     const weakSignals = {
       json_ld_product: false, og_product: false, product_form: false, enabled_add_to_cart: false,

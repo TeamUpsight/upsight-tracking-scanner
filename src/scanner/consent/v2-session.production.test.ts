@@ -525,6 +525,32 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.banner).toMatchObject({ visibility: 'visible', evidence: ['didomi_generic_consent_surface'] });
   });
 
+  it('CMP-SURFACE-07 captures bounded Cookiebot custom input controls without generic attribution', async () => {
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="cookie-custom" role="dialog">Cookie preferences<input type="button" value="ALLE AKZEPTIEREN"><input type="submit" value="NUR NOTWENDIGE"></div>');
+    expect(result.telemetry.provider).toBe('cookiebot');
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'only_necessary', availability: 'direct' })
+    ]));
+  });
+
+  it('CMP-SURFACE-08 does not identify Cookiebot from the same generic custom controls', async () => {
+    const result = await audit('<div id="cookie-custom" role="dialog">Cookie preferences<input type="button" value="ALLE AKZEPTIEREN"><input type="submit" value="NUR NOTWENDIGE"></div>');
+    expect(result.telemetry.provider).not.toBe('cookiebot');
+  });
+
+  it('CMP-SURFACE-09 uses French generic controls to corroborate an identified Didomi template', async () => {
+    const result = await audit('<script>window.Didomi={};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="cookie-custom" role="dialog">Cookies et confidentialite<button>Tout accepter</button><button>Continuer sans accepter</button><button>Personnaliser</button></div>');
+    expect(result.telemetry.provider).toBe('didomi');
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'reject_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'open_preferences', availability: 'direct' })
+    ]));
+  });
+
   it('TELEM-UNKNOWN-01 fingerprints the actual generic detector result stably and without raw values', async () => {
     const fixture = (host: string) => `<script src="https://${host}/consent.js"></script><div role="dialog">We use cookies.<button>Accept all</button><button>Reject all</button></div>`;
     const first = await audit(fixture('cmp-one.example'));

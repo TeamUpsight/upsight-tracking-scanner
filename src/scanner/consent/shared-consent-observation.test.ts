@@ -43,4 +43,14 @@ describe('shared CMP observation survival', () => {
   it('CMP-SURVIVE-06 treats equal-authority visible/not-visible observations as a contradiction', () => {
     expect(mergeSharedConsentObservation(shared(), fresh('not_visible')).banner.visibility).toBe('unknown');
   });
+
+  it('CMP-FINAL-02 and CMP-FINAL-03 preserve Sourcepoint through unavailable and absent fresh sessions', () => {
+    const sourcepoint = { ...shared(), provider: 'sourcepoint' as const };
+    expect(mergeSharedConsentObservation(sourcepoint, null)).toMatchObject({ provider: 'sourcepoint', provider_conflict: false });
+    expect(mergeSharedConsentObservation(sourcepoint, { telemetry: { provider: null, provider_conflict: false }, result: { banner: { surface: 'none', visibility: 'unknown', evidence: [], reason_codes: [] }, available_actions: [] } } as any)).toMatchObject({ provider: 'sourcepoint', provider_conflict: false });
+  });
+
+  it('CMP-FINAL-04 makes incompatible positive provider evidence a conflict', () => {
+    expect(mergeSharedConsentObservation(shared(), fresh('visible', 'cookiebot'))).toMatchObject({ provider: null, provider_conflict: true });
+  });
 });

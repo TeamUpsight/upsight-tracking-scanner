@@ -703,9 +703,11 @@ export type ProductPageRole = 'PDP' | 'PRODUCT_LISTING' | 'NON_PRODUCT' | 'UNKNO
 export function assessPdpCandidate(signals: PdpCandidateSignals) {
   // Heading, price, images, and sales language are supporting context only.
   // A PDP needs a commerce-native signal so articles, manuals, and donation
-  // pages cannot become products from price-looking prose.
-  const productEvidence = signals.json_ld_product || signals.og_product || signals.product_form || signals.enabled_add_to_cart ||
+  // pages cannot become products from price-looking prose. Product JSON-LD is
+  // common on editorial reviews, so it needs a transactional corroborator.
+  const transactionalEvidence = signals.og_product || signals.product_form || signals.enabled_add_to_cart ||
     signals.structured_in_stock || signals.structured_out_of_stock || signals.disabled_sold_out_control;
+  const productEvidence = transactionalEvidence || (signals.json_ld_product && transactionalEvidence);
   const outOfStock = !signals.structured_in_stock && !signals.enabled_add_to_cart &&
     (signals.structured_out_of_stock || signals.unavailable_message || signals.disabled_sold_out_control);
   return { is_product: productEvidence, out_of_stock: productEvidence && outOfStock };
@@ -720,7 +722,7 @@ export function classifyProductPageRole(signals: PdpCandidateSignals): { page_ro
   // A cart control inside each product card is listing evidence, not a PDP.
   // Only page-level product metadata/form/availability can override a strong
   // multi-product surface.
-  const pageLevelPdp = signals.json_ld_product || signals.og_product || signals.product_form ||
+  const pageLevelPdp = (signals.json_ld_product && (signals.og_product || signals.product_form || signals.structured_in_stock || signals.structured_out_of_stock || signals.disabled_sold_out_control)) || signals.og_product || signals.product_form ||
     signals.structured_in_stock || signals.structured_out_of_stock || signals.disabled_sold_out_control;
   if (listing && !pageLevelPdp) return { page_role: 'PRODUCT_LISTING', pdp_semantic_strength: false };
   if (pdp.is_product) return { page_role: 'PDP', pdp_semantic_strength: true };
@@ -735,6 +737,12 @@ export function isStrongProductPath(raw: string) {
     const levels = new URL(raw).pathname.split('/').filter(Boolean);
     return levels.length === 2 && /^(?:products?|item|p)$/i.test(levels[0]);
   } catch { return false; }
+}
+
+/** Existing discovery evidence that earns the bounded SPA hydration grace. */
+export function isStrongPdpGraceCandidate(candidate: { url: string; score: number; source: CandidateSource }, assessment: { pdp_semantic_strength: boolean }) {
+  return assessment.pdp_semantic_strength || candidate.source === 'product_sitemap' || candidate.source === 'promoted_child' ||
+    candidate.score >= 60 || isStrongProductPath(candidate.url);
 }
 
 /** A cheap, homepage-only gate. It deliberately never guesses "not applicable"
@@ -1268,7 +1276,7 @@ export async function runStorefrontAudit(
   };
 
   const legacyProviderForObservation = (provider: SharedConsentObservation['provider']) => ({
-    onetrust: 'OneTrust', cookiebot: 'Cookiebot', usercentrics: 'Usercentrics', didomi: 'Didomi', cookieyes: 'CookieYes'
+    onetrust: 'OneTrust', cookiebot: 'Cookiebot', usercentrics: 'Usercentrics', didomi: 'Didomi', cookieyes: 'CookieYes', sourcepoint: 'Sourcepoint'
   } as const)[provider || ''] || null;
 
   const applyMergedConsentObservation = (fresh: ConsentV2SessionOutput | null) => {
@@ -1478,6 +1486,10 @@ export async function runStorefrontAudit(
     }
     if (consentSelected && consentV2Enabled) persistConsentMeasurementTelemetry();
     if (consentV2) enrichConsentV2Evidence(consentV2, evidence.page.valid, false);
+    // The shared homepage observation is a completed evidence boundary. A
+    // fresh context may be unavailable, but it must never erase those facts
+    // immediately before canonical replay.
+    if (consentSelected && consentV2Enabled && sharedConsentObservation) applyMergedConsentObservation(consentV2);
     await closeSession();
     const completedEvidence = evidenceCollector.complete(startedMs);
     const replayed = replayEvidence(completedEvidence);
@@ -2573,7 +2585,6 @@ export async function runStorefrontAudit(
           productRuntime.candidate_navigation_ms += candidateNavigationElapsedMs;
           const finalPdpUrl = safeUrl(pdpPage!.url()) || safeUrl(pdpUrl)!;
           evidence.product.candidate_url = safeUrl(pdpUrl);
-          evidence.product.final_pdp_url = finalPdpUrl;
           if (!navigationTimedOut) {
             addTrace('pdp_navigation_committed', {
               candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl,
@@ -2711,7 +2722,8 @@ export async function runStorefrontAudit(
           }
           const needsTrackingEvidence = assessmentUnavailable || assessment.out_of_stock ||
             !assessment.pdp_semantic_strength && !candidateHits.some((hit) => hit.has_product);
-          if (needsTrackingEvidence && !candidateHits.some((hit) => hit.has_product)) {
+          const extendedGraceEligible = isStrongPdpGraceCandidate(candidate, assessment);
+          if (needsTrackingEvidence && !candidateHits.some((hit) => hit.has_product) && extendedGraceEligible) {
             pdpOperation = 'pdp_candidate_tracking_observation';
             addTrace('pdp_candidate_tracking_observation_started', {
               pdp_url: safeUrl(pdpUrl), wait_ms: PDP_POST_LOAD_OBSERVATION_MS,
@@ -2765,6 +2777,11 @@ export async function runStorefrontAudit(
                 signals: assessment.signals
               });
             }
+          } else if (needsTrackingEvidence && !candidateHits.some((hit) => hit.has_product)) {
+            addTrace('pdp_extended_observation_skipped_weak_candidate', {
+              pdp_url: safeUrl(pdpUrl), candidate_attempt: candidateIndex + 1,
+              candidate_score: candidate.score, candidate_source: candidate.source
+            });
           }
           const hasValidCandidateViewItem = candidateHits.some((hit) => hit.has_product);
           if (!canKeepTimedOutPdp({ navigationTimedOut, finalPdpUrlValid, assessment, hasValidViewItem: hasValidCandidateViewItem })) {
@@ -2797,14 +2814,6 @@ export async function runStorefrontAudit(
             });
           }
 
-          selectedPdp = true;
-          confirmedPdpUrl = finalPdpUrl;
-          evidence.product.pdp_url = finalPdpUrl;
-          evidence.product.candidate_url = safeUrl(pdpUrl);
-          evidence.product.final_pdp_url = finalPdpUrl;
-          evidence.product.navigation_succeeded = true;
-          addTrace('pdp_url_selected', { candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl, candidate_attempt: candidateIndex + 1 });
-          addTrace('pdp_navigation_completed', { status: pdpResponse?.status() });
           pdpOperation = 'pdp_hydration_engagement';
           await pdpPage.evaluate(() => {
             const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
@@ -2897,6 +2906,17 @@ export async function runStorefrontAudit(
             outcome: candidateHasViewItem ? 'VALID_PRODUCT_WITH_VIEW_ITEM' : 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'
           };
           recordCandidateOutcome(candidateOutcome);
+          // Only a candidate that has completed its required observation is
+          // authoritative. A later timeout remains diagnostic evidence and
+          // cannot replace this completed PDP URL.
+          selectedPdp = true;
+          confirmedPdpUrl = finalPdpUrl;
+          evidence.product.pdp_url = finalPdpUrl;
+          evidence.product.candidate_url = safeUrl(pdpUrl);
+          evidence.product.final_pdp_url = finalPdpUrl;
+          evidence.product.navigation_succeeded = true;
+          addTrace('pdp_url_selected', { candidate_url: safeUrl(pdpUrl), final_pdp_url: finalPdpUrl, candidate_attempt: candidateIndex + 1 });
+          addTrace('pdp_navigation_completed', { status: pdpResponse?.status() });
           productRuntime.minimum_observation_ms += minimumObservationMs;
           productRuntime.extended_observation_ms += candidateOutcome.extended_observation_ms || 0;
           // EvidenceCollector is append-only. Candidate-local slices above are

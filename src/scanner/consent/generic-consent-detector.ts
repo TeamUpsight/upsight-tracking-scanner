@@ -93,10 +93,10 @@ const NEGATIVE_INTENTS = new Set<GenericSurfaceIntent>([
 ]);
 
 const DEFAULT_ACTION_LABELS: GenericConsentDetectorConfig['localized_action_labels'] = {
-  accept_all: ['accept all', 'accept cookies', 'allow all', 'accept', 'alle akzeptieren'],
-  reject_all: ['reject all', 'decline all', 'deny all', 'reject', 'decline', 'alle ablehnen'],
+  accept_all: ['accept all', 'accept cookies', 'allow all', 'accept', 'alle akzeptieren', 'tout accepter'],
+  reject_all: ['reject all', 'decline all', 'deny all', 'reject', 'decline', 'alle ablehnen', 'continuer sans accepter'],
   only_necessary: ['only necessary', 'necessary only', 'nur notwendige'],
-  open_preferences: ['preferences', 'manage preferences', 'cookie settings', 'manage cookie settings', 'cookie preferences', 'manage cookie preferences', 'privacy preferences', 'customize', 'einstellungen'],
+  open_preferences: ['preferences', 'manage preferences', 'cookie settings', 'manage cookie settings', 'cookie preferences', 'manage cookie preferences', 'privacy preferences', 'customize', 'einstellungen', 'personnaliser'],
   save_preferences: ['save preferences', 'save choices', 'save settings']
 };
 

@@ -367,8 +367,10 @@ describe('runStorefrontAudit production browser wiring', () => {
       '/products/a': product,
       '/products/b': { status: 503, body: '<main>Temporarily unavailable</main>' }
     }, true, ['tracking']);
-    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ outcome: string; observation_complete: boolean }> } };
+    const evidence = result.evidence_bundle as { product: { pdp_url: string; final_pdp_url: string; candidate_outcomes: Array<{ outcome: string; observation_complete: boolean }> } };
     expect(result.product_payload_status).toBe('inconclusive');
+    expect(result.pdp_url_tested).toContain('/products/a');
+    expect(evidence.product).toMatchObject({ pdp_url: expect.stringContaining('/products/a'), final_pdp_url: expect.stringContaining('/products/a') });
     expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([
       expect.objectContaining({ outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', observation_complete: true }),
       expect.objectContaining({ outcome: 'OBSERVATION_INCOMPLETE', observation_complete: false })
