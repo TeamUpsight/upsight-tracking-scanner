@@ -52,6 +52,7 @@ export interface CookieYesControlObservation {
 
 export interface CookieYesSurfaceObservation {
   selector: string;
+  present?: boolean;
   visible: boolean;
 }
 
@@ -153,7 +154,7 @@ export function cookieYesProviderEvidence(context: CookieYesAdapterContext): Pro
   if (hasCookieYesAsset(context.asset_urls)) {
     evidence.push({ provider_id: 'cookieyes', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific' });
   }
-  if (context.surfaces?.some((surface) => surface.selector === COOKIEYES_STANDARD_ROOT)) {
+  if (context.surfaces?.some((surface) => surface.selector === COOKIEYES_STANDARD_ROOT && surface.present !== false)) {
     evidence.push({ provider_id: 'cookieyes', family: 'provider_root', kind: 'stable_provider_root', specificity: 'provider_specific' });
   }
   if (context.persistence?.some((descriptor) => descriptor.name === 'cookieyes-consent' && descriptor.exists)) {
@@ -172,7 +173,7 @@ export function detectCookieYes(context: CookieYesAdapterContext): AdapterDetect
 
 /** A detected runtime does not imply that its consent container is visible. */
 export function cookieYesBannerState(context: CookieYesAdapterContext): BannerState {
-  const root = context.surfaces?.find((surface) => surface.selector === COOKIEYES_STANDARD_ROOT);
+  const root = context.surfaces?.find((surface) => surface.selector === COOKIEYES_STANDARD_ROOT && surface.present !== false);
   if (root?.visible) return { surface: 'banner', visibility: 'visible', evidence: ['cookieyes_standard_root'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
   if (root) return { surface: 'none', visibility: 'not_visible', evidence: ['cookieyes_standard_root'], reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] };
   return { surface: 'none', visibility: 'not_visible', evidence: [], reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] };

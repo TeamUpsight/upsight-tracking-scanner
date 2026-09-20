@@ -109,6 +109,25 @@ describe('Usercentrics adapter fixtures', () => {
     expect(usercentricsBannerState(context)).toMatchObject({ surface: 'none', visibility: 'not_visible', reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] });
   });
 
+  it('UC-V2-01 and UC-V2-02 treat exact latest and versioned CMP v2 loaders as deterministic signatures', () => {
+    for (const loader of ['https://app.usercentrics.eu/browser-ui/latest/loader.js', 'https://app.usercentrics.eu/browser-ui/3.108.0/loader.js', 'https://web.cmp.usercentrics.eu/ui/loader.js']) {
+      const candidate = usercentricsProviderEvidence({ asset_urls: [loader] });
+      expect(candidate[0]).toMatchObject({ deterministic_provider_signature: true });
+      expect(detectUsercentrics({ asset_urls: [loader] })).toMatchObject({ status: 'detected' });
+    }
+  });
+
+  it('UC-V2-03 rejects Usercentrics-looking non-loader assets and generic TCF', () => {
+    expect(detectUsercentrics({ asset_urls: ['https://example.com/usercentrics-helper.js'], tcf_active: true })).toMatchObject({ status: 'not_detected' });
+  });
+
+  it('ROOT-EVIDENCE-01 through ROOT-EVIDENCE-03 separate an absent, hidden, and visible root', () => {
+    expect(usercentricsProviderEvidence({ surfaces: [{ selector: 'aside#usercentrics-cmp-ui', present: false, visible: false, shadow_mode: 'none' }] }).some((item) => item.family === 'provider_root')).toBe(false);
+    expect(usercentricsProviderEvidence({ surfaces: [{ selector: 'aside#usercentrics-cmp-ui', present: true, visible: false, shadow_mode: 'none' }] }).some((item) => item.family === 'provider_root')).toBe(true);
+    expect(usercentricsBannerState({ surfaces: [{ selector: 'aside#usercentrics-cmp-ui', present: true, visible: false, shadow_mode: 'none' }] }).visibility).toBe('not_visible');
+    expect(usercentricsBannerState({ surfaces: [{ selector: 'aside#usercentrics-cmp-ui', present: true, visible: true, shadow_mode: 'open' }] }).visibility).toBe('visible');
+  });
+
   it('uses safe semantic state separately from framework and persistence contributions', () => {
     const context = {
       safe_provider_state: { decision: 'rejected' as const },

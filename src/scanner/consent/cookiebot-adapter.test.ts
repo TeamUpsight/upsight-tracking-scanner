@@ -166,4 +166,9 @@ describe('Cookiebot adapter fixtures', () => {
   it('CMP-SURFACE-06 maps NUR NOTWENDIGE to only necessary', () => {
     expect(semanticActionForConsentLabel('NUR NOTWENDIGE')).toBe('only_necessary');
   });
+
+  it('ROOT-EVIDENCE-04 does not turn an absent Cookiebot placeholder into root evidence', () => {
+    expect(cookiebotProviderEvidence({ surfaces: [{ selector: '#CybotCookiebotDialog', present: false, visible: false }] })
+      .some((item) => item.family === 'provider_root')).toBe(false);
+  });
 });

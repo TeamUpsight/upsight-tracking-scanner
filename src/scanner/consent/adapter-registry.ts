@@ -118,6 +118,8 @@ export interface ProviderEvidenceSignal {
   kind: ProviderEvidenceKind;
   specificity: 'provider_specific' | 'framework_specific' | 'generic';
   polarity?: 'supporting' | 'conflicting';
+  /** An exact, documented provider loader can establish identity on its own. */
+  deterministic_provider_signature?: boolean;
 }
 
 export interface ProviderEvidenceScoringConfig {
@@ -138,6 +140,7 @@ export interface ScoredProviderCandidate {
   /** Registry-owned selection eligibility; callers must not recreate thresholds. */
   plausible_candidate: boolean;
   attribution: 'identified' | 'unknown_candidate' | 'inconclusive';
+  deterministic_provider_signature?: boolean;
 }
 
 export const DEFAULT_PROVIDER_EVIDENCE_SCORING: ProviderEvidenceScoringConfig = {
@@ -262,12 +265,14 @@ export function scoreProviderCandidates(
 ): ScoredProviderCandidate[] {
   const candidateFamilies = new Map<string, Map<ProviderEvidenceFamily, number>>();
   const candidateConflicts = new Map<string, Map<ProviderEvidenceFamily, number>>();
+  const deterministicProviders = new Set<string>();
   for (const signal of evidence) {
     if (!signal.provider_id || signal.specificity !== 'provider_specific') continue;
     if (signal.family === 'framework' || signal.family === 'consent_mode') continue;
     if (EXPECTED_FAMILY[signal.kind] !== signal.family) continue;
     const weight = config.weights[signal.kind as keyof ProviderEvidenceScoringConfig['weights']];
     if (!weight) continue;
+    if (signal.deterministic_provider_signature && signal.polarity !== 'conflicting') deterministicProviders.add(signal.provider_id);
     const target = signal.polarity === 'conflicting' ? candidateConflicts : candidateFamilies;
     const familyScores = target.get(signal.provider_id) || new Map<ProviderEvidenceFamily, number>();
     familyScores.set(signal.family, Math.max(familyScores.get(signal.family) || 0, weight));
@@ -291,20 +296,22 @@ export function scoreProviderCandidates(
       .filter((other) => other.provider_id !== candidate.provider_id)
       .reduce((highest, other) => Math.max(highest, other.score), 0);
     const strongConflict = candidate.conflict_score >= config.strong_conflict_threshold;
+    const deterministic = deterministicProviders.has(candidate.provider_id);
     const highConfidence =
-      candidate.score >= config.high_confidence_threshold &&
-      candidate.independent_families.length >= config.minimum_independent_families &&
+      (deterministic || candidate.score >= config.high_confidence_threshold &&
+      candidate.independent_families.length >= config.minimum_independent_families) &&
       candidate.score - strongestOtherCandidate >= config.minimum_conflict_margin &&
       !strongConflict;
     return {
       ...candidate,
+      deterministic_provider_signature: deterministic,
       strong_conflict: strongConflict,
       high_confidence: highConfidence,
       // A near-tie is not an identification, but each strongly evidenced
       // provider still needs to reach session-level active-surface resolution.
       // Otherwise two live CMPs are incorrectly reported as no CMP at all.
-      plausible_candidate: candidate.score >= config.high_confidence_threshold &&
-        candidate.independent_families.length >= config.minimum_independent_families &&
+      plausible_candidate: (deterministic || candidate.score >= config.high_confidence_threshold &&
+        candidate.independent_families.length >= config.minimum_independent_families) &&
         !strongConflict,
       attribution: strongConflict ? 'inconclusive' : highConfidence ? 'identified' : 'unknown_candidate'
     };

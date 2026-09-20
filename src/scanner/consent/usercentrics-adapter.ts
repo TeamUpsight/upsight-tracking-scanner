@@ -42,6 +42,7 @@ export interface UsercentricsControlObservation {
 
 export interface UsercentricsSurfaceObservation {
   selector: string;
+  present?: boolean;
   visible: boolean;
   shadow_mode: ShadowMode;
 }
@@ -70,6 +71,7 @@ export interface UsercentricsAdapterContext {
   uc_ui_type?: 'object' | 'function' | 'undefined' | 'unknown';
   asset_urls?: readonly string[];
   surfaces?: readonly UsercentricsSurfaceObservation[];
+  generic_surfaces?: readonly { visible: boolean; privacy_or_cookie_semantics: boolean; intent: string; strong_presentation?: boolean }[];
   controls?: readonly UsercentricsControlObservation[];
   storage?: readonly UsercentricsStorageDescriptor[];
   safe_provider_state?: UsercentricsSemanticState | null;
@@ -100,7 +102,7 @@ export interface UsercentricsVerificationContribution {
 }
 
 function hasCurrentLoader(values: readonly string[] | undefined) {
-  return values?.some((value) => /web\.cmp\.usercentrics\.eu\/ui\/loader\.js(?:[?#]|$)/i.test(value)) || false;
+  return values?.some((value) => /(?:web\.cmp\.usercentrics\.eu\/ui\/loader\.js|app\.usercentrics\.eu\/browser-ui\/(?:latest|\d+(?:\.\d+){1,3})\/loader\.js)(?:[?#]|$)/i.test(value)) || false;
 }
 
 function hasLegacyEvidence(context: UsercentricsAdapterContext) {
@@ -139,9 +141,9 @@ export function usercentricsProviderEvidence(context: UsercentricsAdapterContext
     evidence.push({ provider_id: 'usercentrics', family: 'typed_provider_api', kind: 'typed_documented_provider_api', specificity: 'provider_specific' });
   }
   if (hasCurrentLoader(context.asset_urls)) {
-    evidence.push({ provider_id: 'usercentrics', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific' });
+    evidence.push({ provider_id: 'usercentrics', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific', deterministic_provider_signature: true });
   }
-  if (context.surfaces?.some((surface) => surface.selector === USERCENTRICS_STANDARD_ROOT)) {
+  if (context.surfaces?.some((surface) => surface.selector === USERCENTRICS_STANDARD_ROOT && surface.present !== false)) {
     evidence.push({ provider_id: 'usercentrics', family: 'provider_root', kind: 'stable_provider_root', specificity: 'provider_specific' });
   }
   if (hasLegacyEvidence(context)) {
@@ -161,7 +163,13 @@ export function detectUsercentrics(context: UsercentricsAdapterContext): Adapter
 /** Provider presence and the visible UI surface are independent observations. */
 export function usercentricsBannerState(context: UsercentricsAdapterContext): BannerState {
   const root = context.surfaces?.find((surface) => surface.selector === USERCENTRICS_STANDARD_ROOT);
-  if (!root) return { surface: 'none', visibility: 'not_visible', evidence: [], reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] };
+  const genericVisible = context.generic_surfaces?.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation) || false;
+  if (detectUsercentrics(context).status === 'detected' && genericVisible) {
+    return { surface: 'dialog', visibility: 'visible', evidence: ['usercentrics_deterministic_provider_signature', 'visible_consent_surface'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
+  }
+  if (!root || root.present === false) return detectUsercentrics(context).status === 'detected'
+    ? { surface: 'unknown', visibility: 'unknown', evidence: [], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] }
+    : { surface: 'none', visibility: 'not_visible', evidence: [], reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] };
   if (root.shadow_mode === 'closed') {
     return {
       surface: root.visible ? 'dialog' : 'unknown', visibility: root.visible ? 'visible' : 'unknown', evidence: ['usercentrics_standard_root'],

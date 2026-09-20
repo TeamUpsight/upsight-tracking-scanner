@@ -152,20 +152,21 @@ function diagnosticObservation(
     provider: candidate.provider_id,
     detection_status: candidate.attribution,
     confidence: candidate.high_confidence ? 'high' as const : candidate.plausible_candidate ? 'medium' as const : 'low' as const,
+    deterministic_provider_signature: candidate.deterministic_provider_signature === true,
     independent_evidence_families: candidate.independent_families.slice(0, 8),
     evidence_codes: [...new Set(selection.evidence.filter((signal) => signal.provider_id === candidate.provider_id).map((signal) => signal.kind))].slice(0, 20)
   }));
   const location = selection.provider === 'usercentrics' && facts.usercentrics.shadow_mode !== 'none' ? 'shadow_dom' as const : 'main_frame' as const;
   const surfaces: DiagnosticConsentObservation['visible_surfaces'] = facts.generic.surfaces.filter((surface) => surface.visible).slice(0, 11).map((surface) => ({
     surface_type: surface.surface_type, provider_specific: false, visible: surface.visible,
-    privacy_or_cookie_semantics: surface.privacy_or_cookie_semantics, intent: surface.intent, location: 'main_frame' as const
+    privacy_or_cookie_semantics: surface.privacy_or_cookie_semantics, intent: surface.intent, strong_presentation: surface.strong_presentation, location: surface.location
   }));
   if (selection.provider && banner.visibility === 'visible' && surfaces.length < 12) surfaces.unshift({
     surface_type: banner.surface, provider_specific: true, visible: true, privacy_or_cookie_semantics: true, intent: 'consent', location
   });
   const controls: DiagnosticConsentObservation['visible_controls'] = facts.generic.controls.filter((control) => Boolean(semanticActionForConsentLabel(control.accessible_name))).slice(0, 20).map((control) => ({
     accessible_name: control.accessible_name.slice(0, 120), semantic_action: semanticActionForConsentLabel(control.accessible_name) || 'unknown',
-    visible: control.visible, enabled: control.enabled, actionable: control.actionable, provider_specific: false, location: 'main_frame' as const
+    visible: control.visible, enabled: control.enabled, actionable: control.actionable, provider_specific: false, location: control.location
   }));
   for (const action of actions) {
     if (controls.length >= 20 || action.availability === 'not_present' || action.availability === 'unknown') continue;

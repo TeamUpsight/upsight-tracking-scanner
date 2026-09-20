@@ -586,6 +586,65 @@ describe('Consent V2 production session wiring', () => {
     ]));
   });
 
+  it('UI-BRIDGE-01 through UI-BRIDGE-03 resolve nested semantic labels to their actionable ancestor', async () => {
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div role="dialog" class="cookie-consent"><button><span>ALLE AKZEPTIEREN</span></button><div role="button"><span>NUR NOTWENDIGE</span></div></div>');
+    expect(result.telemetry.provider).toBe('cookiebot');
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'only_necessary', availability: 'direct' })]));
+  });
+
+  it('UI-BRIDGE-04 and UI-BRIDGE-05 / Velux live-shape fixture traverse open nested shadow roots', async () => {
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="host"></div><script>const one=document.querySelector("#host").attachShadow({mode:"open"});one.innerHTML="<section role=dialog class=cookie-consent><div id=component></div></section>";const two=one.querySelector("#component").attachShadow({mode:"open"});two.innerHTML="<div role=button><span>NUR NOTWENDIGE</span></div><div role=button><span>ALLE AKZEPTIEREN</span></div>";</script>');
+    expect(result.telemetry.provider).toBe('cookiebot');
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'only_necessary', availability: 'direct' })]));
+  });
+
+  it('Decathlon live-shape fixture bridges visible Didomi shadow controls over API false', async () => {
+    const result = await audit('<script>window.Didomi={notice:{isVisible:()=>false}};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="host"></div><script>const root=document.querySelector("#host").attachShadow({mode:"open"});root.innerHTML="<section role=dialog class=cookie-consent><div role=button><span>Continuer sans accepter</span></div><div role=button><span>Personnaliser</span></div><div role=button><span>Tout accepter</span></div></section>";</script>');
+    expect(result.telemetry.provider).toBe('didomi');
+    expect(result.result.banner).toMatchObject({ visibility: 'visible', evidence: expect.arrayContaining(['didomi_notice_api_dom_disagreement']) });
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'reject_all', availability: 'direct' }), expect.objectContaining({ action: 'open_preferences', availability: 'direct' })]));
+  });
+
+  it('Congstar live-shape fixture identifies the Usercentrics v2 loader and open-shadow controls without UC_UI', async () => {
+    const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><div id="host"></div><script>const root=document.querySelector("#host").attachShadow({mode:"open"});root.innerHTML="<section role=dialog class=cookie-consent><div role=button><span>Einstellungen verwalten</span></div><div role=button><span>Alles ablehnen</span></div><div role=button><span>Alles akzeptieren</span></div></section>";</script>');
+    expect(result.telemetry).toMatchObject({ provider: 'usercentrics', provider_confidence: 'high' });
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'reject_all', availability: 'direct' }), expect.objectContaining({ action: 'open_preferences', availability: 'direct' })]));
+  });
+
+  it('UI-BRIDGE-06 does not promote exact plain text without an actionable ancestor', async () => {
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div role="dialog" class="cookie-consent"><p>ALLE AKZEPTIEREN</p></div>');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'not_present' })]));
+  });
+
+  it('UI-BRIDGE-07 does not classify ordinary cookie-policy footer content as a strong banner', async () => {
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><footer class="cookie-policy">Read our cookie policy and privacy policy.</footer>');
+    expect(result.telemetry.provider).toBe('cookiebot');
+    expect(result.result.banner.visibility).not.toBe('visible');
+  });
+
+  it('UI-SEPARATION-01 keeps a strong visible banner when no action is extracted', async () => {
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><section role="dialog" class="cookie-consent">Cookie and privacy settings</section>');
+    expect(result.telemetry.provider).toBe('cookiebot');
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'not_present' })]));
+  });
+
+  it('UI-SEPARATION-02 keeps a deterministic provider when its UI has not rendered', async () => {
+    const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script>');
+    expect(result.telemetry).toMatchObject({ provider: 'usercentrics', provider_confidence: 'high' });
+    expect(result.result.banner.visibility).toBe('unknown');
+  });
+
+  it('UI-SEPARATION-03 leaves generic cookie text unattributed', async () => {
+    const result = await audit('<div class="cookie-policy">Cookie policy and privacy information.</div>');
+    expect(result.telemetry.provider).not.toBe('cookiebot');
+    expect(result.telemetry.provider).not.toBe('didomi');
+    expect(result.telemetry.provider).not.toBe('usercentrics');
+  });
+
   it('TELEM-UNKNOWN-01 fingerprints the actual generic detector result stably and without raw values', async () => {
     const fixture = (host: string) => `<script src="https://${host}/consent.js"></script><div role="dialog">We use cookies.<button>Accept all</button><button>Reject all</button></div>`;
     const first = await audit(fixture('cmp-one.example'));

@@ -173,10 +173,10 @@ export interface EvidenceBundle {
       provider_selection: {
         selected_provider: string | null;
         provider_conflict: boolean;
-        candidates: Array<{ provider: string; detection_status: string; confidence: 'high' | 'medium' | 'low'; independent_evidence_families: string[]; evidence_codes: string[] }>;
+        candidates: Array<{ provider: string; detection_status: string; confidence: 'high' | 'medium' | 'low'; deterministic_provider_signature?: boolean; independent_evidence_families: string[]; evidence_codes: string[] }>;
       };
       banner: { visibility: 'visible' | 'not_visible' | 'unknown'; surface: string };
-      visible_surfaces: Array<{ surface_type: string; provider_specific: boolean; visible: boolean; privacy_or_cookie_semantics: boolean; intent: string; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
+      visible_surfaces: Array<{ surface_type: string; provider_specific: boolean; visible: boolean; privacy_or_cookie_semantics: boolean; intent: string; strong_presentation?: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
       visible_controls: Array<{ accessible_name: string; semantic_action: string; visible: boolean; enabled: boolean; actionable: boolean; provider_specific: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
       frameworks: { tcf: boolean; gpp: boolean; consent_mode: string };
     }>;

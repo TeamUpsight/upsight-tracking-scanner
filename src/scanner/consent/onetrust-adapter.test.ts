@@ -126,4 +126,9 @@ describe('OneTrust / Optanon adapter fixtures', () => {
       visibility: 'not_visible', reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE]
     });
   });
+
+  it('ROOT-EVIDENCE-06 does not turn an absent OneTrust placeholder into root evidence', () => {
+    expect(oneTrustProviderEvidence({ surfaces: [{ selector: '#onetrust-banner-sdk', present: false, visible: false }] })
+      .some((item) => item.family === 'provider_root')).toBe(false);
+  });
 });

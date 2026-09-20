@@ -118,4 +118,9 @@ describe('CookieYes adapter fixtures', () => {
     expect(cookieYesConsentState(context)).toMatchObject({ decision: 'accepted', evidence: ['cookieyes_get_cky_consent_read', 'cookieyes_user_action_completed'] });
     expect(cookieYesVerificationContribution(context)).toEqual({ strong: ['cookieyes_get_cky_consent_state'], supporting: ['cookieyes_user_action_completed'] });
   });
+
+  it('ROOT-EVIDENCE-07 does not turn an absent CookieYes placeholder into root evidence', () => {
+    expect(cookieYesProviderEvidence({ surfaces: [{ selector: '.cky-consent-container', present: false, visible: false }] })
+      .some((item) => item.family === 'provider_root')).toBe(false);
+  });
 });

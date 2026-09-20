@@ -47,6 +47,7 @@ export interface DidomiControlObservation {
 
 export interface DidomiSurfaceObservation {
   selector: string;
+  present?: boolean;
   visible: boolean;
 }
 
@@ -54,6 +55,7 @@ export interface DidomiGenericSurfaceObservation {
   visible: boolean;
   privacy_or_cookie_semantics: boolean;
   intent: string;
+  strong_presentation?: boolean;
 }
 
 /** A privacy-safe summary of Didomi.getCurrentUserStatus(), never its identifiers or raw structure. */
@@ -160,7 +162,7 @@ export function didomiProviderEvidence(context: DidomiAdapterContext): ProviderE
   if (hasDidomiSdkAsset(context.asset_urls) || hasExact(context.window_globals, 'didomiOnReady') || hasExact(context.window_globals, 'didomiConfig')) {
     evidence.push({ provider_id: 'didomi', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific' });
   }
-  if (context.surfaces?.some((surface) => isDidomiRoot(surface.selector))) {
+  if (context.surfaces?.some((surface) => isDidomiRoot(surface.selector) && surface.present !== false)) {
     evidence.push({ provider_id: 'didomi', family: 'provider_root', kind: 'stable_provider_root', specificity: 'provider_specific' });
   }
   if (context.storage?.some((descriptor) => descriptor.exists && (descriptor.key_name === 'didomi_token' || descriptor.key_name === 'didomi_dcs'))) {
@@ -182,7 +184,7 @@ export function detectDidomi(context: DidomiAdapterContext): AdapterDetectionRes
 
 /** Runtime notice visibility and DOM visibility are distinct facts. */
 export function didomiBannerState(context: DidomiAdapterContext): BannerState {
-  const roots = context.surfaces?.filter((surface) => isDidomiRoot(surface.selector)) || [];
+  const roots = context.surfaces?.filter((surface) => isDidomiRoot(surface.selector) && surface.present !== false) || [];
   const rootVisible = roots.some((surface) => surface.visible);
   const rootHidden = roots.length > 0 && !rootVisible;
   const apiVisible = hasPublicMethod(context, 'notice.isVisible') ? context.runtime?.notice_visible : null;
@@ -195,7 +197,8 @@ export function didomiBannerState(context: DidomiAdapterContext): BannerState {
   // A false API response is retained as diagnostic evidence, but it cannot
   // erase a directly visible, semantically actionable consent surface after
   // Didomi has already been positively identified.
-  if (detectDidomi(context).status === 'detected' && (genericConsentSurfaceVisible || rootVisible) && visibleSemanticConsentControl) {
+  const strongGenericConsentSurface = context.generic_surfaces?.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation) || false;
+  if (detectDidomi(context).status === 'detected' && (genericConsentSurfaceVisible || rootVisible) && (visibleSemanticConsentControl || strongGenericConsentSurface)) {
     return {
       surface: 'banner', visibility: 'visible',
       evidence: [rootVisible ? 'didomi_standard_root' : 'didomi_generic_consent_surface', ...(apiVisible === false ? ['didomi_notice_api_dom_disagreement'] : [])],

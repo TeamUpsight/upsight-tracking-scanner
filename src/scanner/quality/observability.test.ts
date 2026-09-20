@@ -24,7 +24,7 @@ function fixture(mode: 'normal' | 'diagnostic' = 'diagnostic') {
     consent_observations: [{
       capture_id: 'shared-1', context: 'shared', phase: 'homepage_shared_observation', captured_at_ms: 1, observation_complete: true,
       provider_selection: { selected_provider: 'onetrust', provider_conflict: false, candidates: [{ provider: 'onetrust', detection_status: 'identified', confidence: 'high', independent_evidence_families: ['provider_asset'], evidence_codes: ['unique_provider_script_or_config'] }] },
-      banner: { visibility: 'visible', surface: 'banner' }, visible_surfaces: [{ surface_type: 'banner', provider_specific: true, visible: true, privacy_or_cookie_semantics: true, intent: 'consent', location: 'main_frame' }],
+      banner: { visibility: 'visible', surface: 'banner' }, visible_surfaces: [{ surface_type: 'banner', provider_specific: true, visible: true, privacy_or_cookie_semantics: true, intent: 'consent', strong_presentation: true, location: 'main_frame' }],
       visible_controls: [{ accessible_name: 'Accept all', semantic_action: 'accept_all', visible: true, enabled: true, actionable: true, provider_specific: true, location: 'main_frame' }], frameworks: { tcf: true, gpp: false, consent_mode: 'limited_measurement' }
     }],
     diagnostic_captures: [{ capture_id: 'shared-1', phase: 'homepage_shared_observation', context: 'shared', screenshot_name: 'homepage.jpg', consent_snapshot_id: 'shared-1', captured_at_ms: 1, observation_complete: true, screenshot_captured_at_ms: 2 }],
@@ -84,7 +84,21 @@ describe('WP10 diagnostic observability', () => {
     const noControl = fixture();
     noControl.diagnostic_observability!.consent_observations[0].visible_controls = [];
     noControl.consent.banner_visible = null;
-    expect(check(noControl)?.status).toBe('not_applicable');
+    expect(check(noControl)?.status).toBe('mismatch');
+  });
+
+  it('OBS-CONTROL-GAP-01 through OBS-CONTROL-GAP-03 and OBS-SIGNATURE-01 through OBS-SIGNATURE-02 stay diagnostic only', () => {
+    const check = (evidence: ReturnType<typeof fixture>, code: string) => buildObservabilityConsistency(audit(evidence), evidence).checks.find((item) => item.code === code)?.status;
+    const gap = fixture(); gap.diagnostic_observability!.consent_observations[0].visible_controls = [];
+    expect(check(gap, 'OBS_CONSENT_CONTROL_EXTRACTION_GAP')).toBe('mismatch');
+    expect(check(fixture(), 'OBS_CONSENT_CONTROL_EXTRACTION_GAP')).toBe('pass');
+    const inline = fixture(); inline.diagnostic_observability!.consent_observations[0].visible_surfaces[0].strong_presentation = false;
+    expect(check(inline, 'OBS_CONSENT_CONTROL_EXTRACTION_GAP')).toBe('not_applicable');
+    const signature = fixture(); signature.diagnostic_observability!.consent_observations[0].provider_selection.candidates[0] = { provider: 'usercentrics', detection_status: 'identified', confidence: 'high', deterministic_provider_signature: true, independent_evidence_families: ['provider_asset'], evidence_codes: ['unique_provider_script_or_config'] };
+    signature.diagnostic_observability!.consent_observations[0].provider_selection.selected_provider = 'usercentrics'; signature.consent.resolved_provider = 'Usercentrics'; signature.decision_summary!.find((item) => item.decision_name === 'cmp')!.status = 'Usercentrics';
+    expect(check(signature, 'OBS_CONSENT_PROVIDER_SIGNATURE_MISMATCH')).toBe('pass');
+    signature.consent.resolved_provider = null; signature.decision_summary!.find((item) => item.decision_name === 'cmp')!.status = null;
+    expect(check(signature, 'OBS_CONSENT_PROVIDER_SIGNATURE_MISMATCH')).toBe('mismatch');
   });
 
   it('OBS-PRODUCT-01 through OBS-PRODUCT-05 expose only capped sanitized rejections', () => {

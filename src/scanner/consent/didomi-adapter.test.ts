@@ -163,4 +163,9 @@ describe('Didomi adapter fixtures', () => {
   it('DIDOMI-LIVE-06 excludes a visible newsletter surface from Didomi banner corroboration', () => {
     expect(didomiBannerState({ ...didomiEvidence, generic_surfaces: [{ visible: true, privacy_or_cookie_semantics: true, intent: 'newsletter' }] })).toMatchObject({ visibility: 'not_visible' });
   });
+
+  it('ROOT-EVIDENCE-05 does not turn an absent Didomi placeholder into root evidence', () => {
+    expect(didomiProviderEvidence({ surfaces: [{ selector: '#didomi-host', present: false, visible: false }] })
+      .some((item) => item.family === 'provider_root')).toBe(false);
+  });
 });

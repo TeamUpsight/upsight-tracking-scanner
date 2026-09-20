@@ -39,6 +39,7 @@ export type OneTrustControlSelector = typeof ONETRUST_DOCUMENTED_CONTROLS[keyof 
 
 export interface OneTrustSurfaceObservation {
   selector: string;
+  present?: boolean;
   visible: boolean;
 }
 
@@ -69,7 +70,7 @@ export interface OneTrustAdapterContext {
   public_methods?: readonly string[];
   active_group_ids?: readonly string[];
   provider_events?: readonly string[];
-  generic_surfaces?: readonly { visible: boolean; privacy_or_cookie_semantics: boolean; intent: string }[];
+  generic_surfaces?: readonly { visible: boolean; privacy_or_cookie_semantics: boolean; intent: string; strong_presentation?: boolean }[];
   generic_controls?: readonly { visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string }[];
   tcf_active?: boolean;
   gpp_active?: boolean;
@@ -140,7 +141,7 @@ export function oneTrustProviderEvidence(context: OneTrustAdapterContext): Provi
   if (containsOneTrustAsset(context.asset_urls)) {
     evidence.push({ provider_id: 'onetrust', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific' });
   }
-  if (context.surfaces?.some((surface) => isOneTrustRoot(surface.selector))) {
+  if (context.surfaces?.some((surface) => isOneTrustRoot(surface.selector) && surface.present !== false)) {
     evidence.push({ provider_id: 'onetrust', family: 'provider_root', kind: 'stable_provider_root', specificity: 'provider_specific' });
   }
   if (context.cookies?.some((cookie) => cookie.exists && (cookie.name === 'OptanonConsent' || cookie.name === 'OptanonAlertBoxClosed'))) {
@@ -171,7 +172,7 @@ export function detectOneTrust(context: OneTrustAdapterContext): AdapterDetectio
 
 /** Banner visibility is intentionally independent from OneTrust provider detection. */
 export function oneTrustBannerState(context: OneTrustAdapterContext): BannerState {
-  const roots = context.surfaces?.filter((surface) => isOneTrustRoot(surface.selector)) || [];
+  const roots = context.surfaces?.filter((surface) => isOneTrustRoot(surface.selector) && surface.present !== false) || [];
   const visible = roots.find((surface) => surface.visible);
   if (visible) {
     const surface = visible.selector === '#onetrust-pc-sdk' ? 'preference_center' : 'banner';
@@ -179,8 +180,9 @@ export function oneTrustBannerState(context: OneTrustAdapterContext): BannerStat
   }
   const strongProviderEvidence = Boolean(scoreProviderCandidates(oneTrustProviderEvidence(context)).find((candidate) => candidate.provider_id === 'onetrust')?.high_confidence);
   const visibleConsentSurface = context.generic_surfaces?.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent !== 'privacy_policy_only');
+  const strongConsentSurface = context.generic_surfaces?.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation);
   const visibleConsentControl = context.generic_controls?.some((control) => control.visible && /accept|allow|agree|reject|decline|necessary|preferences|settings/i.test(control.accessible_name));
-  if (strongProviderEvidence && visibleConsentSurface && visibleConsentControl) {
+  if (strongProviderEvidence && visibleConsentSurface && (visibleConsentControl || strongConsentSurface)) {
     return { surface: 'banner', visibility: 'visible', evidence: ['onetrust_strong_provider_evidence', 'visible_consent_surface', 'visible_consent_control'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
   }
   if (roots.length) {

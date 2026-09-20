@@ -17,15 +17,31 @@ function surfaceBannerMismatch(snapshots: readonly ConsentObservation[], canonic
   const strongVisibleUi = snapshots.some((snapshot) => {
     const selected = snapshot.provider_selection.selected_provider;
     const highConfidenceProvider = Boolean(selected && snapshot.provider_selection.candidates.some((candidate) => candidate.provider === selected && candidate.confidence === 'high' && candidate.detection_status === 'identified'));
-    const visibleConsentSurface = snapshot.visible_surfaces.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent');
-    const semanticControl = snapshot.visible_controls.some((control) => control.visible && control.enabled && control.actionable && ['accept_all', 'reject_all', 'only_necessary', 'open_preferences'].includes(control.semantic_action));
-    return highConfidenceProvider && visibleConsentSurface && semanticControl;
+    const visibleConsentSurface = snapshot.visible_surfaces.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation === true);
+    return highConfidenceProvider && visibleConsentSurface;
   });
   return {
     code: 'OBS_CONSENT_SURFACE_BANNER_MISMATCH',
     status: !strongVisibleUi ? 'not_applicable' : canonicalBanner === 'visible' ? 'pass' : 'mismatch',
     values: { canonical: canonicalBanner, strong_visible_consent_ui: strongVisibleUi }
   };
+}
+
+function controlExtractionGap(snapshots: readonly ConsentObservation[]): Check {
+  const relevant = snapshots.find((snapshot) => {
+    const selected = snapshot.provider_selection.selected_provider;
+    const high = Boolean(selected && snapshot.provider_selection.candidates.some((candidate) => candidate.provider === selected && candidate.confidence === 'high' && candidate.detection_status === 'identified'));
+    return high && snapshot.visible_surfaces.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation === true);
+  });
+  if (!relevant) return { code: 'OBS_CONSENT_CONTROL_EXTRACTION_GAP', status: 'not_applicable', values: {} };
+  const semanticControls = relevant.visible_controls.filter((control) => control.visible && control.enabled && control.actionable && ['accept_all', 'reject_all', 'only_necessary', 'open_preferences'].includes(control.semantic_action));
+  const strongSurfaces = relevant.visible_surfaces.filter((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation === true);
+  return { code: 'OBS_CONSENT_CONTROL_EXTRACTION_GAP', status: semanticControls.length ? 'pass' : 'mismatch', values: { provider: relevant.provider_selection.selected_provider, surface_count: relevant.visible_surfaces.length, strong_surface_count: strongSurfaces.length, semantic_control_count: semanticControls.length, shadow_surface_count: strongSurfaces.filter((surface) => surface.location === 'shadow_dom').length } };
+}
+
+function providerSignatureMismatch(snapshots: readonly ConsentObservation[], canonicalProvider: unknown): Check {
+  const deterministic = snapshots.some((snapshot) => snapshot.provider_selection.candidates.some((candidate) => candidate.provider === 'usercentrics' && candidate.deterministic_provider_signature === true));
+  return { code: 'OBS_CONSENT_PROVIDER_SIGNATURE_MISMATCH', status: !deterministic ? 'not_applicable' : provider(canonicalProvider) === 'usercentrics' ? 'pass' : 'mismatch', values: { deterministic_provider: deterministic ? 'usercentrics' : null, canonical: canonicalProvider ?? null } };
 }
 
 export function buildObservabilityConsistency(audit: Partial<StorefrontAudit>, evidence: EvidenceBundle) {
@@ -48,6 +64,8 @@ export function buildObservabilityConsistency(audit: Partial<StorefrontAudit>, e
   const bannerValues = [runtimeBanner, persistedBanner, sharedBanner].filter((value) => value !== 'unknown');
   const bannerCheck: Check = { code: 'OBS_CONSENT_BANNER_MISMATCH', status: bannerValues.length < 2 ? 'not_applicable' : new Set(bannerValues).size > 1 ? 'mismatch' : 'pass', values: { runtime: runtimeBanner, persisted: persistedBanner, shared: sharedBanner } };
   const surfaceBannerCheck = surfaceBannerMismatch(snapshots, persistedBanner);
+  const controlGapCheck = controlExtractionGap(snapshots);
+  const signatureCheck = providerSignatureMismatch(snapshots, canonical);
   const actionRows = ['accept', 'reject', 'preferences'].map((name) => {
     const semantic = name === 'accept' ? 'accept_all' : name === 'reject' ? 'reject_all' : 'open_preferences';
     const snapshotHas = (snapshot: typeof shared) => snapshot?.visible_controls.some((control) => control.semantic_action === semantic && control.actionable) || false;
@@ -60,7 +78,7 @@ export function buildObservabilityConsistency(audit: Partial<StorefrontAudit>, e
   const measurementCheck = mismatch('OBS_CONSENT_MEASUREMENT_MISMATCH', { runtime: measurement, persisted: evidence.consent.pre_choice_measurement ?? null }, [measurement, evidence.consent.pre_choice_measurement ?? null]);
   const pdp = [evidence.product.final_pdp_url, evidence.product.pdp_url, audit.pdp_url_tested].filter(Boolean).map((value) => safeUrl(value));
   const productCheck: Check = { code: 'OBS_PRODUCT_PDP_MISMATCH', status: pdp.length < 2 ? 'not_applicable' : new Set(pdp).size > 1 ? 'mismatch' : 'pass', values: { final_pdp_url: safeUrl(evidence.product.final_pdp_url), pdp_url: safeUrl(evidence.product.pdp_url), audit_pdp_url_tested: safeUrl(audit.pdp_url_tested) } };
-  const checks = [providerCheck, bannerCheck, surfaceBannerCheck, actionCheck, measurementCheck, productCheck];
+  const checks = [providerCheck, bannerCheck, surfaceBannerCheck, controlGapCheck, signatureCheck, actionCheck, measurementCheck, productCheck];
   return { status: checks.some((check) => check.status === 'mismatch') ? 'mismatch' as const : 'consistent' as const, checks };
 }
 

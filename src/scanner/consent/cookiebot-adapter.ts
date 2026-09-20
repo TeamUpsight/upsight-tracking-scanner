@@ -56,6 +56,7 @@ export interface CookiebotControlObservation {
 
 export interface CookiebotSurfaceObservation {
   selector: string;
+  present?: boolean;
   visible: boolean;
 }
 
@@ -76,7 +77,7 @@ export interface CookiebotAdapterContext {
   runtime?: CookiebotRuntimeState | null;
   provider_events?: readonly string[];
   cookies?: readonly CookiebotCookieDescriptor[];
-  generic_surfaces?: readonly { visible: boolean; privacy_or_cookie_semantics: boolean; intent: string }[];
+  generic_surfaces?: readonly { visible: boolean; privacy_or_cookie_semantics: boolean; intent: string; strong_presentation?: boolean }[];
   generic_controls?: readonly { visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string; semantic_action?: CookiebotSemanticAction }[];
   tcf_active?: boolean;
   gpp_active?: boolean;
@@ -157,7 +158,7 @@ export function cookiebotProviderEvidence(context: CookiebotAdapterContext): Pro
   if (hasCookiebotAsset(context.asset_urls) || includesExact(context.script_ids, 'Cookiebot') || context.data_cbid_present) {
     evidence.push({ provider_id: 'cookiebot', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific' });
   }
-  if (context.surfaces?.some((surface) => surface.selector === COOKIEBOT_STANDARD_ROOT)) {
+  if (context.surfaces?.some((surface) => surface.selector === COOKIEBOT_STANDARD_ROOT && surface.present !== false)) {
     evidence.push({ provider_id: 'cookiebot', family: 'provider_root', kind: 'stable_provider_root', specificity: 'provider_specific' });
   }
   if (context.cookies?.some((cookie) => cookie.name === 'CookieConsent' && cookie.exists)) {
@@ -179,7 +180,7 @@ export function detectCookiebot(context: CookiebotAdapterContext): AdapterDetect
 
 /** Surface visibility is a standalone fact; a detected Cookiebot runtime need not display a dialog. */
 export function cookiebotBannerState(context: CookiebotAdapterContext): BannerState {
-  const root = context.surfaces?.find((surface) => surface.selector === COOKIEBOT_STANDARD_ROOT);
+  const root = context.surfaces?.find((surface) => surface.selector === COOKIEBOT_STANDARD_ROOT && surface.present !== false);
   if (root?.visible) return { surface: 'dialog', visibility: 'visible', evidence: ['cookiebot_standard_root'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
   // A confirmed Cookiebot tenant can replace the documented root with its own
   // template.  The generic surface only corroborates visibility here; it never
@@ -191,7 +192,8 @@ export function cookiebotBannerState(context: CookiebotAdapterContext): BannerSt
   const visibleConsentControl = context.generic_controls?.some((control) =>
     control.visible && control.enabled && control.actionable && Boolean(control.semantic_action)
   );
-  if (strongProviderEvidence && visibleConsentSurface && visibleConsentControl) {
+  const strongConsentSurface = context.generic_surfaces?.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation) || false;
+  if (strongProviderEvidence && visibleConsentSurface && (visibleConsentControl || strongConsentSurface)) {
     return { surface: 'banner', visibility: 'visible', evidence: ['cookiebot_strong_provider_evidence', 'visible_consent_surface', 'visible_consent_control'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
   }
   if (root) return { surface: 'none', visibility: 'not_visible', evidence: ['cookiebot_standard_root'], reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] };
