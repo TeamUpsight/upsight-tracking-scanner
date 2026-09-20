@@ -244,7 +244,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       const style = surface instanceof HTMLElement ? getComputedStyle(surface) : null;
       return { id: `surface-${index}`, surface_type: (surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' ? 'dialog' : 'banner') as 'banner' | 'dialog', visible: visible(surface), privacy_or_cookie_semantics: privacyOrCookieSemantics, intent, consent_management_topology: consentManagementTopology, strong_presentation: surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky', location: 'main_frame' as 'main_frame' | 'shadow_dom', shadow_depth: 0 };
     });
-    const genericControls = genericSurfaces.flatMap((surface, index) => controls(surface).map((control) => ({ ...control, surface_id: `surface-${index}`, location: 'main_frame' as const, shadow_depth: 0 })));
+    const genericControls = genericSurfaces.flatMap((surface, index) => controls(surface).map((control) => ({ ...control, surface_id: `surface-${index}`, location: 'main_frame' as 'main_frame' | 'shadow_dom', shadow_depth: 0 })));
     // This is deliberately provider-first: two independent Cookiebot-specific
     // facts are required before inspecting non-standard descendants, and the
     // scan is bounded to a current visible consent surface.
