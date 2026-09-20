@@ -585,7 +585,7 @@ describe('Consent V2 production session wiring', () => {
   });
 
   it('UI-BRIDGE-01 through UI-BRIDGE-03 resolve nested semantic labels to their actionable ancestor', async () => {
-    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div role="dialog" class="cookie-consent"><button><span>ALLE AKZEPTIEREN</span></button><div role="button"><span>NUR NOTWENDIGE</span></div></div>');
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div role="dialog" class="cookie-consent">Cookie preferences<button><span>ALLE AKZEPTIEREN</span></button><div role="button"><span>NUR NOTWENDIGE</span></div></div>');
     expect(result.telemetry.provider).toBe('cookiebot');
     expect(result.result.banner.visibility).toBe('visible');
     expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'only_necessary', availability: 'direct' })]));

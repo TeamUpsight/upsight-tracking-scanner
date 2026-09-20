@@ -290,7 +290,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     }
     const interactive = (element: Element) => {
       const role = element.getAttribute('role'); const tabIndex = Number(element.getAttribute('tabindex'));
-      return element.matches('button, a[href], input[type="button"], input[type="submit"]') || role === 'button' || role === 'link' || Number.isFinite(tabIndex) && tabIndex >= 0 || element.hasAttribute('onclick') || getComputedStyle(element).cursor === 'pointer';
+      return element.matches('button, a[href], input[type="button"], input[type="submit"]') || role === 'button' || role === 'link' || element.hasAttribute('tabindex') && Number.isFinite(tabIndex) && tabIndex >= 0 || element.hasAttribute('onclick') || getComputedStyle(element).cursor === 'pointer';
     };
     const composedParent = (element: Element) => {
       const root = element.getRootNode();
