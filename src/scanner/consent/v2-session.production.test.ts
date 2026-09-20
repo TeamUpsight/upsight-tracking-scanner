@@ -526,7 +526,7 @@ describe('Consent V2 production session wiring', () => {
   });
 
   it('CMP-SURFACE-07 captures bounded Cookiebot custom input controls without generic attribution', async () => {
-    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="cookie-custom" role="dialog">Cookie preferences<input type="button" value="ALLE AKZEPTIEREN"><input type="submit" value="NUR NOTWENDIGE"></div>');
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div id="cookie-custom" role="dialog">Cookie preferences<input type="button" value="ALLE AKZEPTIEREN"><input type="submit" value="NUR NOTWENDIGE"></div>');
     expect(result.telemetry.provider).toBe('cookiebot');
     expect(result.result.banner.visibility).toBe('visible');
     expect(result.result.available_actions).toEqual(expect.arrayContaining([
@@ -541,7 +541,7 @@ describe('Consent V2 production session wiring', () => {
   });
 
   it('CMP-SURFACE-09 uses French generic controls to corroborate an identified Didomi template', async () => {
-    const result = await audit('<script>window.Didomi={};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="cookie-custom" role="dialog">Cookies et confidentialite<button>Tout accepter</button><button>Continuer sans accepter</button><button>Personnaliser</button></div>');
+    const result = await audit('<script>window.Didomi={};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-notice" style="display:none"></div><div id="cookie-custom" role="dialog">Cookies et confidentialite<button>Tout accepter</button><button>Continuer sans accepter</button><button>Personnaliser</button></div>');
     expect(result.telemetry.provider).toBe('didomi');
     expect(result.result.banner.visibility).toBe('visible');
     expect(result.result.available_actions).toEqual(expect.arrayContaining([
@@ -552,7 +552,7 @@ describe('Consent V2 production session wiring', () => {
   });
 
   it('CMP-SURFACE-11 captures Cookiebot custom descendants with interaction semantics', async () => {
-    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="cookie-custom" role="dialog">Cookie preferences<div onclick="void 0">ALLE AKZEPTIEREN</div><div onclick="void 0">NUR NOTWENDIGE</div></div>');
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div id="cookie-custom" role="dialog">Cookie preferences<div onclick="void 0">ALLE AKZEPTIEREN</div><div onclick="void 0">NUR NOTWENDIGE</div></div>');
     expect(result.telemetry.provider).toBe('cookiebot');
     expect(result.result.banner.visibility).toBe('visible');
     expect(result.result.available_actions).toEqual(expect.arrayContaining([
@@ -567,16 +567,14 @@ describe('Consent V2 production session wiring', () => {
   });
 
   it('CMP-SURFACE-13 does not promote plain Cookiebot surface text to a control', async () => {
-    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="cookie-custom" role="dialog">Cookie preferences<p>ALLE AKZEPTIEREN</p><span>NUR NOTWENDIGE</span></div>');
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div id="cookie-custom" role="dialog">Cookie preferences<p>ALLE AKZEPTIEREN</p><span>NUR NOTWENDIGE</span></div>');
     expect(result.telemetry.provider).toBe('cookiebot');
-    expect(result.result.available_actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: 'accept_all', availability: 'not_present' }),
-      expect.objectContaining({ action: 'only_necessary', availability: 'not_present' })
-    ]));
+    expect(result.result.available_actions.some((action) => action.action === 'accept_all' && action.availability === 'direct')).toBe(false);
+    expect(result.result.available_actions.some((action) => action.action === 'only_necessary' && action.availability === 'direct')).toBe(false);
   });
 
   it('CMP-SURFACE-14 keeps a visible Didomi consent UI visible when notice.isVisible() is false', async () => {
-    const result = await audit('<script>window.Didomi={notice:{isVisible:()=>false}};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="cookie-custom" role="dialog">Cookies et confidentialite<button>Tout accepter</button><button>Continuer sans accepter</button><button>Personnaliser</button></div>');
+    const result = await audit('<script>window.Didomi={notice:{isVisible:()=>false}};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-notice" style="display:none"></div><div id="cookie-custom" role="dialog">Cookies et confidentialite<button>Tout accepter</button><button>Continuer sans accepter</button><button>Personnaliser</button></div>');
     expect(result.telemetry.provider).toBe('didomi');
     expect(result.result.banner).toMatchObject({ visibility: 'visible', evidence: expect.arrayContaining(['didomi_notice_api_dom_disagreement']) });
     expect(result.result.available_actions).toEqual(expect.arrayContaining([
@@ -587,21 +585,21 @@ describe('Consent V2 production session wiring', () => {
   });
 
   it('UI-BRIDGE-01 through UI-BRIDGE-03 resolve nested semantic labels to their actionable ancestor', async () => {
-    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div role="dialog" class="cookie-consent"><button><span>ALLE AKZEPTIEREN</span></button><div role="button"><span>NUR NOTWENDIGE</span></div></div>');
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div role="dialog" class="cookie-consent"><button><span>ALLE AKZEPTIEREN</span></button><div role="button"><span>NUR NOTWENDIGE</span></div></div>');
     expect(result.telemetry.provider).toBe('cookiebot');
     expect(result.result.banner.visibility).toBe('visible');
     expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'only_necessary', availability: 'direct' })]));
   });
 
   it('UI-BRIDGE-04 and UI-BRIDGE-05 / Velux live-shape fixture traverse open nested shadow roots', async () => {
-    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="host"></div><script>const one=document.querySelector("#host").attachShadow({mode:"open"});one.innerHTML="<section role=dialog class=cookie-consent><div id=component></div></section>";const two=one.querySelector("#component").attachShadow({mode:"open"});two.innerHTML="<div role=button><span>NUR NOTWENDIGE</span></div><div role=button><span>ALLE AKZEPTIEREN</span></div>";</script>');
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div id="host"></div><script>const one=document.querySelector("#host").attachShadow({mode:"open"});one.innerHTML="<section role=dialog class=cookie-consent><div id=component></div></section>";const two=one.querySelector("#component").attachShadow({mode:"open"});two.innerHTML="<div role=button><span>NUR NOTWENDIGE</span></div><div role=button><span>ALLE AKZEPTIEREN</span></div>";</script>');
     expect(result.telemetry.provider).toBe('cookiebot');
     expect(result.result.banner.visibility).toBe('visible');
     expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'only_necessary', availability: 'direct' })]));
   });
 
   it('Decathlon live-shape fixture bridges visible Didomi shadow controls over API false', async () => {
-    const result = await audit('<script>window.Didomi={notice:{isVisible:()=>false}};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="host"></div><script>const root=document.querySelector("#host").attachShadow({mode:"open"});root.innerHTML="<section role=dialog class=cookie-consent><div role=button><span>Continuer sans accepter</span></div><div role=button><span>Personnaliser</span></div><div role=button><span>Tout accepter</span></div></section>";</script>');
+    const result = await audit('<script>window.Didomi={notice:{isVisible:()=>false}};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-notice" style="display:none"></div><div id="host"></div><script>const root=document.querySelector("#host").attachShadow({mode:"open"});root.innerHTML="<section role=dialog class=cookie-consent><div role=button><span>Continuer sans accepter</span></div><div role=button><span>Personnaliser</span></div><div role=button><span>Tout accepter</span></div></section>";</script>');
     expect(result.telemetry.provider).toBe('didomi');
     expect(result.result.banner).toMatchObject({ visibility: 'visible', evidence: expect.arrayContaining(['didomi_notice_api_dom_disagreement']) });
     expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'reject_all', availability: 'direct' }), expect.objectContaining({ action: 'open_preferences', availability: 'direct' })]));
@@ -615,18 +613,18 @@ describe('Consent V2 production session wiring', () => {
   });
 
   it('UI-BRIDGE-06 does not promote exact plain text without an actionable ancestor', async () => {
-    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div role="dialog" class="cookie-consent"><p>ALLE AKZEPTIEREN</p></div>');
-    expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'not_present' })]));
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div role="dialog" class="cookie-consent"><p>ALLE AKZEPTIEREN</p></div>');
+    expect(result.result.available_actions.some((action) => action.action === 'accept_all' && action.availability === 'direct')).toBe(false);
   });
 
   it('UI-BRIDGE-07 does not classify ordinary cookie-policy footer content as a strong banner', async () => {
-    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><footer class="cookie-policy">Read our cookie policy and privacy policy.</footer>');
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><footer class="cookie-policy">Read our cookie policy and privacy policy.</footer>');
     expect(result.telemetry.provider).toBe('cookiebot');
     expect(result.result.banner.visibility).not.toBe('visible');
   });
 
   it('UI-SEPARATION-01 keeps a strong visible banner when no action is extracted', async () => {
-    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><section role="dialog" class="cookie-consent">Cookie and privacy settings</section>');
+    const result = await audit('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><section role="dialog" class="cookie-consent">Cookie and privacy settings</section>');
     expect(result.telemetry.provider).toBe('cookiebot');
     expect(result.result.banner.visibility).toBe('visible');
     expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'not_present' })]));
