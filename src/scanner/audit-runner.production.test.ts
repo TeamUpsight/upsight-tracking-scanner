@@ -124,7 +124,7 @@ describe('runStorefrontAudit production browser wiring', () => {
   }, 30_000);
 
   it('RUNNER-TESCO-OBS-01 keeps homepage PDP discovery when sitemap enrichment hangs and records an observation-only OneTrust session', async () => {
-    const customOneTrust = `<script>window.OneTrust={RejectAll(){window.__rejectCalled=true},AllowAll(){}};</script><script src="/otSDKStub.js"></script>
+    const customOneTrust = `<script>window.OneTrust={RejectAll(){window.__rejectCalled=true},AllowAll(){}};</script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk" style="display:none"></div>
       <div role="dialog" aria-modal="true"><p>We use cookies and value your privacy.</p><button>Accept all</button><button>Reject all</button></div>`;
     const result = await auditFixture(200, {
       '/': `${customOneTrust}<a href="/products/widget">Widget</a><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G100';</script>`,
@@ -145,7 +145,7 @@ describe('runStorefrontAudit production browser wiring', () => {
   }, 45_000);
 
   it('LISTING-01 through LISTING-06 promote one bounded child PDP without spending PDP grace on the listing', async () => {
-    const customOneTrust = `<script>window.OneTrust={RejectAll(){},AllowAll(){}};</script><script src="/otSDKStub.js"></script>
+    const customOneTrust = `<script>window.OneTrust={RejectAll(){},AllowAll(){}};</script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk" style="display:none"></div>
       <div role="dialog" aria-modal="true"><p>We use cookies and value your privacy.</p><button>Accept all</button><button>Reject all</button></div>`;
     const result = await auditFixture(200, {
       '/': `${customOneTrust}<a href="/collections/all">Shop all products</a><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G100';</script>`,
