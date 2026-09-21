@@ -120,12 +120,19 @@ describe('Consent V2 production session wiring', () => {
       expect.objectContaining({ action: 'only_necessary', availability: 'direct' }),
       expect.objectContaining({ action: 'accept_all', availability: 'direct' })
     ]));
+    expect(result.diagnostic_observation?.semantic_discovery).toMatchObject({
+      attempted: true,
+      provider: 'cookiebot',
+      actionable_control_count: 2,
+      role_candidate_count: expect.any(Number),
+      rejection_counts: expect.objectContaining({ not_visible: expect.any(Number), outside_verified_consent_context: expect.any(Number) })
+    });
   }, 10_000);
 
   it('WP11.5-SEMANTIC-A11Y-01 invokes the actionable owner for accessible Cookiebot controls and rejects footer false positives', async () => {
     const page = await browser.newPage();
     try {
-      await page.setContent(`<section role="dialog" class="cookie-consent"><button style="width:120px;height:30px" aria-label="ALLE AKZEPTIEREN" onclick="window.__accepted=(window.__accepted||0)+1"><span aria-hidden="true">accept</span></button><div style="width:120px;height:30px" role="button" aria-label="NUR NOTWENDIGE" tabindex="0"></div></section><footer><button style="width:120px;height:30px" aria-label="ALLE AKZEPTIEREN">Footer link</button></footer>`);
+      await page.setContent(`<footer><button style="width:120px;height:30px" aria-label="ALLE AKZEPTIEREN" onclick="window.__footerAccepted=(window.__footerAccepted||0)+1">Footer link</button></footer><section role="dialog" class="cookie-consent"><button style="width:120px;height:30px" aria-label="ALLE AKZEPTIEREN" onclick="window.__accepted=(window.__accepted||0)+1"><span aria-hidden="true">accept</span></button><div style="width:120px;height:30px" role="button" aria-label="NUR NOTWENDIGE" tabindex="0"></div></section>`);
       const discovery = await discoverProviderSemanticControls(page, 'cookiebot');
       expect(discovery.controls).toEqual(expect.arrayContaining([
         expect.objectContaining({ action: 'accept_all', accessible_name: 'ALLE AKZEPTIEREN', actionable: true }),
@@ -135,6 +142,12 @@ describe('Consent V2 production session wiring', () => {
       expect(accept).toBeDefined();
       await discovery.invoke(accept!.id);
       expect(await page.evaluate(() => (window as any).__accepted || 0)).toBe(1);
+      expect(await page.evaluate(() => (window as any).__footerAccepted || 0)).toBe(0);
+      expect(discovery.diagnostic.rejection_counts.outside_verified_consent_context).toBeGreaterThan(0);
+      expect(discovery.diagnostic.candidate_samples).toEqual(expect.arrayContaining([
+        expect.objectContaining({ accessible_name: 'ALLE AKZEPTIEREN', accepted: false, rejection_reason: 'outside_verified_consent_context' }),
+        expect.objectContaining({ accessible_name: 'ALLE AKZEPTIEREN', accepted: true, rejection_reason: null })
+      ]));
     } finally { await page.close(); }
   });
 

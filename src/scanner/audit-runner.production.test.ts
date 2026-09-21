@@ -43,7 +43,8 @@ async function auditFixture(
   consentV2Enabled = true,
   selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent'],
   actionsEnabled = consentV2Enabled,
-  dependencies: Pick<AuditRunnerDependencies, 'createFreshConsentContext'> = {}
+  dependencies: Pick<AuditRunnerDependencies, 'createFreshConsentContext'> = {},
+  scanMode: 'normal' | 'diagnostic' = 'normal'
 ) {
   vi.stubEnv('BROWSER_PROVIDER', 'local');
   vi.stubEnv('CONSENT_V2_ENABLED', consentV2Enabled ? 'true' : 'false');
@@ -57,6 +58,7 @@ async function auditFixture(
       audit_id: `runner-${status}-${consentV2Enabled}`,
       domain: 'fixture.example',
       tested_geos: 'EU',
+      scan_mode: scanMode,
       selected_modules
     }, async (update) => { updates.push(update as Record<string, unknown>); }, {
       storefrontUrl: fixture.url,
@@ -139,6 +141,36 @@ describe('runStorefrontAudit production browser wiring', () => {
     const telemetry = (result.evidence_bundle as { runtime: { consent_v2?: { shared_observation?: { provider: string | null; banner_visibility: string } } } }).runtime.consent_v2;
     expect(telemetry?.shared_observation).toMatchObject({ provider: 'usercentrics', banner_visibility: 'visible' });
   }, 30_000);
+
+  it('WP11.5-RUNNER-MERGE-IDEMPOTENT-01 keeps providerless fresh evidence distinct across ordinary finalization', async () => {
+    const sharedDidomi = `<script>window.Didomi={notice:{isVisible:()=>true}};</script><script src="https://sdk.privacy-center.org/loader.js"></script>
+      <section id="didomi-notice" role="dialog" style="position:fixed;width:360px;height:180px">Cookies
+        <button>Personnaliser</button><button>Tout accepter</button>
+      </section>`;
+    const result = await auditFixture(200, sharedDidomi, true, ['consent'], false, {
+      createFreshConsentContext: async (browser, input) => {
+        const context = await browser.newContext({ serviceWorkers: 'block' });
+        const page = await context.newPage();
+        await page.route('**/*', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<main>Fresh providerless observation</main>' }));
+        return {
+          context,
+          page,
+          service_workers: 'blocked' as const,
+          geo: { requested_geo: input.requestedGeo, proxy_region: input.proxyRegion, verified: true, verification_method: 'egress_probe' as const, confidence: 'high' as const, reason_codes: [] }
+        };
+      }
+    }, 'diagnostic') as unknown as StorefrontAudit;
+    const evidence = result.evidence_bundle!;
+    const shared = evidence.diagnostic_observability?.consent_observations.find((observation) => observation.context === 'shared');
+    const fresh = evidence.diagnostic_observability?.consent_observations.find((observation) => observation.context === 'fresh');
+    const observability = JSON.parse(String(buildDebugPackageFiles(result)['observability-consistency.json'])) as { checks: Array<{ code: string; status: string }> };
+
+    expect(shared).toMatchObject({ provider_selection: { selected_provider: 'didomi' }, banner: { visibility: 'visible' } });
+    expect(fresh).toMatchObject({ observation_complete: true, provider_selection: { selected_provider: null, candidates: [] }, banner: { visibility: 'not_visible' }, visible_surfaces: [], visible_controls: [] });
+    expect(evidence.runtime.consent_v2).toMatchObject({ provider: 'didomi', banner_visibility: 'visible' });
+    expect(evidence.consent).toMatchObject({ banner_visible: true, accept_action_available: true, preferences_action_available: true });
+    expect(observability.checks.find((check) => check.code === 'OBS_CONSENT_SURFACE_BANNER_MISMATCH')?.status).toBe('pass');
+  }, 35_000);
 
   it('RUNNER-TESCO-OBS-01 keeps homepage PDP discovery when sitemap enrichment hangs and records an observation-only OneTrust session', async () => {
     const customOneTrust = `<script>window.OneTrust={RejectAll(){window.__rejectCalled=true},AllowAll(){}};</script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk" style="display:none"></div>

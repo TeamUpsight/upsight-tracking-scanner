@@ -1282,7 +1282,15 @@ export async function runStorefrontAudit(
 
   const applyMergedConsentObservation = (fresh: ConsentV2SessionOutput | null) => {
     const merged = mergeSharedConsentObservation(sharedConsentObservation, fresh);
-    const telemetry = fresh?.telemetry || evidence.runtime.consent_v2 || unavailableConsentV2Telemetry(canonicalConsentMeasurement(), consentV2Controls);
+    // Canonical projection must not rewrite the fresh observation that remains
+    // an input to later finalization passes. In particular, a providerless
+    // fresh observation must not become a same-provider contradiction merely
+    // because shared provider evidence was projected once already.
+    const telemetry = fresh
+      ? { ...fresh.telemetry }
+      : evidence.runtime.consent_v2
+        ? { ...evidence.runtime.consent_v2 }
+        : unavailableConsentV2Telemetry(canonicalConsentMeasurement(), consentV2Controls);
     const has = (action: 'accept_all' | 'reject_all' | 'only_necessary' | 'open_preferences') =>
       merged.actions.some((item) => item.action === action && item.availability !== 'not_present' && item.availability !== 'unknown');
     telemetry.provider = merged.provider;
