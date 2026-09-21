@@ -1,4 +1,4 @@
-import type { Page } from 'playwright-core';
+import type { BrowserContext, Page } from 'playwright-core';
 import type { CmpAdapterProviderId } from './adapter-registry';
 import { ONETRUST_DOCUMENTED_CONTROLS, ONETRUST_STANDARD_ROOTS } from './onetrust-adapter';
 import { COOKIEBOT_STANDARD_CONTROLS, COOKIEBOT_STANDARD_ROOT } from './cookiebot-adapter';
@@ -82,6 +82,7 @@ const CONSENT_COMMAND_OBSERVATIONS_KEY = '__upsightConsentCommandObservations';
 const PROVIDER_EVENT_OBSERVATIONS_KEY = '__upsightConsentProviderEventObservations';
 const FRAMEWORK_OBSERVATIONS_KEY = '__upsightConsentFrameworkObservations';
 const USERCENTRICS_LIFECYCLE_KEY = '__upsightUsercentricsLifecycle';
+const CONSENT_BOOTSTRAPPED_CONTEXTS = new WeakSet<BrowserContext>();
 
 /**
  * Installs a narrowly-scoped, pre-navigation dataLayer observer. It only
@@ -89,8 +90,13 @@ const USERCENTRICS_LIFECYCLE_KEY = '__upsightUsercentricsLifecycle';
  * the site's original implementation unchanged.
  */
 export async function installConsentCommandBootstrap(page: Page) {
-  await page.context().addInitScript(({ key, providerKey, frameworkKey, usercentricsKey }) => {
+  const context = page.context();
+  if (CONSENT_BOOTSTRAPPED_CONTEXTS.has(context)) return;
+  try {
+    await context.addInitScript(({ key, providerKey, frameworkKey, usercentricsKey }) => {
     const w = window as any;
+    if (w.__upsightConsentBootstrapInstalled === true) return;
+    Object.defineProperty(w, '__upsightConsentBootstrapInstalled', { value: true, configurable: false });
     const allowedState = (value: unknown) => {
       if (!value || typeof value !== 'object') return null;
       const source = value as Record<string, unknown>;
@@ -206,7 +212,12 @@ export async function installConsentCommandBootstrap(page: Page) {
       window.clearInterval(poll);
     }, { once: true });
     installFrameworkListeners();
-  }, { key: CONSENT_COMMAND_OBSERVATIONS_KEY, providerKey: PROVIDER_EVENT_OBSERVATIONS_KEY, frameworkKey: FRAMEWORK_OBSERVATIONS_KEY, usercentricsKey: USERCENTRICS_LIFECYCLE_KEY });
+    }, { key: CONSENT_COMMAND_OBSERVATIONS_KEY, providerKey: PROVIDER_EVENT_OBSERVATIONS_KEY, frameworkKey: FRAMEWORK_OBSERVATIONS_KEY, usercentricsKey: USERCENTRICS_LIFECYCLE_KEY });
+    CONSENT_BOOTSTRAPPED_CONTEXTS.add(context);
+  } catch (error) {
+    CONSENT_BOOTSTRAPPED_CONTEXTS.delete(context);
+    throw error;
+  }
 }
 
 /** Captures normalized, bounded browser facts. Provider interpretation remains in adapters. */

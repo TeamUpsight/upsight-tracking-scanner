@@ -30,6 +30,7 @@ import {
   navigateFreshConsentContext
 } from './consent/fresh-context';
 import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
+import { installConsentCommandBootstrap } from './consent/browser-context-builders';
 import { consentV2RolloutControls } from './consent/rollout-controls';
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
 import { EvidenceCollector } from './evidence/evidence-collector';
@@ -1627,6 +1628,10 @@ export async function runStorefrontAudit(
     context.setDefaultTimeout(10_000);
     context.setDefaultNavigationTimeout(15_000);
     homepage = context.pages()[0] || await context.newPage();
+    // The shared homepage is reused across normal, retried, and reconnected
+    // sessions. Install its passive Consent observer before the target URL is
+    // ever navigated, so synchronous Usercentrics lifecycle events survive.
+    if (consentSelected && consentV2Enabled) await installConsentCommandBootstrap(homepage);
     await homepage.setViewportSize({ width: 1280, height: 800 }).catch(() => {});
     const appliedGeo = await configureBrowserGeo(context, homepage, currentProxyCountry);
     evidence.runtime.browser_locale = appliedGeo.profile.locale;

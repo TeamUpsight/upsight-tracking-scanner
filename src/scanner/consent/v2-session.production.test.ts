@@ -4,7 +4,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ConsentV2RolloutControls } from './rollout-controls';
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, type ConsentV2SessionInput } from './v2-session';
 import { mapConsentV2ToExisting } from './compatibility-mapper';
-import { captureBrowserConsentFacts, observeConsentFrameworksInPage } from './browser-context-builders';
+import { captureBrowserConsentFacts, installConsentCommandBootstrap, observeConsentFrameworksInPage } from './browser-context-builders';
+import { discoverProviderSemanticControls } from './provider-semantic-controls';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
 
 const rollout: ConsentV2RolloutControls = {
@@ -113,13 +114,56 @@ async function auditSourcepoint(preferences = false, contradictory = false) {
 
 describe('Consent V2 production session wiring', () => {
   it('WP11.4-SEMANTIC-LOCATOR-01 resolves Cookiebot controls inside an accessible child frame only after provider-first fallback', async () => {
-    const result = await audit('<script src="https://consent.cookiebot.com/uc.js"></script><section role="dialog" class="cookie-consent" style="position:fixed;width:320px;height:120px">Cookie preferences<iframe srcdoc="&lt;section role=\'dialog\' class=\'cookie-consent\'&gt;&lt;button&gt;NUR NOTWENDIGE&lt;/button&gt;&lt;button&gt;ALLE AKZEPTIEREN&lt;/button&gt;&lt;/section&gt;"></iframe></section>', { ...input, diagnostic: true });
+    const result = await audit('<script src="https://consent.cookiebot.com/uc.js"></script><section role="dialog" class="cookie-consent" style="position:fixed;width:320px;height:120px">Cookie preferences<iframe srcdoc="&lt;section role=\'dialog\' class=\'cookie-consent\'&gt;&lt;input type=\'button\' value=\'NUR NOTWENDIGE\'&gt;&lt;button aria-label=\'ALLE AKZEPTIEREN\'&gt;&lt;span aria-hidden=\'true\'&gt;accept&lt;/span&gt;&lt;/button&gt;&lt;/section&gt;"></iframe></section>', { ...input, diagnostic: true });
     expect(result.telemetry).toMatchObject({ provider: 'cookiebot', provider_confidence: 'high' });
     expect(result.result.available_actions).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: 'only_necessary', availability: 'direct' }),
       expect.objectContaining({ action: 'accept_all', availability: 'direct' })
     ]));
   }, 10_000);
+
+  it('WP11.5-SEMANTIC-A11Y-01 invokes the actionable owner for accessible Cookiebot controls and rejects footer false positives', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<section role="dialog" class="cookie-consent"><button style="width:120px;height:30px" aria-label="ALLE AKZEPTIEREN" onclick="window.__accepted=(window.__accepted||0)+1"><span aria-hidden="true">accept</span></button><div style="width:120px;height:30px" role="button" aria-label="NUR NOTWENDIGE" tabindex="0"></div></section><footer><button style="width:120px;height:30px" aria-label="ALLE AKZEPTIEREN">Footer link</button></footer>`);
+      const discovery = await discoverProviderSemanticControls(page, 'cookiebot');
+      expect(discovery.controls).toEqual(expect.arrayContaining([
+        expect.objectContaining({ action: 'accept_all', accessible_name: 'ALLE AKZEPTIEREN', actionable: true }),
+        expect.objectContaining({ action: 'only_necessary', accessible_name: 'NUR NOTWENDIGE', actionable: true })
+      ]));
+      const accept = discovery.controls.find((control) => control.action === 'accept_all');
+      expect(accept).toBeDefined();
+      await discovery.invoke(accept!.id);
+      expect(await page.evaluate(() => (window as any).__accepted || 0)).toBe(1);
+    } finally { await page.close(); }
+  });
+
+  it('WP11.5-SEMANTIC-A11Y-02 traverses accessible child frames with role-first locators', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<section role="dialog" class="cookie-consent"><iframe srcdoc="&lt;section role='dialog' class='cookie-consent'&gt;&lt;button style='width:120px;height:30px' aria-label='ALLE AKZEPTIEREN'&gt;&lt;/button&gt;&lt;input style='width:120px;height:30px' type='button' value='NUR NOTWENDIGE'&gt;&lt;/section&gt;"></iframe></section>`);
+      const discovery = await discoverProviderSemanticControls(page, 'cookiebot');
+      expect(discovery.controls.filter((control) => control.location === 'child_frame')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ action: 'accept_all' }), expect.objectContaining({ action: 'only_necessary' })
+      ]));
+    } finally { await page.close(); }
+  });
+
+  it('WP11.5-UC-BOOTSTRAP-01 is idempotent per context and captures startup lifecycle events after a recreated context', async () => {
+    const first = await browser.newContext();
+    const second = await browser.newContext();
+    try {
+      const firstPage = await first.newPage();
+      await installConsentCommandBootstrap(firstPage);
+      await installConsentCommandBootstrap(firstPage);
+      await firstPage.goto(`data:text/html,<script>window.dispatchEvent(new Event('UC_UI_INITIALIZED'));window.dispatchEvent(new CustomEvent('UC_UI_CMP_EVENT',{detail:{type:'CMP_SHOWN'}}));window.dispatchEvent(new CustomEvent('UC_UI_VIEW_CHANGED',{detail:{view:'FIRST_LAYER'}}));</script>`);
+      expect((await captureBrowserConsentFacts(firstPage)).usercentrics.lifecycle).toMatchObject({ initialized: true, latest_view: 'FIRST_LAYER', cmp_shown_observed: true, event_count: 3 });
+      const secondPage = await second.newPage();
+      await installConsentCommandBootstrap(secondPage);
+      await secondPage.goto(`data:text/html,<script>window.dispatchEvent(new Event('UC_UI_INITIALIZED'));window.dispatchEvent(new CustomEvent('UC_UI_VIEW_CHANGED',{detail:{view:'SECOND_LAYER'}}));</script>`);
+      expect((await captureBrowserConsentFacts(secondPage)).usercentrics.lifecycle).toMatchObject({ initialized: true, latest_view: 'SECOND_LAYER', event_count: 2 });
+    } finally { await first.close(); await second.close(); }
+  });
 
   it('WP11.4-DIDOMI-HOSTED-LOADER-01 recognizes exactly one hosted provider-key loader segment', async () => {
     const result = await audit('<script src="https://sdk.privacy-center.org/provider-key/loader.js?target=fixture"></script><section role="dialog">Cookies<button>Tout accepter</button></section>');

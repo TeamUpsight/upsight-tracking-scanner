@@ -123,6 +123,23 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(evidence.runtime.consent_v2).toMatchObject({ session_status: 'unavailable', observation_only: true, shared_observation: { provider: 'onetrust', banner_visibility: 'visible' } });
   }, 30_000);
 
+  it('WP11.5-RUNNER-UC-SHARED-01 installs the lifecycle bootstrap before the shared homepage navigation', async () => {
+    const fixture = `<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><script>
+      window.UC_UI={isInitialized:()=>true};
+      window.__wp115BootstrapMarkerSeen=window.__upsightConsentBootstrapInstalled===true;
+      if(window.__wp115BootstrapMarkerSeen){
+        window.dispatchEvent(new Event('UC_UI_INITIALIZED'));
+        window.dispatchEvent(new CustomEvent('UC_UI_CMP_EVENT',{detail:{type:'CMP_SHOWN'}}));
+        window.dispatchEvent(new CustomEvent('UC_UI_VIEW_CHANGED',{detail:{view:'FIRST_LAYER'}}));
+      }
+    </script>`;
+    const result = await auditFixture(200, fixture, true, ['consent'], false, {
+      createFreshConsentContext: async () => { throw new Error('fresh-context-intentionally-unavailable'); }
+    });
+    const telemetry = (result.evidence_bundle as { runtime: { consent_v2?: { shared_observation?: { provider: string | null; banner_visibility: string } } } }).runtime.consent_v2;
+    expect(telemetry?.shared_observation).toMatchObject({ provider: 'usercentrics', banner_visibility: 'visible' });
+  }, 30_000);
+
   it('RUNNER-TESCO-OBS-01 keeps homepage PDP discovery when sitemap enrichment hangs and records an observation-only OneTrust session', async () => {
     const customOneTrust = `<script>window.OneTrust={RejectAll(){window.__rejectCalled=true},AllowAll(){}};</script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk" style="display:none"></div>
       <div role="dialog" aria-modal="true"><p>We use cookies and value your privacy.</p><button>Accept all</button><button>Reject all</button></div>`;
