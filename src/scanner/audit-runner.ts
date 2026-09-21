@@ -1221,6 +1221,9 @@ export async function runStorefrontAudit(
   let consentHomepage: Page | null = null;
   let consentV2: ConsentV2SessionOutput | null = null;
   let sharedConsentObservation: SharedConsentObservation | null = null;
+  let sharedConsentObservationTask: Promise<void> | null = null;
+  let sharedConsentObservationStatus: 'not_started' | 'pending' | 'completed' | 'incomplete' = 'not_started';
+  let authoritativeSharedHomepage: { page: Page; context: BrowserContext; host: string } | null = null;
   let homepageScreenshotCapturedAt: number | null = null;
   let consentV2Ran = false;
   let pdpPage: Page | null = null;
@@ -1441,6 +1444,18 @@ export async function runStorefrontAudit(
     }
   };
 
+  const settleSharedConsentObservation = async (reason: 'session_replacement' | 'finalization' | 'ordinary_pipeline') => {
+    if (!sharedConsentObservationTask) return;
+    await sharedConsentObservationTask;
+    if (reason !== 'ordinary_pipeline') {
+      addTrace('homepage_shared_cmp_observation_boundary_settled', {
+        reason,
+        status: sharedConsentObservationStatus,
+        provider: sharedConsentObservation?.provider || null
+      }, { module: 'consent', severity: sharedConsentObservationStatus === 'completed' ? 'success' : 'warning' });
+    }
+  };
+
   const closeSession = async () => {
     if (consentHomepage && !consentHomepage.isClosed()) await consentHomepage.close().catch(() => {});
     consentHomepage = null;
@@ -1499,6 +1514,7 @@ export async function runStorefrontAudit(
     // The shared homepage observation is a completed evidence boundary. A
     // fresh context may be unavailable, but it must never erase those facts
     // immediately before canonical replay.
+    if (consentSelected && consentV2Enabled) await settleSharedConsentObservation('finalization');
     if (consentSelected && consentV2Enabled && sharedConsentObservation) applyMergedConsentObservation(consentV2);
     await closeSession();
     const completedEvidence = evidenceCollector.complete(startedMs);
@@ -1731,6 +1747,7 @@ export async function runStorefrontAudit(
 
   const connectSession = async (attempt: number, solveCaptchas = false, proxyModeOverride?: string) => {
     check();
+    await settleSharedConsentObservation('session_replacement');
     await closeSession();
     const provider = process.env.BROWSER_PROVIDER || 'browserless';
     let cdpUrl = '';
@@ -1870,6 +1887,7 @@ export async function runStorefrontAudit(
       reconnectTimeoutMs: Math.min(30_000, browserlessSessionTimeoutMs),
       solveChallenge: true
     });
+    await settleSharedConsentObservation('session_replacement');
     await closeSession();
     lastProxyPort = bqlProxyPort;
     currentProxyCountry = bqlProxyCountry;
@@ -2242,27 +2260,60 @@ export async function runStorefrontAudit(
       });
     }
     addTrace('homepage_shared_observation_started', { status: response?.status(), final_url: safeUrl(finalUrl) });
-    // Capture stays live while discovery begins; no module gets an exclusive
-    // homepage wait window.
-    const homepageObservation = (async () => {
-      await wait(HOMEPAGE_OBSERVATION_MS, homepage);
-      const homepageTimingRecovered = await capturePerformanceTrackingRequests(homepage!, 'homepage_shared_observation', evidenceCollector);
-      if (homepageTimingRecovered > 0) addTrace('performance_tracking_requests_recovered', { phase: 'homepage_shared_observation', count: homepageTimingRecovered });
-      const homepageHtml = await homepage!.content();
-      evidenceCollector.setPage({ cmsSignals: cmsSignalsFromHtml(homepageHtml) });
-      await capturePageTrackingInstallations(homepage!, homepageHtml, 'homepage_shared_observation', evidenceCollector);
-      // Reuse this completed homepage observation point for both the passive
-      // CMP snapshot and its existing diagnostic screenshot.
-      if (consentSelected && consentV2Enabled && !homepage!.isClosed()) {
-        try {
-          sharedConsentObservation = await captureSharedConsentObservation(homepage!, consentV2Controls, evidence.mode === 'diagnostic');
-          if (sharedConsentObservation.diagnostic_observation) recordConsentDiagnostic(sharedConsentObservation.diagnostic_observation);
-        } catch (error) {
-          addTrace('homepage_shared_cmp_observation_incomplete', { error_family: runtimeErrorFamily(error) }, { module: 'consent', severity: 'warning' });
-        }
+    const authoritativeHomepagePage = homepage!;
+    const authoritativeHomepageContext = context!;
+    authoritativeSharedHomepage = { page: authoritativeHomepagePage, context: authoritativeHomepageContext, host: finalHost };
+    const authoritativeHomepageAvailable = () => {
+      const authority = authoritativeSharedHomepage;
+      if (!authority || authority.page !== authoritativeHomepagePage || authority.context !== authoritativeHomepageContext || authority.page.isClosed() || evidence.page.valid !== true) return false;
+      try {
+        const currentUrl = new URL(authority.page.url());
+        return isSafeCanonicalRedirect(authority.host, currentUrl.hostname) && !isNonStorefrontUrl(currentUrl.toString());
+      } catch {
+        return false;
       }
+    };
+    // Consent owns an early, page-bound evidence task. It shares the existing
+    // homepage settle window with Tracking, but no longer waits for Tracking,
+    // CMS, or installation capture to finish.
+    if (consentSelected && consentV2Enabled) {
+      sharedConsentObservationStatus = 'pending';
+      sharedConsentObservationTask = (async () => {
+        try {
+          await wait(HOMEPAGE_OBSERVATION_MS, authoritativeHomepagePage);
+          if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
+          const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic');
+          if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
+          sharedConsentObservation = observed;
+          sharedConsentObservationStatus = 'completed';
+          if (observed.diagnostic_observation) recordConsentDiagnostic(observed.diagnostic_observation, homepageScreenshotCapturedAt ? 'homepage.jpg' : null, homepageScreenshotCapturedAt);
+          addTrace('homepage_shared_cmp_observation_completed', {
+            provider: observed.provider,
+            banner_visibility: observed.banner.visibility,
+            action_count: observed.actions.filter((action) => action.availability !== 'not_present' && action.availability !== 'unknown').length
+          }, { module: 'consent', severity: 'info' });
+        } catch (error) {
+          sharedConsentObservationStatus = 'incomplete';
+          addTrace('homepage_shared_cmp_observation_incomplete', {
+            error_family: runtimeErrorFamily(error),
+            reason_code: String((error as Error)?.message || error) === 'SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE'
+              ? 'SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE'
+              : 'SHARED_CONSENT_OBSERVATION_FAILED'
+          }, { module: 'consent', severity: 'warning' });
+        }
+      })();
+    }
+    // Tracking capture stays concurrent and bound to the original authoritative
+    // page. A later replacement page can never silently satisfy this task.
+    const homepageObservation = (async () => {
+      await wait(HOMEPAGE_OBSERVATION_MS, authoritativeHomepagePage);
+      const homepageTimingRecovered = await capturePerformanceTrackingRequests(authoritativeHomepagePage, 'homepage_shared_observation', evidenceCollector);
+      if (homepageTimingRecovered > 0) addTrace('performance_tracking_requests_recovered', { phase: 'homepage_shared_observation', count: homepageTimingRecovered });
+      const homepageHtml = await authoritativeHomepagePage.content();
+      evidenceCollector.setPage({ cmsSignals: cmsSignalsFromHtml(homepageHtml) });
+      await capturePageTrackingInstallations(authoritativeHomepagePage, homepageHtml, 'homepage_shared_observation', evidenceCollector);
       if (evidence.mode === 'diagnostic') {
-        const image = await homepage!.screenshot({ type: 'jpeg', quality: 55, fullPage: false }).catch(() => null);
+        const image = await authoritativeHomepagePage.screenshot({ type: 'jpeg', quality: 55, fullPage: false }).catch(() => null);
         if (image) {
           homepageScreenshotCapturedAt = Date.now();
           evidenceCollector.addScreenshot({ name: 'homepage.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
@@ -2271,7 +2322,10 @@ export async function runStorefrontAudit(
           if (capture) { capture.screenshot_name = 'homepage.jpg'; capture.screenshot_captured_at_ms = homepageScreenshotCapturedAt; capture.screenshot_observation_delta_ms = Math.max(0, homepageScreenshotCapturedAt - capture.observation_completed_at_ms!); }
         }
       }
-    })();
+    })().catch((error) => {
+      evidence.network.observation?.capture_channel_errors.push('homepage_observation_failed');
+      addTrace('homepage_shared_observation_incomplete', { error_family: runtimeErrorFamily(error) });
+    });
 
     let cmp: ReturnType<typeof detectCMP>;
     const consentStarted = Date.now();
@@ -3085,29 +3139,12 @@ export async function runStorefrontAudit(
       addTrace('tracking_module_skipped');
     }
 
-    await homepageObservation.catch((error) => {
-      evidence.network.observation?.capture_channel_errors.push('homepage_observation_failed');
-      addTrace('homepage_shared_observation_incomplete', { error_family: runtimeErrorFamily(error) });
-    });
+    await settleSharedConsentObservation('ordinary_pipeline');
+    await homepageObservation;
 
-    // The shared homepage has now received its already-budgeted observation
-    // window. Capture passive CMP facts before a later fresh context can fail.
-    if (consentSelected && consentV2Enabled && homepage && !homepage.isClosed()) {
-      try {
-        if (!sharedConsentObservation) {
-          sharedConsentObservation = await captureSharedConsentObservation(homepage, consentV2Controls, evidence.mode === 'diagnostic');
-          if (sharedConsentObservation.diagnostic_observation) recordConsentDiagnostic(sharedConsentObservation.diagnostic_observation, homepageScreenshotCapturedAt ? 'homepage.jpg' : null, homepageScreenshotCapturedAt);
-        }
-        applyMergedConsentObservation(consentV2);
-        addTrace('homepage_shared_cmp_observation_completed', {
-          provider: sharedConsentObservation.provider,
-          banner_visibility: sharedConsentObservation.banner.visibility,
-          action_count: sharedConsentObservation.actions.filter((action) => action.availability !== 'not_present' && action.availability !== 'unknown').length
-        }, { module: 'consent', severity: 'info' });
-      } catch (error) {
-        addTrace('homepage_shared_cmp_observation_incomplete', { error_family: runtimeErrorFamily(error) }, { module: 'consent', severity: 'warning' });
-      }
-    }
+    // Only the page-bound task above may author shared Consent evidence. A page
+    // created by Product retry has no authoritative homepage provenance.
+    if (consentSelected && consentV2Enabled && sharedConsentObservation) applyMergedConsentObservation(consentV2);
 
     // Consent V2 remains the owner of reject verification. It is now fed a
     // confirmed PDP and runs after the shared baseline rather than starving it.

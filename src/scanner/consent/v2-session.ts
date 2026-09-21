@@ -256,6 +256,40 @@ function diagnosticObservation(
     });
   }
   const semanticDiagnostic = semanticDiscovery?.diagnostic;
+  const selectedCandidate = selection.provider && selection.candidates.find((candidate) => candidate.provider_id === selection.provider);
+  const verifiedConsentSurfaceIds = new Set(facts.generic.surfaces
+    .filter((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation)
+    .map((surface) => surface.id));
+  const exactCandidateCount = semanticDiagnostic
+    ? semanticDiagnostic.role_candidate_count + semanticDiagnostic.link_candidate_count + semanticDiagnostic.open_shadow_candidate_count + semanticDiagnostic.text_candidate_count
+    : 0;
+  const exposeNearbyControls = Boolean(
+    semanticDiagnostic?.attempted && selectedCandidate && (selectedCandidate.high_confidence || selectedCandidate.deterministic_provider_signature) &&
+    (banner.visibility === 'visible' || verifiedConsentSurfaceIds.size > 0) && semanticControlCount(facts) === 0 && exactCandidateCount === 0
+  );
+  const nearbyActionableControls: NonNullable<NonNullable<DiagnosticConsentObservation['semantic_discovery']>['nearby_actionable_controls']> = [];
+  if (exposeNearbyControls) {
+    const retained = new Set<string>();
+    for (const control of facts.generic.controls) {
+      const accessibleName = control.accessible_name.replace(/\s+/g, ' ').trim().slice(0, 120);
+      if (!accessibleName || !control.actionable || !verifiedConsentSurfaceIds.has(control.surface_id)) continue;
+      const item = {
+        role: control.role || 'other' as const,
+        accessible_name: accessibleName,
+        location: control.location === 'child_frame' ? 'iframe' as const : control.location,
+        shadow_depth: Math.max(0, Math.min(4, control.shadow_depth)),
+        visible: control.visible,
+        enabled: control.enabled,
+        direct_actionable_target: control.direct_actionable_target === true,
+        consent_scope_corroborated: true as const
+      };
+      const key = `${item.role}:${item.location}:${item.shadow_depth}:${item.accessible_name}`;
+      if (retained.has(key)) continue;
+      retained.add(key);
+      nearbyActionableControls.push(item);
+      if (nearbyActionableControls.length >= 20) break;
+    }
+  }
   return {
     capture_id: `consent-${context}-${Date.now()}`, context, phase, captured_at_ms: Date.now(), observation_complete: observationComplete,
     provider_selection: { selected_provider: selection.provider || null, provider_conflict: selection.conflict, candidates: providerCandidates },
@@ -269,7 +303,8 @@ function diagnosticObservation(
       text_candidate_count: Math.min(80, semanticDiagnostic.text_candidate_count),
       actionable_control_count: Math.min(20, semanticDiagnostic.actionable_control_count),
       rejection_counts: { ...semanticDiagnostic.rejection_counts },
-      candidate_samples: semanticDiagnostic.candidate_samples.slice(0, 20).map((candidate) => ({ ...candidate, accessible_name: candidate.accessible_name.slice(0, 120) }))
+      candidate_samples: semanticDiagnostic.candidate_samples.slice(0, 20).map((candidate) => ({ ...candidate, accessible_name: candidate.accessible_name.slice(0, 120) })),
+      ...(exposeNearbyControls ? { nearby_actionable_controls: nearbyActionableControls } : {})
     } } : {}),
     frameworks: { tcf: framework.tcf.present, gpp: framework.gpp.present, consent_mode: consentMode }, ...(readiness ? { readiness } : {})
   };

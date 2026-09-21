@@ -43,7 +43,7 @@ async function auditFixture(
   consentV2Enabled = true,
   selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent'],
   actionsEnabled = consentV2Enabled,
-  dependencies: Pick<AuditRunnerDependencies, 'createFreshConsentContext'> = {},
+  dependencies: Pick<AuditRunnerDependencies, 'createFreshConsentContext' | 'launchBrowser'> = {},
   scanMode: 'normal' | 'diagnostic' = 'normal'
 ) {
   vi.stubEnv('BROWSER_PROVIDER', 'local');
@@ -65,11 +65,11 @@ async function auditFixture(
       resolveHostname: resolvedFixtureHost,
       consentGeoVerified: true,
       ...dependencies,
-      launchBrowser: () => chromium.launch({
+      launchBrowser: dependencies.launchBrowser || (() => chromium.launch({
         executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
         args: ['--host-resolver-rules=MAP fixture.example 127.0.0.1'],
         headless: true
-      })
+      }))
     });
   } finally {
     await closeServer(fixture.server);
@@ -171,6 +171,49 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(evidence.consent).toMatchObject({ banner_visible: true, accept_action_available: true, preferences_action_available: true });
     expect(observability.checks.find((check) => check.code === 'OBS_CONSENT_SURFACE_BANNER_MISMATCH')?.status).toBe('pass');
   }, 35_000);
+
+  it('WP11.6-RUNNER-SHARED-BOUNDARY-01 preserves the authoritative shared Consent observation across a destructive Product reconnect', async () => {
+    let launches = 0;
+    const launchBrowser = async () => {
+      const browser = await chromium.launch({
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
+        args: ['--host-resolver-rules=MAP fixture.example 127.0.0.1'],
+        headless: true
+      });
+      launches += 1;
+      if (launches === 1) {
+        const newContext = browser.newContext.bind(browser);
+        browser.newContext = async (options) => {
+          const context = await newContext(options);
+          const newPage = context.newPage.bind(context);
+          context.newPage = async () => {
+            const page = await newPage();
+            const goto = page.goto.bind(page);
+            page.goto = async (url, options) => {
+              if (new URL(url).pathname === '/products/retry') throw new Error('net::ERR_TUNNEL_CONNECTION_FAILED');
+              return goto(url, options);
+            };
+            return page;
+          };
+          return context;
+        };
+      }
+      return browser;
+    };
+    const fixture = `<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script>
+      <a href="/products/retry">Retry product</a><div id="uc-mount"></div>
+      <script>setTimeout(()=>{const root=document.querySelector('#uc-mount').attachShadow({mode:'open'});root.innerHTML='<section role="dialog" class="cookie-consent" style="position:fixed;width:360px;height:180px">Cookie settings<div role="button">Einstellungen verwalten</div><div role="button">Alles ablehnen</div><div role="button">Alles akzeptieren</div></section>'},250)</script>`;
+    const result = await auditFixture(200, (path) => path === '/' ? fixture : path === '/sitemap.xml' ? { body: '', status: 404 } : '<main>Product</main>', true, ['consent', 'tracking'], false, { launchBrowser }, 'diagnostic') as unknown as StorefrontAudit;
+    const shared = result.evidence_bundle?.diagnostic_observability?.consent_observations.find((observation) => observation.context === 'shared');
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string; provider?: string | null; reason?: string; status?: string }>;
+
+    expect(launches).toBeGreaterThan(1);
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_proxy_retry_started' })]));
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'homepage_shared_cmp_observation_boundary_settled', reason: 'session_replacement', status: 'completed', provider: 'usercentrics' })]));
+    expect(shared).toMatchObject({ observation_complete: true, provider_selection: { selected_provider: 'usercentrics' }, banner: { visibility: 'visible' } });
+    expect(result.evidence_bundle?.runtime.consent_v2?.shared_observation).toMatchObject({ provider: 'usercentrics', banner_visibility: 'visible' });
+    expect(trace).not.toEqual(expect.arrayContaining([expect.objectContaining({ step: 'homepage_shared_cmp_observation_completed', provider: null })]));
+  }, 45_000);
 
   it('RUNNER-TESCO-OBS-01 keeps homepage PDP discovery when sitemap enrichment hangs and records an observation-only OneTrust session', async () => {
     const customOneTrust = `<script>window.OneTrust={RejectAll(){window.__rejectCalled=true},AllowAll(){}};</script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk" style="display:none"></div>

@@ -51,7 +51,7 @@ export interface BrowserConsentFacts {
   consent_commands: Array<{ command: 'default' | 'update'; state: Record<string, unknown>; timestamp?: number }>;
   generic: {
     surfaces: Array<{ id: string; surface_type: 'banner' | 'dialog' | 'drawer'; visible: boolean; privacy_or_cookie_semantics: boolean; intent: string; consent_management_topology: boolean; strong_presentation: boolean; location: 'main_frame' | 'shadow_dom'; shadow_depth: number }>;
-    controls: Array<{ id?: string; surface_id: string; visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string; location: 'main_frame' | 'shadow_dom' | 'child_frame'; shadow_depth: number }>;
+    controls: Array<{ id?: string; surface_id: string; visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string; role?: 'button' | 'link' | 'input' | 'other'; direct_actionable_target?: boolean; location: 'main_frame' | 'shadow_dom' | 'child_frame'; shadow_depth: number }>;
   };
   usercentrics: {
     present: boolean;
@@ -242,6 +242,13 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       'preferences', 'manage preferences', 'cookie settings', 'manage cookie settings', 'cookie preferences',
       'manage cookie preferences', 'privacy preferences', 'customize', 'einstellungen', 'einstellungen verwalten', 'personnaliser'
     ].includes(normal(name));
+    const normalizedRole = (control: Element): 'button' | 'link' | 'input' | 'other' => {
+      const role = control.getAttribute('role');
+      if (role === 'button' || control.tagName.toLowerCase() === 'button') return 'button';
+      if (role === 'link' || control.tagName.toLowerCase() === 'a') return 'link';
+      if (control.tagName.toLowerCase() === 'input') return 'input';
+      return 'other';
+    };
     const controls = (surface: Element) => {
       const standard = Array.from(surface.querySelectorAll('button, [role="button"], a'));
       // Non-button elements are intentionally limited to known, accessible
@@ -251,7 +258,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         .filter((control) => visible(control) && enabled(control) && knownConsentAction(accessibleName(control)));
       return [...standard, ...boundedCustom].slice(0, 30).map((control) => ({
         visible: visible(control), enabled: enabled(control), actionable: true,
-        accessible_name: accessibleName(control)
+        accessible_name: accessibleName(control), role: normalizedRole(control), direct_actionable_target: true
       }));
     };
     const genericSurfaces = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i]')).slice(0, 30);
@@ -300,7 +307,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       return Array.from(surface.querySelectorAll('[onclick], [tabindex], [role], [contenteditable="true"], [style*="cursor"]')).slice(0, 100)
         .filter((control) => !conventional.includes(accessibleName(control)))
         .filter((control) => visible(control) && enabled(control))
-        .map((control) => ({ surface_id: surfaceFact.id, visible: true, enabled: true, actionable: true, accessible_name: accessibleName(control), location: 'main_frame' as const, shadow_depth: 0 }))
+        .map((control) => ({ surface_id: surfaceFact.id, visible: true, enabled: true, actionable: true, accessible_name: accessibleName(control), role: normalizedRole(control), direct_actionable_target: true, location: 'main_frame' as const, shadow_depth: 0 }))
         .filter((control) => control.accessible_name.length > 0 && knownConsentAction(control.accessible_name));
     }).slice(0, 30) : [];
     const generic = { surfaces: genericSurfaceFacts, controls: [...genericControls, ...cookiebotCustomControls] };
@@ -367,7 +374,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         if (name && knownConsentAction(name)) {
           const target = actionableAncestor(candidate); const key = `${fact.id}:${normal(name)}`;
           if (target && !retained.has(key)) {
-            retained.add(key); bridgeControls.push({ surface_id: fact.id, visible: true, enabled: true, actionable: true, accessible_name: name, location: fact.location, shadow_depth: fact.shadow_depth });
+            retained.add(key); bridgeControls.push({ surface_id: fact.id, visible: true, enabled: true, actionable: true, accessible_name: name, role: normalizedRole(target), direct_actionable_target: target === candidate, location: fact.location, shadow_depth: fact.shadow_depth });
           }
         }
         for (const child of Array.from(candidate.children).reverse()) stack.push(child);

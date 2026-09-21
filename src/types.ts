@@ -189,6 +189,7 @@ export interface EvidenceBundle {
         actionable_control_count: number;
         rejection_counts: Record<'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'unsupported_semantic_action', number>;
         candidate_samples: Array<{ lookup_class: 'role' | 'link' | 'open_shadow' | 'text'; accessible_name: string; role: 'button' | 'link' | 'input' | 'other'; accepted: boolean; rejection_reason: 'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'unsupported_semantic_action' | null }>;
+        nearby_actionable_controls?: Array<{ role: 'button' | 'link' | 'input' | 'other'; accessible_name: string; location: 'main_frame' | 'iframe' | 'shadow_dom'; shadow_depth: number; visible: boolean; enabled: boolean; direct_actionable_target: boolean; consent_scope_corroborated: true }>;
       };
       frameworks: { tcf: boolean; gpp: boolean; consent_mode: string };
     }>;

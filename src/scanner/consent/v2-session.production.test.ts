@@ -162,6 +162,31 @@ describe('Consent V2 production session wiring', () => {
     } finally { await page.close(); }
   });
 
+  it('WP11.6-SEMANTIC-DIAGNOSTIC-01 exposes bounded unrecognized control names from verified Consent scopes without changing matching', async () => {
+    const result = await audit(`<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script>
+      <section id="CybotCookiebotDialog" role="dialog" style="position:fixed;width:360px;height:180px">Cookie privacy settings
+        <button aria-label="Allow selected vendors">Continue</button>
+        <a href="#" aria-label="Review privacy choices">Review</a>
+      </section>`, { ...input, diagnostic: true });
+    const discovery = result.diagnostic_observation?.semantic_discovery;
+
+    expect(discovery).toMatchObject({
+      attempted: true,
+      provider: 'cookiebot',
+      role_candidate_count: 0,
+      link_candidate_count: 0,
+      open_shadow_candidate_count: 0,
+      text_candidate_count: 0,
+      actionable_control_count: 0,
+      candidate_samples: []
+    });
+    expect(discovery?.nearby_actionable_controls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'button', accessible_name: 'Allow selected vendors', visible: true, enabled: true, direct_actionable_target: true, consent_scope_corroborated: true }),
+      expect.objectContaining({ role: 'link', accessible_name: 'Review privacy choices', visible: true, enabled: true, direct_actionable_target: true, consent_scope_corroborated: true })
+    ]));
+    expect(result.result.available_actions.some((action) => action.availability === 'direct')).toBe(false);
+  });
+
   it('WP11.5-UC-BOOTSTRAP-01 is idempotent per context and captures startup lifecycle events after a recreated context', async () => {
     const first = await browser.newContext();
     const second = await browser.newContext();
