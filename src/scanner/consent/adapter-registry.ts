@@ -297,11 +297,13 @@ export function scoreProviderCandidates(
       .reduce((highest, other) => Math.max(highest, other.score), 0);
     const strongConflict = candidate.conflict_score >= config.strong_conflict_threshold;
     const deterministic = deterministicProviders.has(candidate.provider_id);
-    const highConfidence =
-      (deterministic || candidate.score >= config.high_confidence_threshold &&
-      candidate.independent_families.length >= config.minimum_independent_families) &&
-      candidate.score - strongestOtherCandidate >= config.minimum_conflict_margin &&
-      !strongConflict;
+    // An exact documented loader establishes provider presence independently
+    // of generic scoring. It is deliberately not made exclusive: other
+    // plausible providers still flow to active-surface conflict resolution.
+    const scoredHighConfidence = candidate.score >= config.high_confidence_threshold &&
+      candidate.independent_families.length >= config.minimum_independent_families &&
+      candidate.score - strongestOtherCandidate >= config.minimum_conflict_margin;
+    const highConfidence = (deterministic || scoredHighConfidence) && !strongConflict;
     return {
       ...candidate,
       deterministic_provider_signature: deterministic,

@@ -14,6 +14,11 @@ import { ConsentAuditCodes } from './domain-types';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
 
 describe('Cookiebot adapter fixtures', () => {
+  it('DET-PROVIDER-01 and DET-PROVIDER-03 distinguish the exact Cookiebot loader from lookalike assets', () => {
+    expect(cookiebotProviderEvidence({ asset_urls: ['https://consent.cookiebot.com/uc.js?cbid=fixture'] })[0]).toMatchObject({ deterministic_provider_signature: true });
+    expect(detectCookiebot({ asset_urls: ['https://consent.cookiebot.com/uc.js?cbid=fixture'] })).toMatchObject({ status: 'detected' });
+    expect(cookiebotProviderEvidence({ asset_urls: ['https://assets.example/cookiebot/uc.js'] })[0]).toBeUndefined();
+  });
   it('CB-01 detects Cookiebot from independent provider-specific families', () => {
     const context = {
       window_globals: ['Cookiebot'],

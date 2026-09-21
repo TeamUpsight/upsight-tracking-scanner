@@ -113,4 +113,20 @@ describe('Consent adapter registry', () => {
     expect(nearTie[0]).toMatchObject({ score: 95, high_confidence: false, plausible_candidate: true, attribution: 'unknown_candidate' });
     expect(conflicted[0]).toMatchObject({ score: 95, conflict_score: 30, strong_conflict: true, attribution: 'inconclusive' });
   });
+
+  it('DET-PROVIDER-02 and DET-PROVIDER-09 preserve deterministic presence without bypassing multi-provider resolution', () => {
+    const weakOther = scoreProviderCandidates([
+      { provider_id: 'cookiebot', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific', deterministic_provider_signature: true },
+      { provider_id: 'onetrust', family: 'typed_provider_api', kind: 'typed_documented_provider_api', specificity: 'provider_specific' }
+    ]);
+    expect(weakOther.find((candidate) => candidate.provider_id === 'cookiebot')).toMatchObject({ high_confidence: true, attribution: 'identified', deterministic_provider_signature: true });
+    const twoDeterministic = scoreProviderCandidates([
+      { provider_id: 'cookiebot', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific', deterministic_provider_signature: true },
+      { provider_id: 'didomi', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific', deterministic_provider_signature: true }
+    ]);
+    expect(twoDeterministic).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider_id: 'cookiebot', high_confidence: true, plausible_candidate: true }),
+      expect.objectContaining({ provider_id: 'didomi', high_confidence: true, plausible_candidate: true })
+    ]));
+  });
 });

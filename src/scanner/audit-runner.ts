@@ -1319,7 +1319,8 @@ export async function runStorefrontAudit(
     diagnostics.diagnostic_captures.push({
       capture_id: snapshot.capture_id, phase: snapshot.phase, context: snapshot.context, screenshot_name: screenshotName,
       consent_snapshot_id: snapshot.capture_id, captured_at_ms: snapshot.captured_at_ms, observation_complete: snapshot.observation_complete,
-      screenshot_captured_at_ms: screenshotCapturedAt
+      observation_completed_at_ms: snapshot.captured_at_ms, screenshot_captured_at_ms: screenshotCapturedAt,
+      screenshot_observation_delta_ms: screenshotCapturedAt === null ? null : Math.max(0, screenshotCapturedAt - snapshot.captured_at_ms)
     });
     addTrace('diagnostic_consent_snapshot_captured', { context: snapshot.context, capture_id: snapshot.capture_id, observation_complete: snapshot.observation_complete }, { module: 'consent', severity: 'info' });
   };
@@ -2253,7 +2254,7 @@ export async function runStorefrontAudit(
           homepageScreenshotCapturedAt = Date.now();
           evidenceCollector.addScreenshot({ name: 'homepage.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
           const capture = evidence.diagnostic_observability?.diagnostic_captures.find((item) => item.context === 'shared');
-          if (capture) { capture.screenshot_name = 'homepage.jpg'; capture.screenshot_captured_at_ms = homepageScreenshotCapturedAt; }
+          if (capture) { capture.screenshot_name = 'homepage.jpg'; capture.screenshot_captured_at_ms = homepageScreenshotCapturedAt; capture.screenshot_observation_delta_ms = Math.max(0, homepageScreenshotCapturedAt - capture.observation_completed_at_ms!); }
         }
       }
     })();

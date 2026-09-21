@@ -120,6 +120,16 @@ function hasDidomiSdkAsset(values: readonly string[] | undefined) {
   return values?.some((value) => /(?:sdk\.privacy-center\.org\/loader\.js|sdk\.privacy-center\.org|didomi\.(?:io|cloud)\/.+(?:sdk|loader))/i.test(value)) || false;
 }
 
+/** Exact documented Didomi bootstrap; other SDK resources remain supporting only. */
+function hasDidomiLoader(values: readonly string[] | undefined) {
+  return values?.some((value) => {
+    try {
+      const url = new URL(value);
+      return url.hostname.toLowerCase() === 'sdk.privacy-center.org' && url.pathname === '/loader.js';
+    } catch { return false; }
+  }) || false;
+}
+
 function isDidomiRoot(selector: string) {
   return (DIDOMI_STANDARD_ROOTS as readonly string[]).includes(selector);
 }
@@ -160,7 +170,7 @@ export function didomiProviderEvidence(context: DidomiAdapterContext): ProviderE
     evidence.push({ provider_id: 'didomi', family: 'typed_provider_api', kind: 'typed_documented_provider_api', specificity: 'provider_specific' });
   }
   if (hasDidomiSdkAsset(context.asset_urls) || hasExact(context.window_globals, 'didomiOnReady') || hasExact(context.window_globals, 'didomiConfig')) {
-    evidence.push({ provider_id: 'didomi', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific' });
+    evidence.push({ provider_id: 'didomi', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific', deterministic_provider_signature: hasDidomiLoader(context.asset_urls) });
   }
   if (context.surfaces?.some((surface) => isDidomiRoot(surface.selector) && surface.present !== false)) {
     evidence.push({ provider_id: 'didomi', family: 'provider_root', kind: 'stable_provider_root', specificity: 'provider_specific' });

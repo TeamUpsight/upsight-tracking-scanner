@@ -109,7 +109,7 @@ describe('Usercentrics adapter fixtures', () => {
     expect(usercentricsBannerState(context)).toMatchObject({ surface: 'none', visibility: 'not_visible', reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] });
   });
 
-  it('UC-V2-01 and UC-V2-02 treat exact latest and versioned CMP v2 loaders as deterministic signatures', () => {
+  it('DET-PROVIDER-06 through DET-PROVIDER-08 preserve exact latest, versioned, and v3 Usercentrics loader signatures', () => {
     for (const loader of ['https://app.usercentrics.eu/browser-ui/latest/loader.js', 'https://app.usercentrics.eu/browser-ui/3.108.0/loader.js', 'https://web.cmp.usercentrics.eu/ui/loader.js']) {
       const candidate = usercentricsProviderEvidence({ asset_urls: [loader] });
       expect(candidate[0]).toMatchObject({ deterministic_provider_signature: true });

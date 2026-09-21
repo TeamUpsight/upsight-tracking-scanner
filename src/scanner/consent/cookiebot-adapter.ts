@@ -107,6 +107,16 @@ function hasCookiebotAsset(values: readonly string[] | undefined) {
   return values?.some((value) => /consent\.cookiebot\.com\/uc\.js/i.test(value)) || false;
 }
 
+/** Exact documented Cookiebot bootstrap; query parameters are intentionally ignored. */
+function hasCookiebotLoader(values: readonly string[] | undefined) {
+  return values?.some((value) => {
+    try {
+      const url = new URL(value);
+      return url.hostname.toLowerCase() === 'consent.cookiebot.com' && url.pathname === '/uc.js';
+    } catch { return false; }
+  }) || false;
+}
+
 function isActionable(control: CookiebotControlObservation | undefined) {
   return Boolean(control?.visible && control.enabled && control.actionable && control.within_confirmed_cookiebot_surface);
 }
@@ -156,7 +166,7 @@ export function cookiebotProviderEvidence(context: CookiebotAdapterContext): Pro
     evidence.push({ provider_id: 'cookiebot', family: 'typed_provider_api', kind: 'typed_documented_provider_api', specificity: 'provider_specific' });
   }
   if (hasCookiebotAsset(context.asset_urls) || includesExact(context.script_ids, 'Cookiebot') || context.data_cbid_present) {
-    evidence.push({ provider_id: 'cookiebot', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific' });
+    evidence.push({ provider_id: 'cookiebot', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific', deterministic_provider_signature: hasCookiebotLoader(context.asset_urls) });
   }
   if (context.surfaces?.some((surface) => surface.selector === COOKIEBOT_STANDARD_ROOT && surface.present !== false)) {
     evidence.push({ provider_id: 'cookiebot', family: 'provider_root', kind: 'stable_provider_root', specificity: 'provider_specific' });

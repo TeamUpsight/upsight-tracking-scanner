@@ -99,6 +99,15 @@ describe('WP10 diagnostic observability', () => {
     expect(check(signature, 'OBS_CONSENT_PROVIDER_SIGNATURE_MISMATCH')).toBe('pass');
     signature.consent.resolved_provider = null; signature.decision_summary!.find((item) => item.decision_name === 'cmp')!.status = null;
     expect(check(signature, 'OBS_CONSENT_PROVIDER_SIGNATURE_MISMATCH')).toBe('mismatch');
+    for (const deterministicProvider of ['cookiebot', 'didomi'] as const) {
+      const providerSignature = fixture();
+      providerSignature.diagnostic_observability!.consent_observations[0].provider_selection.candidates[0] = { provider: deterministicProvider, detection_status: 'identified', confidence: 'high', deterministic_provider_signature: true, independent_evidence_families: ['provider_asset'], evidence_codes: ['unique_provider_script_or_config'] };
+      providerSignature.diagnostic_observability!.consent_observations[0].provider_selection.selected_provider = deterministicProvider;
+      const canonicalProvider = deterministicProvider === 'cookiebot' ? 'Cookiebot' : 'Didomi';
+      providerSignature.consent.resolved_provider = canonicalProvider;
+      providerSignature.decision_summary!.find((item) => item.decision_name === 'cmp')!.status = canonicalProvider;
+      expect(check(providerSignature, 'OBS_CONSENT_PROVIDER_SIGNATURE_MISMATCH')).toBe('pass');
+    }
   });
 
   it('OBS-PRODUCT-01 through OBS-PRODUCT-05 expose only capped sanitized rejections', () => {

@@ -170,6 +170,7 @@ export interface EvidenceBundle {
       phase: string;
       captured_at_ms: number;
       observation_complete: boolean;
+      readiness?: { triggered: boolean; reason: string | null; started_at_ms: number | null; completed_at_ms: number | null; elapsed_ms: number; completion: 'positive_ui_ready' | 'timeout' | 'skipped'; initial: { provider_count: number; strong_surface_count: number; semantic_control_count: number }; final: { provider_count: number; strong_surface_count: number; semantic_control_count: number; open_shadow_roots: number; provider_root_visible: boolean }; reason_codes: string[] };
       provider_selection: {
         selected_provider: string | null;
         provider_conflict: boolean;
@@ -180,7 +181,7 @@ export interface EvidenceBundle {
       visible_controls: Array<{ accessible_name: string; semantic_action: string; visible: boolean; enabled: boolean; actionable: boolean; provider_specific: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
       frameworks: { tcf: boolean; gpp: boolean; consent_mode: string };
     }>;
-    diagnostic_captures: Array<{ capture_id: string; phase: string; context: 'shared' | 'fresh'; screenshot_name: string | null; consent_snapshot_id: string | null; captured_at_ms: number; observation_complete: boolean; screenshot_captured_at_ms?: number | null }>;
+    diagnostic_captures: Array<{ capture_id: string; phase: string; context: 'shared' | 'fresh'; screenshot_name: string | null; consent_snapshot_id: string | null; captured_at_ms: number; observation_complete: boolean; observation_completed_at_ms?: number; screenshot_captured_at_ms?: number | null; screenshot_observation_delta_ms?: number | null }>;
     product_rejections: { observed_count: number; truncated: boolean; candidates: Array<{ sanitized_url: string | null; source: string; sources: string[]; stage: string; score: number | null; reason_code: string }> };
   };
   /** Final bounded decision projection, authored by canonical replay only. */

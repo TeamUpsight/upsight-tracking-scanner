@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ConsentV2RolloutControls } from './rollout-controls';
-import { prepareConsentV2Session, runConsentV2Session } from './v2-session';
+import { captureSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, type ConsentV2SessionInput } from './v2-session';
 import { mapConsentV2ToExisting } from './compatibility-mapper';
 import { captureBrowserConsentFacts, observeConsentFrameworksInPage } from './browser-context-builders';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
@@ -12,7 +12,7 @@ const rollout: ConsentV2RolloutControls = {
   providers: Object.fromEntries(['onetrust', 'cookiebot', 'usercentrics', 'didomi', 'cookieyes', 'sourcepoint', 'shopify', 'generic'].map((provider) => [provider, { detection_enabled: true, actions_enabled: false }])) as ConsentV2RolloutControls['providers']
 };
 
-const input = { geo: 'EU' as const, geo_verified: true, page_valid: true, rollout };
+const input: ConsentV2SessionInput = { geo: 'EU', geo_verified: true, page_valid: true, rollout };
 const actionRollout: ConsentV2RolloutControls = {
   ...rollout,
   actions_enabled: true,
@@ -481,7 +481,7 @@ describe('Consent V2 production session wiring', () => {
     const cookieYes = await audit(`<script>window.performBannerAction=()=>{};window.getCkyConsent=()=>({categories:{analytics:false}});</script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div class="cky-consent-container"></div>`);
     expect(cookieYes.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('cookieyes');
     expect(cookieYes.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('api_only');
-  });
+  }, 10_000);
 
   it('CONFLICT-01 selects the visible OneTrust surface over a stale CookieYes library', async () => {
     const result = await audit(`<script>window.OneTrust={RejectAll(){}};window.CookieYes={};window.performBannerAction=()=>{};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div><div class="cky-consent-container" style="display:none"></div>`);
@@ -642,6 +642,77 @@ describe('Consent V2 production session wiring', () => {
     expect(result.telemetry.provider).not.toBe('didomi');
     expect(result.telemetry.provider).not.toBe('usercentrics');
   });
+
+  it('CMP-READINESS-LATE-01 / Velux live shape captures delayed Cookiebot controls', async () => {
+    const result = await audit('<script src="https://consent.cookiebot.com/uc.js"></script><div id="mount"></div><script>setTimeout(()=>{document.querySelector("#mount").innerHTML=`<section style="position:fixed;width:360px;height:180px"><div class="cookie-copy" role="dialog" style="position:sticky">Cookie privacy settings</div><div class="actions"><div onclick="void 0"><span>NUR NOTWENDIGE</span></div><div onclick="void 0"><span>ALLE AKZEPTIEREN</span></div></div></section>`},3200)</script>', { ...input, diagnostic: true });
+    expect(result.telemetry).toMatchObject({ provider: 'cookiebot', provider_confidence: 'high' });
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'only_necessary', availability: 'direct' })
+    ]));
+    expect(result.diagnostic_observation?.readiness).toMatchObject({ triggered: true, completion: 'positive_ui_ready' });
+  }, 10_000);
+
+  it('UI-SCOPE-01 resolves a fixed consent wrapper around sibling non-standard controls without document-wide scanning', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script><section style="position:fixed;width:360px;height:180px"><div class="cookie-copy">Cookie privacy settings</div><div class="actions"><div onclick="void 0">ALLE AKZEPTIEREN</div><div onclick="void 0">NUR NOTWENDIGE</div></div></section>');
+      const facts = await captureBrowserConsentFacts(page);
+      expect(facts.generic.controls.map((control) => control.accessible_name)).toEqual(expect.arrayContaining(['ALLE AKZEPTIEREN', 'NUR NOTWENDIGE']));
+    } finally { await page.close(); }
+  });
+
+  it('CMP-READINESS-LATE-02 / Decathlon live shape waits for a delayed Didomi DOM modal over API false', async () => {
+    const result = await audit('<script>window.Didomi={notice:{isVisible:()=>false}};</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="mount"></div><script>setTimeout(()=>{document.querySelector("#mount").innerHTML="<section role=dialog style=position:fixed;width:360px;height:180px>Cookies<div role=button>Continuer sans accepter</div><div role=button>Personnaliser</div><div role=button>Tout accepter</div></section>"},1500)</script>', { ...input, diagnostic: true });
+    expect(result.telemetry).toMatchObject({ provider: 'didomi', provider_confidence: 'high' });
+    expect(result.result.banner).toMatchObject({ visibility: 'visible', evidence: expect.arrayContaining(['didomi_notice_api_dom_disagreement']) });
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'reject_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'open_preferences', availability: 'direct' })
+    ]));
+  }, 10_000);
+
+  it('CMP-READINESS-LATE-03 / Congstar live shape waits for delayed open-shadow Usercentrics controls without UC_UI', async () => {
+    const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><div id="host"></div><script>setTimeout(()=>{const root=document.querySelector("#host").attachShadow({mode:"open"});root.innerHTML="<section role=dialog style=position:fixed;width:360px;height:180px>Cookie settings<div role=button>Einstellungen verwalten</div><div role=button>Alles ablehnen</div><div role=button>Alles akzeptieren</div></section>"},1500)</script>', { ...input, diagnostic: true });
+    expect(result.telemetry).toMatchObject({ provider: 'usercentrics', provider_confidence: 'high' });
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'reject_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'open_preferences', availability: 'direct' })
+    ]));
+    expect(result.diagnostic_observation?.readiness?.final.open_shadow_roots).toBeGreaterThan(0);
+  }, 10_000);
+
+  it('CMP-READINESS-TIMEOUT-01 keeps a known provider without inventing UI after the bounded window', async () => {
+    const result = await audit('<script src="https://consent.cookiebot.com/uc.js"></script>', { ...input, diagnostic: true });
+    expect(result.telemetry).toMatchObject({ provider: 'cookiebot', provider_confidence: 'high' });
+    expect(result.result.banner.visibility).toBe('unknown');
+    expect(result.result.available_actions.some((action) => action.availability === 'direct')).toBe(false);
+    expect(result.diagnostic_observation?.readiness).toMatchObject({ completion: 'timeout', reason_codes: ['CMP_UI_READINESS_TIMEOUT'] });
+  }, 10_000);
+
+  it('CMP-READINESS-EARLY-01 and CMP-READINESS-SKIP-01 exit on early UI and skip ordinary pages', async () => {
+    const early = await audit('<script src="https://consent.cookiebot.com/uc.js"></script><div id="mount"></div><script>setTimeout(()=>{document.querySelector("#mount").innerHTML="<section role=dialog style=position:fixed;width:320px;height:120px>Cookies<button>Accept all</button><button>Reject all</button></section>"},200)</script>', { ...input, diagnostic: true });
+    expect(early.diagnostic_observation?.readiness).toMatchObject({ triggered: true, completion: 'positive_ui_ready' });
+    expect((early.diagnostic_observation?.readiness?.elapsed_ms || 4000)).toBeLessThan(1000);
+    const skipped = await audit('<main>Ordinary editorial page</main>', { ...input, diagnostic: true });
+    expect(skipped.diagnostic_observation?.readiness).toMatchObject({ triggered: false, completion: 'skipped' });
+  }, 10_000);
+
+  it('CMP-READINESS-SHARED-01 uses the same bounded readiness capture for the homepage path', async () => {
+    const page = await browser.newPage();
+    try {
+      await installDeterministicExternalFixtureRouting(page);
+      await page.setContent('<script src="https://sdk.privacy-center.org/loader.js"></script><div id="mount"></div><script>setTimeout(()=>{document.querySelector("#mount").innerHTML="<section role=dialog style=position:fixed;width:320px;height:120px>Cookies<button>Tout accepter</button><button>Continuer sans accepter</button></section>"},200)</script>');
+      const result = await captureSharedConsentObservation(page, rollout, true);
+      expect(result).toMatchObject({ provider: 'didomi', banner: { visibility: 'visible' } });
+      expect(result.actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'reject_all', availability: 'direct' })]));
+      expect(result.diagnostic_observation?.readiness).toMatchObject({ triggered: true, completion: 'positive_ui_ready' });
+    } finally { await page.close(); }
+  }, 10_000);
 
   it('TELEM-UNKNOWN-01 fingerprints the actual generic detector result stably and without raw values', async () => {
     const fixture = (host: string) => `<script src="https://${host}/consent.js"></script><div role="dialog">We use cookies.<button>Accept all</button><button>Reject all</button></div>`;

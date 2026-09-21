@@ -40,8 +40,14 @@ function controlExtractionGap(snapshots: readonly ConsentObservation[]): Check {
 }
 
 function providerSignatureMismatch(snapshots: readonly ConsentObservation[], canonicalProvider: unknown): Check {
-  const deterministic = snapshots.some((snapshot) => snapshot.provider_selection.candidates.some((candidate) => candidate.provider === 'usercentrics' && candidate.deterministic_provider_signature === true));
-  return { code: 'OBS_CONSENT_PROVIDER_SIGNATURE_MISMATCH', status: !deterministic ? 'not_applicable' : provider(canonicalProvider) === 'usercentrics' ? 'pass' : 'mismatch', values: { deterministic_provider: deterministic ? 'usercentrics' : null, canonical: canonicalProvider ?? null } };
+  const deterministic = [...new Set(snapshots.flatMap((snapshot) => snapshot.provider_selection.candidates
+    .filter((candidate) => candidate.deterministic_provider_signature === true && ['cookiebot', 'didomi', 'usercentrics'].includes(candidate.provider))
+    .map((candidate) => candidate.provider)))];
+  const conflict = snapshots.some((snapshot) => snapshot.provider_selection.provider_conflict);
+  if (!deterministic.length || conflict || deterministic.length > 1) {
+    return { code: 'OBS_CONSENT_PROVIDER_SIGNATURE_MISMATCH', status: 'not_applicable', values: { deterministic_providers: deterministic, canonical: canonicalProvider ?? null, provider_conflict: conflict } };
+  }
+  return { code: 'OBS_CONSENT_PROVIDER_SIGNATURE_MISMATCH', status: provider(canonicalProvider) === deterministic[0] ? 'pass' : 'mismatch', values: { deterministic_provider: deterministic[0], canonical: canonicalProvider ?? null, provider_conflict: false } };
 }
 
 export function buildObservabilityConsistency(audit: Partial<StorefrontAudit>, evidence: EvidenceBundle) {

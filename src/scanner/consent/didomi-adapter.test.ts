@@ -13,6 +13,11 @@ import {
 import { ConsentAuditCodes } from './domain-types';
 
 describe('Didomi adapter fixtures', () => {
+  it('DET-PROVIDER-04 and DET-PROVIDER-05 distinguish the exact Didomi loader from other privacy-center assets', () => {
+    expect(didomiProviderEvidence({ asset_urls: ['https://sdk.privacy-center.org/loader.js?lang=fr'] })[0]).toMatchObject({ deterministic_provider_signature: true });
+    expect(detectDidomi({ asset_urls: ['https://sdk.privacy-center.org/loader.js?lang=fr'] })).toMatchObject({ status: 'detected' });
+    expect(didomiProviderEvidence({ asset_urls: ['https://sdk.privacy-center.org/assets/sdk.js'] })[0]).toMatchObject({ deterministic_provider_signature: false });
+  });
   it('DI-01 detects Didomi only from independent Didomi-specific families', () => {
     const context = {
       window_globals: ['Didomi', 'didomiOnReady', 'didomiConfig'],

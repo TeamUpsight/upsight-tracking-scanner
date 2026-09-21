@@ -60,6 +60,14 @@ export interface BrowserConsentFacts {
   };
 }
 
+/** Lightweight, transient readiness evidence; it deliberately excludes storage, APIs, and network data. */
+export interface ConsentUiProbe {
+  strong_visible_surface_count: number;
+  visible_semantic_control_count: number;
+  open_shadow_roots_observed: number;
+  provider_root_visible: boolean;
+}
+
 const PROVIDER_GLOBALS = ['OneTrust', 'Optanon', 'Cookiebot', 'UC_UI', 'Didomi', 'CookieYes', '_sp_', '_sp_queue', '__tcfapi', '__gpp', '__uspapi'];
 const DOM_SELECTORS = [
   ...ONETRUST_STANDARD_ROOTS, ...Object.values(ONETRUST_DOCUMENTED_CONTROLS),
@@ -248,13 +256,14 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     // This is deliberately provider-first: two independent Cookiebot-specific
     // facts are required before inspecting non-standard descendants, and the
     // scan is bounded to a current visible consent surface.
+    const cookiebotExactLoader = Array.from(document.scripts).some((script) => {
+      try { const url = new URL(script.src); return url.hostname.toLowerCase() === 'consent.cookiebot.com' && url.pathname === '/uc.js'; } catch { return false; }
+    });
     const cookiebotEvidenceFamilies = [
-      Boolean(w.Cookiebot),
-      Boolean(document.querySelector('[data-cbid]')),
-      Array.from(document.scripts).some((script) => /consent\.cookiebot\.com\/uc\.js/i.test(script.src)),
-      Boolean(document.querySelector('#CybotCookiebotDialog'))
+      Boolean(w.Cookiebot), Boolean(document.querySelector('[data-cbid]')),
+      cookiebotExactLoader, Boolean(document.querySelector('#CybotCookiebotDialog'))
     ].filter(Boolean).length;
-    const cookiebotCustomControls = cookiebotEvidenceFamilies >= 2 ? genericSurfaces.flatMap((surface, index) => {
+    const cookiebotCustomControls = (cookiebotExactLoader || cookiebotEvidenceFamilies >= 2) ? genericSurfaces.flatMap((surface, index) => {
       const surfaceFact = genericSurfaceFacts[index];
       if (!surfaceFact?.visible || !surfaceFact.privacy_or_cookie_semantics || surfaceFact.intent !== 'consent') return [];
       const conventional = controls(surface).map((control) => control.accessible_name);
@@ -304,11 +313,26 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       }
       return null;
     };
+    // A consent surface is sometimes only the copy panel. Search the nearest
+    // bounded modal/wrapper instead, never document/body, so sibling action
+    // components stay in scope without creating a page-wide text scan.
+    const consentScope = (surface: Element) => {
+      let candidate: Element | null = surface;
+      for (let level = 0; candidate && level <= 5; level += 1) {
+        const marker = `${candidate.id} ${candidate.getAttribute('class') || ''}`;
+        const style = candidate instanceof HTMLElement ? getComputedStyle(candidate) : null;
+        const safeContainer = candidate.getAttribute('role') === 'dialog' || candidate.getAttribute('aria-modal') === 'true' ||
+          /cookie|consent|privacy|cybot|didomi|usercentrics/i.test(marker) || style?.position === 'fixed' || style?.position === 'sticky';
+        if (level > 0 && safeContainer && candidate !== document.body && candidate !== document.documentElement) return candidate;
+        candidate = composedParent(candidate);
+      }
+      return surface;
+    };
     const bridgeControls: typeof generic.controls = [];
     const retained = new Set<string>();
     for (const { element: surface, fact } of bridgeEntries) {
       if (!fact.visible || !fact.privacy_or_cookie_semantics || fact.intent !== 'consent' || bridgeControls.length >= 30) continue;
-      const stack: Element[] = [surface]; let inspected = 0;
+      const stack: Element[] = [consentScope(surface)]; let inspected = 0;
       while (stack.length && inspected < 150 && bridgeControls.length < 30) {
         const candidate = stack.pop()!; inspected += 1;
         const name = accessibleName(candidate);
@@ -393,6 +417,122 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     };
   }, USERCENTRICS_STANDARD_ROOT);
   return { ...facts, usercentrics };
+}
+
+export async function probeConsentUiState(page: Page): Promise<ConsentUiProbe> {
+  return page.evaluate(() => {
+    const visible = (element: Element | null) => {
+      if (!(element instanceof HTMLElement)) return false;
+      const style = getComputedStyle(element); const box = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+    };
+    const normal = (value: string) => value.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const action = (value: string) => new Set(['accept all', 'accept cookies', 'allow all', 'accept', 'alle akzeptieren', 'alles akzeptieren', 'tout accepter', 'reject all', 'decline all', 'deny all', 'reject', 'decline', 'alle ablehnen', 'alles ablehnen', 'continuer sans accepter', 'only necessary', 'necessary only', 'nur notwendige', 'preferences', 'manage preferences', 'cookie settings', 'manage cookie settings', 'cookie preferences', 'manage cookie preferences', 'privacy preferences', 'customize', 'einstellungen', 'einstellungen verwalten', 'personnaliser']).has(normal(value));
+    const label = (element: Element) => String(element.getAttribute('aria-label') || (element instanceof HTMLInputElement ? element.value : '') || element.textContent || element.getAttribute('title') || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const surfaceSelector = '[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i], [class*="privacy" i], [id*="privacy" i]';
+    const roots: Array<{ root: Document | ShadowRoot; depth: number }> = [{ root: document, depth: 0 }];
+    const surfaces: Element[] = []; let shadows = 0;
+    for (let rootIndex = 0; rootIndex < roots.length && shadows < 40; rootIndex += 1) {
+      const { root, depth } = roots[rootIndex]; const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT); let inspected = 0;
+      for (let node = walker.nextNode(); node && inspected < 600; node = walker.nextNode(), inspected += 1) {
+        const element = node as Element;
+        if (surfaces.length < 30 && element.matches(surfaceSelector)) surfaces.push(element);
+        if (element.shadowRoot && depth < 4 && roots.length < 41) { roots.push({ root: element.shadowRoot, depth: depth + 1 }); shadows += 1; }
+      }
+    }
+    const strong = surfaces.filter((surface) => {
+      const style = surface instanceof HTMLElement ? getComputedStyle(surface) : null;
+      const marker = `${surface.id} ${surface.getAttribute('class') || ''} ${String((surface as HTMLElement).innerText || surface.textContent || '').slice(0, 1200)}`;
+      return visible(surface) && /cookie|consent|privacy|tracking/i.test(marker) && (surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky');
+    });
+    const composedParent = (element: Element) => element.parentElement || (element.getRootNode() instanceof ShadowRoot ? (element.getRootNode() as ShadowRoot).host : null);
+    const scopeFor = (surface: Element) => {
+      let candidate: Element | null = surface;
+      for (let level = 0; candidate && level <= 5; level += 1) {
+        const style = candidate instanceof HTMLElement ? getComputedStyle(candidate) : null;
+        const marker = `${candidate.id} ${candidate.getAttribute('class') || ''}`;
+        if (level > 0 && candidate !== document.body && candidate !== document.documentElement && (candidate.getAttribute('role') === 'dialog' || candidate.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky' || /cookie|consent|privacy|cybot|didomi|usercentrics/i.test(marker))) return candidate;
+        candidate = composedParent(candidate);
+      }
+      return surface;
+    };
+    let semantic = 0;
+    for (const surface of strong) {
+      const stack = [scopeFor(surface)]; let inspected = 0;
+      while (stack.length && inspected < 150 && semantic < 30) {
+        const element = stack.pop()!; inspected += 1;
+        if (visible(element) && element.getAttribute('aria-disabled') !== 'true' && action(label(element))) semantic += 1;
+        for (const child of Array.from(element.children).reverse()) stack.push(child);
+        if (element.shadowRoot) for (const child of Array.from(element.shadowRoot.children).reverse()) stack.push(child);
+      }
+    }
+    const providerRootVisible = ['#CybotCookiebotDialog', '#usercentrics-cmp-ui', '#didomi-host', '#didomi-notice'].some((selector) => visible(document.querySelector(selector)));
+    return { strong_visible_surface_count: strong.length, visible_semantic_control_count: semantic, open_shadow_roots_observed: shadows, provider_root_visible: providerRootVisible };
+  });
+}
+
+/** Waits only when the caller has already found unresolved CMP evidence. */
+export async function waitForConsentUiReadiness(page: Page, maximumMs: number, requireSemanticControls: boolean): Promise<ConsentUiProbe> {
+  return page.evaluate(async ({ maximumMs, requireSemanticControls }) => {
+    const visible = (element: Element | null) => {
+      if (!(element instanceof HTMLElement)) return false;
+      const style = getComputedStyle(element); const box = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+    };
+    const normal = (value: string) => value.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const action = (value: string) => new Set(['accept all', 'accept cookies', 'allow all', 'accept', 'alle akzeptieren', 'alles akzeptieren', 'tout accepter', 'reject all', 'decline all', 'deny all', 'reject', 'decline', 'alle ablehnen', 'alles ablehnen', 'continuer sans accepter', 'only necessary', 'necessary only', 'nur notwendige', 'preferences', 'manage preferences', 'cookie settings', 'manage cookie settings', 'cookie preferences', 'manage cookie preferences', 'privacy preferences', 'customize', 'einstellungen', 'einstellungen verwalten', 'personnaliser']).has(normal(value));
+    const label = (element: Element) => String(element.getAttribute('aria-label') || (element instanceof HTMLInputElement ? element.value : '') || element.textContent || element.getAttribute('title') || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const probe = (): ConsentUiProbe => {
+      const selector = '[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i], [class*="privacy" i], [id*="privacy" i]';
+      const roots: Array<{ root: Document | ShadowRoot; depth: number }> = [{ root: document, depth: 0 }]; const surfaces: Element[] = []; let shadows = 0;
+      for (let rootIndex = 0; rootIndex < roots.length && shadows < 40; rootIndex += 1) {
+        const { root, depth } = roots[rootIndex]; const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT); let inspected = 0;
+        for (let node = walker.nextNode(); node && inspected < 600; node = walker.nextNode(), inspected += 1) {
+          const element = node as Element;
+          if (surfaces.length < 30 && element.matches(selector)) surfaces.push(element);
+          if (element.shadowRoot && depth < 4 && roots.length < 41) { roots.push({ root: element.shadowRoot, depth: depth + 1 }); shadows += 1; }
+        }
+      }
+      const strong = surfaces.filter((surface) => {
+        const style = surface instanceof HTMLElement ? getComputedStyle(surface) : null;
+        const marker = `${surface.id} ${surface.getAttribute('class') || ''} ${String((surface as HTMLElement).innerText || surface.textContent || '').slice(0, 1200)}`;
+        return visible(surface) && /cookie|consent|privacy|tracking/i.test(marker) && (surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky');
+      });
+      const composedParent = (element: Element) => element.parentElement || (element.getRootNode() instanceof ShadowRoot ? (element.getRootNode() as ShadowRoot).host : null);
+      const scopeFor = (surface: Element) => {
+        let candidate: Element | null = surface;
+        for (let level = 0; candidate && level <= 5; level += 1) {
+          const style = candidate instanceof HTMLElement ? getComputedStyle(candidate) : null;
+          const marker = `${candidate.id} ${candidate.getAttribute('class') || ''}`;
+          if (level > 0 && candidate !== document.body && candidate !== document.documentElement && (candidate.getAttribute('role') === 'dialog' || candidate.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky' || /cookie|consent|privacy|cybot|didomi|usercentrics/i.test(marker))) return candidate;
+          candidate = composedParent(candidate);
+        }
+        return surface;
+      };
+      let semantic = 0;
+      for (const surface of strong) {
+        const stack = [scopeFor(surface)]; let inspected = 0;
+        while (stack.length && inspected < 150 && semantic < 30) {
+          const element = stack.pop()!; inspected += 1;
+          if (visible(element) && element.getAttribute('aria-disabled') !== 'true' && action(label(element))) semantic += 1;
+          for (const child of Array.from(element.children).reverse()) stack.push(child);
+          if (element.shadowRoot) for (const child of Array.from(element.shadowRoot.children).reverse()) stack.push(child);
+        }
+      }
+      const providerRootVisible = ['#CybotCookiebotDialog', '#usercentrics-cmp-ui', '#didomi-host', '#didomi-notice'].some((item) => visible(document.querySelector(item)));
+      return { strong_visible_surface_count: strong.length, visible_semantic_control_count: semantic, open_shadow_roots_observed: shadows, provider_root_visible: providerRootVisible };
+    };
+    const ready = (state: ConsentUiProbe) => requireSemanticControls
+      ? state.visible_semantic_control_count > 0
+      : state.strong_visible_surface_count > 0 || state.visible_semantic_control_count > 0 || state.provider_root_visible;
+    const initial = probe(); if (ready(initial)) return initial;
+    return await new Promise<ConsentUiProbe>((resolve) => {
+      let settled = false; const finish = (state: ConsentUiProbe) => { if (settled) return; settled = true; observer.disconnect(); clearInterval(poll); clearTimeout(timeout); resolve(state); };
+      const check = () => { const state = probe(); if (ready(state)) finish(state); };
+      const observer = new MutationObserver(check); observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'role', 'aria-modal', 'aria-label', 'aria-disabled', 'tabindex'] });
+      const poll = window.setInterval(check, 250); const timeout = window.setTimeout(() => finish(probe()), maximumMs);
+    });
+  }, { maximumMs: Math.max(0, Math.min(maximumMs, 4000)), requireSemanticControls });
 }
 
 const observation = (facts: BrowserConsentFacts, selector: string) => facts.observations.find((item) => item.selector === selector);
