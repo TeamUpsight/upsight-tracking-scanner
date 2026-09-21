@@ -2253,7 +2253,8 @@ export async function runStorefrontAudit(
         if (image) {
           homepageScreenshotCapturedAt = Date.now();
           evidenceCollector.addScreenshot({ name: 'homepage.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
-          const capture = evidence.diagnostic_observability?.diagnostic_captures.find((item) => item.context === 'shared');
+          const snapshotId = sharedConsentObservation?.diagnostic_observation?.capture_id;
+          const capture = snapshotId ? evidence.diagnostic_observability?.diagnostic_captures.find((item) => item.capture_id === snapshotId) : undefined;
           if (capture) { capture.screenshot_name = 'homepage.jpg'; capture.screenshot_captured_at_ms = homepageScreenshotCapturedAt; capture.screenshot_observation_delta_ms = Math.max(0, homepageScreenshotCapturedAt - capture.observation_completed_at_ms!); }
         }
       }

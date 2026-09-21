@@ -75,6 +75,7 @@ export interface UsercentricsAdapterContext {
   controls?: readonly UsercentricsControlObservation[];
   storage?: readonly UsercentricsStorageDescriptor[];
   safe_provider_state?: UsercentricsSemanticState | null;
+  lifecycle?: { initialized: boolean; latest_view: 'FIRST_LAYER' | 'SECOND_LAYER' | 'NONE' | 'PRIVACY_BUTTON' | null; latest_view_at_ms: number | null; cmp_shown_observed: boolean; cmp_shown_at_ms: number | null; event_count: number };
   /** Observational only; the adapter never invokes these methods. */
   observed_uc_ui_methods?: readonly string[];
   legacy_globals?: readonly string[];
@@ -163,6 +164,13 @@ export function detectUsercentrics(context: UsercentricsAdapterContext): Adapter
 /** Provider presence and the visible UI surface are independent observations. */
 export function usercentricsBannerState(context: UsercentricsAdapterContext): BannerState {
   const root = context.surfaces?.find((surface) => surface.selector === USERCENTRICS_STANDARD_ROOT);
+  const lifecycle = context.lifecycle;
+  if (detectUsercentrics(context).status === 'detected' && lifecycle?.latest_view === 'NONE') {
+    return { surface: 'none', visibility: 'not_visible', evidence: ['usercentrics_lifecycle_view_none'], reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] };
+  }
+  if (detectUsercentrics(context).status === 'detected' && (lifecycle?.latest_view === 'FIRST_LAYER' || lifecycle?.latest_view === 'SECOND_LAYER' || (lifecycle?.cmp_shown_observed && lifecycle.latest_view !== 'NONE'))) {
+    return { surface: 'dialog', visibility: 'visible', evidence: [lifecycle.latest_view ? 'usercentrics_lifecycle_visible_view' : 'usercentrics_lifecycle_cmp_shown'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
+  }
   const genericVisible = context.generic_surfaces?.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation) || false;
   if (detectUsercentrics(context).status === 'detected' && genericVisible) {
     return { surface: 'dialog', visibility: 'visible', evidence: ['usercentrics_deterministic_provider_signature', 'visible_consent_surface'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };

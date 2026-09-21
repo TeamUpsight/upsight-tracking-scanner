@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ConsentV2RolloutControls } from './rollout-controls';
-import { captureSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, type ConsentV2SessionInput } from './v2-session';
+import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, type ConsentV2SessionInput } from './v2-session';
 import { mapConsentV2ToExisting } from './compatibility-mapper';
 import { captureBrowserConsentFacts, observeConsentFrameworksInPage } from './browser-context-builders';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
@@ -112,6 +112,37 @@ async function auditSourcepoint(preferences = false, contradictory = false) {
 }
 
 describe('Consent V2 production session wiring', () => {
+  it('WP11.4-SEMANTIC-LOCATOR-01 resolves Cookiebot controls inside an accessible child frame only after provider-first fallback', async () => {
+    const result = await audit('<script src="https://consent.cookiebot.com/uc.js"></script><section role="dialog" class="cookie-consent" style="position:fixed;width:320px;height:120px">Cookie preferences<iframe srcdoc="&lt;section role=\'dialog\' class=\'cookie-consent\'&gt;&lt;button&gt;NUR NOTWENDIGE&lt;/button&gt;&lt;button&gt;ALLE AKZEPTIEREN&lt;/button&gt;&lt;/section&gt;"></iframe></section>', { ...input, diagnostic: true });
+    expect(result.telemetry).toMatchObject({ provider: 'cookiebot', provider_confidence: 'high' });
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'only_necessary', availability: 'direct' }),
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' })
+    ]));
+  }, 10_000);
+
+  it('WP11.4-DIDOMI-HOSTED-LOADER-01 recognizes exactly one hosted provider-key loader segment', async () => {
+    const result = await audit('<script src="https://sdk.privacy-center.org/provider-key/loader.js?target=fixture"></script><section role="dialog">Cookies<button>Tout accepter</button></section>');
+    expect(result.telemetry).toMatchObject({ provider: 'didomi', provider_confidence: 'high' });
+  });
+
+  it('WP11.4-UC-LIFECYCLE-01 preserves pre-navigation FIRST_LAYER lifecycle evidence without raw event detail', async () => {
+    const result = await auditNavigation('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><script>window.UC_UI={isInitialized:()=>true};window.dispatchEvent(new Event("UC_UI_INITIALIZED"));window.dispatchEvent(new CustomEvent("UC_UI_CMP_EVENT",{detail:{type:"CMP_SHOWN",ignored:"not-retained"}}));window.dispatchEvent(new CustomEvent("UC_UI_VIEW_CHANGED",{detail:{view:"FIRST_LAYER",previousView:"NONE",ignored:"not-retained"}}));</script>');
+    expect(result.telemetry).toMatchObject({ provider: 'usercentrics', banner_visibility: 'visible' });
+    expect(JSON.stringify(result)).not.toContain('not-retained');
+  });
+
+  it('WP11.4-MERGE-POSITIVE-01 retains shared visible provider evidence when fresh observation is providerless', () => {
+    const shared = { source: 'shared', provider: 'didomi', provider_conflict: false, banner: { surface: 'banner', visibility: 'visible', evidence: [], reason_codes: [] }, actions: [{ action: 'accept_all', availability: 'direct', category: null, evidence: [], reason_codes: [] }] } as any;
+    const fresh = { telemetry: { provider: null, provider_conflict: false, session_status: 'completed', timeline: { initial_observation_completed_at: Date.now() } }, result: { banner: { surface: 'none', visibility: 'not_visible', evidence: [], reason_codes: [] }, available_actions: [] } } as any;
+    expect(mergeSharedConsentObservation(shared, fresh)).toMatchObject({ provider: 'didomi', banner: { visibility: 'visible' }, actions: [expect.objectContaining({ action: 'accept_all', availability: 'direct' })] });
+  });
+
+  it('WP11.4-MERGE-POSITIVE-03 retains a true same-provider complete contradiction as unknown', () => {
+    const shared = { source: 'shared', provider: 'didomi', provider_conflict: false, banner: { surface: 'banner', visibility: 'visible', evidence: [], reason_codes: [] }, actions: [] } as any;
+    const fresh = { telemetry: { provider: 'didomi', provider_conflict: false, session_status: 'completed', timeline: { initial_observation_completed_at: Date.now() } }, result: { banner: { surface: 'none', visibility: 'not_visible', evidence: [], reason_codes: [] }, available_actions: [] } } as any;
+    expect(mergeSharedConsentObservation(shared, fresh).banner.visibility).toBe('unknown');
+  });
   it('FW-ASYNC-TCF-01 buffers delayed TCF callbacks from the pre-navigation bridge', async () => {
     const page = await browser.newPage();
     try {

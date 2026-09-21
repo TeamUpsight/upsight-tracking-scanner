@@ -17,6 +17,7 @@ import { collectRejectVerificationSignals } from './verification-evidence';
 import { captureConsentTrackingRequest, checkTrackingConsistency, ConsentRequestBuffer, normalizeConsentMeasurement, reconcileConsentMeasurement, type ConsentMeasurementSummary, type TrackingConsistencyResult } from './tracking-consistency';
 import { buildUnknownCmpFingerprint } from './unknown-cmp-fingerprint';
 import { consentV2ActionsEnabledFor, consentV2RolloutControls, type ConsentV2RolloutControls, type ConsentV2RolloutProvider } from './rollout-controls';
+import { discoverProviderSemanticControls, type ProviderSemanticDiscovery } from './provider-semantic-controls';
 
 export interface ConsentV2SessionInput { geo: 'USA' | 'EU' | 'UK'; geo_verified: boolean | null; page_valid: boolean | null; timings?: ConsentTimingValues; access_blocked?: boolean; rollout?: ConsentV2RolloutControls; rollout_key?: string; diagnostic?: boolean; }
 export type ConsentV2Telemetry = NonNullable<EvidenceBundle['runtime']['consent_v2']>;
@@ -40,7 +41,7 @@ type ProviderContexts = Map<CmpAdapterProviderId, unknown>;
 const CMP_UI_READINESS_MAX_MS = 4_000;
 type ProviderSelection = Awaited<ReturnType<typeof selectProvider>>;
 type ConsentUiReadinessSummary = NonNullable<DiagnosticConsentObservation['readiness']>;
-type ConsentUiSnapshot = { facts: BrowserConsentFacts; frameworkObservations: ConsentFrameworkObservations; contexts: ProviderContexts; selection: ProviderSelection };
+type ConsentUiSnapshot = { facts: BrowserConsentFacts; frameworkObservations: ConsentFrameworkObservations; contexts: ProviderContexts; selection: ProviderSelection; semanticDiscovery?: ProviderSemanticDiscovery };
 export interface ConsentV2Timeline {
   session_started_at: number;
   navigation_started_at: number | null;
@@ -158,16 +159,31 @@ function strongSurfaceCount(facts: BrowserConsentFacts) {
 async function captureConsentUiSnapshot(page: Page, controls: ConsentV2RolloutControls): Promise<ConsentUiSnapshot> {
   const facts = await captureBrowserConsentFacts(page);
   const frameworkObservations = await observeConsentFrameworksInPage(page);
-  const contexts = await buildProviderContexts(page, facts, frameworkObservations);
+  let contexts = await buildProviderContexts(page, facts, frameworkObservations);
   const selection = controls.enabled ? await selectProvider(contexts, controls) : { provider: undefined, candidates: [], conflict: false, evidence: [] };
-  return { facts, frameworkObservations, contexts, selection };
+  const candidate = selection.provider && selection.candidates.find((item) => item.provider_id === selection.provider);
+  const operations = await providerOperations(selection.provider, contexts);
+  const needsFallback = Boolean(selection.provider && candidate && (candidate.high_confidence || candidate.deterministic_provider_signature) &&
+    (operations.banner.visibility === 'visible' || strongSurfaceCount(facts) > 0) && semanticControlCount(facts) === 0 && !operations.actions.some((action) => action.availability === 'direct'));
+  if (!needsFallback || !selection.provider) return { facts, frameworkObservations, contexts, selection };
+  const semanticDiscovery = await discoverProviderSemanticControls(page, selection.provider);
+  if (!semanticDiscovery.controls.length) return { facts, frameworkObservations, contexts, selection, semanticDiscovery };
+  for (const control of semanticDiscovery.controls) facts.generic.controls.push({ id: control.id, surface_id: control.surface_id, visible: true, enabled: control.enabled, actionable: true, accessible_name: control.accessible_name, location: control.location, shadow_depth: 0 });
+  contexts = await buildProviderContexts(page, facts, frameworkObservations, semanticDiscovery);
+  return { facts, frameworkObservations, contexts, selection, semanticDiscovery };
 }
 
-function readinessTrigger(snapshot: ConsentUiSnapshot) {
+async function readinessTrigger(snapshot: ConsentUiSnapshot) {
   const providerCount = snapshot.selection.candidates.filter((candidate) => candidate.high_confidence || candidate.deterministic_provider_signature).length;
   const strongSurfaces = strongSurfaceCount(snapshot.facts);
   const semanticControls = semanticControlCount(snapshot.facts);
-  const providerUiResolved = snapshot.facts.observations.some((observation) => observation.visible) || snapshot.facts.usercentrics.visible || snapshot.facts.didomi_controls.some((control) => control.visible);
+  const provider = await providerOperations(snapshot.selection.provider, snapshot.contexts);
+  const directProviderControl = provider.actions.some((action) => action.availability === 'direct');
+  const providerUiResolved = provider.banner.visibility === 'visible' || snapshot.facts.observations.some((observation) => observation.visible) || snapshot.facts.usercentrics.visible || snapshot.facts.didomi_controls.some((control) => control.visible);
+  // An adapter's already-proven visible banner plus an actual direct control
+  // is sufficient UI evidence. API-only actions intentionally do not qualify.
+  if (providerUiResolved && directProviderControl) return { reason: null, requireSemanticControls: false, providerCount, strongSurfaces, semanticControls };
+  if (providerCount > 0 && providerUiResolved && semanticControls === 0) return { reason: 'identified_provider_without_semantic_controls', requireSemanticControls: true, providerCount, strongSurfaces, semanticControls };
   if (providerCount > 0 && strongSurfaces === 0 && !providerUiResolved) return { reason: 'identified_provider_without_strong_surface', requireSemanticControls: false, providerCount, strongSurfaces, semanticControls };
   if (providerCount > 0 && strongSurfaces > 0 && semanticControls === 0) return { reason: 'identified_provider_without_semantic_controls', requireSemanticControls: true, providerCount, strongSurfaces, semanticControls };
   if (strongSurfaces > 0 && semanticControls === 0) return { reason: 'strong_surface_with_incomplete_controls', requireSemanticControls: true, providerCount, strongSurfaces, semanticControls };
@@ -177,7 +193,7 @@ function readinessTrigger(snapshot: ConsentUiSnapshot) {
 /** One conditional readiness/capture path shared by homepage and fresh-session observations. */
 async function captureConsentUiReadySnapshot(page: Page, controls: ConsentV2RolloutControls, enabled = true): Promise<{ snapshot: ConsentUiSnapshot; readiness: ConsentUiReadinessSummary }> {
   const initial = await captureConsentUiSnapshot(page, controls);
-  const trigger = readinessTrigger(initial);
+  const trigger = await readinessTrigger(initial);
   const skipped = (): ConsentUiReadinessSummary => ({
     triggered: false, reason: null, started_at_ms: null, completed_at_ms: null, elapsed_ms: 0, completion: 'skipped',
     initial: { provider_count: trigger.providerCount, strong_surface_count: trigger.strongSurfaces, semantic_control_count: trigger.semanticControls },
@@ -229,7 +245,7 @@ function diagnosticObservation(
   });
   const controls: DiagnosticConsentObservation['visible_controls'] = facts.generic.controls.filter((control) => Boolean(semanticActionForConsentLabel(control.accessible_name))).slice(0, 20).map((control) => ({
     accessible_name: control.accessible_name.slice(0, 120), semantic_action: semanticActionForConsentLabel(control.accessible_name) || 'unknown',
-    visible: control.visible, enabled: control.enabled, actionable: control.actionable, provider_specific: false, location: control.location
+    visible: control.visible, enabled: control.enabled, actionable: control.actionable, provider_specific: false, location: control.location === 'child_frame' ? 'iframe' : control.location
   }));
   for (const action of actions) {
     if (controls.length >= 20 || action.availability === 'not_present' || action.availability === 'unknown') continue;
@@ -283,8 +299,8 @@ function available(action: AvailableAction | undefined) {
   return Boolean(action && action.availability !== 'not_present' && action.availability !== 'unknown');
 }
 
-/** Positive shared facts survive an unavailable fresh context. Equal-authority
- * visible/not-visible observations are intentionally represented as unknown. */
+/** Positive shared facts survive unavailable or unattributed fresh context.
+ * A conflicting negative needs a complete observation from the same provider. */
 export function mergeSharedConsentObservation(
   shared: SharedConsentObservation | null,
   fresh: Pick<ConsentV2SessionOutput, 'result' | 'telemetry'> | null
@@ -296,9 +312,10 @@ export function mergeSharedConsentObservation(
   const provider = providerConflict ? null : freshProvider || shared?.provider || null;
   const freshBanner = fresh.result.banner;
   const sharedVisible = shared?.banner.visibility === 'visible';
-  const banner = sharedVisible && freshBanner.visibility === 'not_visible'
+  const sameProviderComplete = Boolean(shared?.provider && freshProvider === shared.provider && fresh.telemetry.session_status === 'completed' && fresh.telemetry.timeline.initial_observation_completed_at !== null);
+  const banner = sharedVisible && freshBanner.visibility === 'not_visible' && sameProviderComplete
     ? { surface: 'unknown' as const, visibility: 'unknown' as const, evidence: ['shared_visible_fresh_not_visible'], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] }
-    : sharedVisible && freshBanner.visibility === 'unknown'
+    : sharedVisible && (!freshProvider || freshBanner.visibility === 'unknown')
       ? shared!.banner
       : freshBanner.visibility === 'unknown' && shared
         ? shared.banner

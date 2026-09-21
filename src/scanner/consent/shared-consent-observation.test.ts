@@ -12,7 +12,7 @@ const shared = (): SharedConsentObservation => ({
 });
 
 const fresh = (banner: 'visible' | 'not_visible' | 'unknown' = 'unknown', provider = 'onetrust') => ({
-  telemetry: { provider, provider_conflict: false },
+  telemetry: { provider, provider_conflict: false, session_status: 'completed', timeline: { initial_observation_completed_at: 1 } },
   result: { banner: { surface: banner === 'visible' ? 'banner' : 'none', visibility: banner, evidence: [], reason_codes: [] }, available_actions: [] }
 } as any);
 

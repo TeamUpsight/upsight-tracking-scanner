@@ -125,7 +125,7 @@ function hasDidomiLoader(values: readonly string[] | undefined) {
   return values?.some((value) => {
     try {
       const url = new URL(value);
-      return url.hostname.toLowerCase() === 'sdk.privacy-center.org' && url.pathname === '/loader.js';
+      return url.hostname.toLowerCase() === 'sdk.privacy-center.org' && (/^\/loader\.js$/i.test(url.pathname) || /^\/[^/]+\/loader\.js$/i.test(url.pathname));
     } catch { return false; }
   }) || false;
 }
