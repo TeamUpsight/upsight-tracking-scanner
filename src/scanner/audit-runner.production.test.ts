@@ -44,7 +44,8 @@ async function auditFixture(
   selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent'],
   actionsEnabled = consentV2Enabled,
   dependencies: Pick<AuditRunnerDependencies, 'createFreshConsentContext' | 'launchBrowser'> = {},
-  scanMode: 'normal' | 'diagnostic' = 'normal'
+  scanMode: 'normal' | 'diagnostic' = 'normal',
+  geo: 'USA' | 'EU' | 'UK' = 'EU'
 ) {
   vi.stubEnv('BROWSER_PROVIDER', 'local');
   vi.stubEnv('CONSENT_V2_ENABLED', consentV2Enabled ? 'true' : 'false');
@@ -57,7 +58,7 @@ async function auditFixture(
     await runStorefrontAudit({
       audit_id: `runner-${status}-${consentV2Enabled}`,
       domain: 'fixture.example',
-      tested_geos: 'EU',
+      tested_geos: geo,
       scan_mode: scanMode,
       selected_modules
     }, async (update) => { updates.push(update as Record<string, unknown>); }, {
@@ -80,6 +81,46 @@ async function auditFixture(
 afterEach(() => vi.unstubAllEnvs());
 
 describe('runStorefrontAudit production browser wiring', () => {
+  it('WP12B-RUNNER-01 adds clean USA GPC evidence without changing canonical decisions', async () => {
+    const html = '<script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script>' +
+      '<script type="application/json" src="https://consent.cookiebot.com/uc.js"></script>' +
+      '<div id="CybotCookiebotDialog" role="dialog" style="position:fixed;width:420px;height:180px">' +
+      'Privacy choices. Global Privacy Control is honored when present.' +
+      '<button id="CybotCookiebotDialogBodyButtonAccept">OK</button>' +
+      '<button id="CybotCookiebotDialogBodyButtonDecline">Do not sell or share my personal information</button></div>';
+    vi.stubEnv('GPC_EXPERIMENT_ENABLED', 'false');
+    const disabled = await auditFixture(200, html, true, ['consent'], false, {}, 'diagnostic', 'USA') as unknown as StorefrontAudit;
+    vi.stubEnv('GPC_EXPERIMENT_ENABLED', 'true');
+    const enabled = await auditFixture(200, html, true, ['consent'], false, {}, 'diagnostic', 'USA') as unknown as StorefrontAudit;
+    const experiment = enabled.evidence_bundle?.diagnostic_observability?.gpc_experiment;
+
+    expect(disabled.evidence_bundle?.diagnostic_observability?.gpc_experiment).toBeUndefined();
+    expect(buildDebugPackageFiles(disabled)['gpc-experiment.json']).toBeUndefined();
+    expect(enabled).toMatchObject({
+      consent_status: disabled.consent_status, cmp_provider: disabled.cmp_provider,
+      site_ga4_detected: disabled.site_ga4_detected, site_meta_detected: disabled.site_meta_detected,
+      product_payload_status: disabled.product_payload_status, server_side_status: disabled.server_side_status
+    });
+    expect(experiment).toMatchObject({
+      enabled: true, state: 'completed', outcome: 'no_observable_change',
+      control: { transport: { requested_profile: 'off', top_level_sec_gpc: 'absent', dom_global_privacy_control: false, valid: true } },
+      treatment: { transport: { requested_profile: 'on', top_level_sec_gpc: '1', dom_global_privacy_control: true, valid: true } },
+      identity_matched: true, access_matched: true
+    });
+    for (const observation of [experiment?.control, experiment?.treatment]) {
+      expect(observation?.cmp).toMatchObject({ provider: 'cookiebot', banner_visibility: 'visible' });
+      expect(observation?.cmp?.actions).not.toContain('reject_all');
+      expect(observation?.cmp?.actions).not.toContain('accept_all');
+      expect(observation?.us_privacy?.choices).toEqual(expect.arrayContaining([
+        expect.objectContaining({ choice: 'opt_out', rights: ['sale', 'sharing'] })
+      ]));
+      expect(observation?.identity.egress_fingerprint).toBeUndefined();
+    }
+    expect(JSON.parse(String(buildDebugPackageFiles(enabled)['gpc-experiment.json']))).toMatchObject({
+      outcome: 'no_observable_change', identity_matched: true, access_matched: true
+    });
+  }, 60_000);
+
   const oneTrust = `<script>window.OneTrust={RejectAll(){ window.__rejectCalled = true; }};</script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`;
   const verifiedOneTrust = `<script>
     let listener; let rejected = false;

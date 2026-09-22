@@ -33,6 +33,10 @@ The projection passively reads `navigator.globalPrivacyControl` as present, abse
 
 Regression entry points: `us-privacy.test.ts`, `cookiebot-adapter.test.ts`, `v2-session.production.test.ts` (WP12A cases), and the USA status/replay cases in `scanner-core.test.ts`. Debug packages expose the same bounded projection in `us-privacy.json` and `consent-summary.json`.
 
+### Controlled GPC comparison (WP12B)
+
+The optional USA diagnostic `GPC_EXPERIMENT_ENABLED` path creates two fresh, service-worker-blocked contexts in one browser session. OFF and ON set both the browser request header and navigator value before target navigation. CDP sent-header events record bounded first-party and top-level `Sec-GPC` states; any HTTP/DOM mismatch invalidates comparison. Each context performs an independent egress probe; only the in-memory equality result survives, never IPs or identity tokens. The pair reuses passive Consent UI, US privacy, GPP, Access, and normalized Consent measurement observers; it never clicks, scans Product/Server-side, or contributes to replay. Invalid transport, identity, access, or budget yields an inconclusive technical result. No outcome asserts legal compliance or that GPC was honored. The Browserless source of the previously observed default navigator `true` remains unproven without an authorized live boundary check.
+
 ### Consent V2 pre-choice provenance (WP08)
 
 `tracking-consistency.ts` normalizes Consent request facts and owns reconciliation. Shared requests use only `consent_initial_load`, `product_discovery`, and `product_pdp_load`; fresh requests use that session's choice timestamp. Each normalized record retains context, phase, timestamp, timing, evidence type, signal kind, and measurement facts. The unchanged GA4 parser supplies the existing wire classification. Event presence alone never establishes full measurement. The GCM observer can add a denied analytics-storage fact from commands in the same context at or before the request; later commands and shared/fresh cross-context commands cannot classify it. Opaque `gcd` and GPP encodings are not decoded.

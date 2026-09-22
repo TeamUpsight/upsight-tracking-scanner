@@ -164,6 +164,7 @@ export interface EvidenceBundle {
   selected_modules?: AuditModule[];
   /** Diagnostic-only, bounded projections of facts already captured by the audit. */
   diagnostic_observability?: {
+    gpc_experiment?: import('./scanner/consent/gpc-experiment').GpcExperimentEvidence;
     consent_observations: Array<{
       capture_id: string;
       context: 'shared' | 'fresh';

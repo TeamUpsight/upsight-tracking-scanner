@@ -1,6 +1,7 @@
 import { captureConsentTrackingRequest, ConsentRequestBuffer, isSharedPreChoicePhase, normalizeConsentMeasurement, reconcileConsentMeasurement } from './consent/tracking-consistency';
 import { GoogleConsentModeObserver } from './consent/google-consent-mode-observer';
 import { createHash } from 'node:crypto';
+import { isIP } from 'node:net';
 import { chromium, type Browser, type BrowserContext, type Page, type Request, type Response } from 'playwright-core';
 import type {
   CmpProvider,
@@ -20,6 +21,7 @@ import { boundedInteger, bulkProxyRetryLimit, consentTimingValues, globalScanTim
 import { buildMetadata } from '../build-metadata';
 import { browserGeoProfile, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
 import { createBrowserQlHandoff } from './browserless-bql';
+import { runGpcExperiment, type GpcExperimentEvidence } from './consent/gpc-experiment';
 import { attachAuthorizedAccessHeader } from './authorized-access';
 import { decideAccessTransition, type AccessIdentity } from './access-state-machine';
 import { detectCMP, type CmpRawEvidence } from './consent/detect-cmp';
@@ -3330,6 +3332,50 @@ export async function runStorefrontAudit(
       addTrace('server_side_provisional_decision', { server_side_status: classification.status, reason_code: classification.reason_code });
     }
     evidence.runtime.module_durations_ms.server_side = Date.now() - serverStarted;
+
+    // Additional passive USA diagnostic only. It never contributes to replay,
+    // canonical evidence, Consent actions, Tracking, Product, or Server-side.
+    if (geo === 'USA' && evidence.mode === 'diagnostic' && consentSelected && consentV2Enabled &&
+      process.env.GPC_EXPERIMENT_ENABLED === 'true') {
+      const diagnostics = evidence.diagnostic_observability ||= { consent_observations: [], diagnostic_captures: [], product_rejections: { observed_count: 0, truncated: false, candidates: [] } };
+      const unavailable = (reason_code: string): GpcExperimentEvidence => ({
+        enabled: true, state: 'inconclusive', control: null, treatment: null, identity_matched: false,
+        access_matched: false, differences: [], outcome: 'inconclusive', reason_code
+      });
+      if (!browser || !runtimeBudget.canRunOptional(25_000) || evidence.page.valid !== true) {
+        diagnostics.gpc_experiment = unavailable('BUDGET_OR_CANONICAL_ACCESS_UNAVAILABLE');
+      } else {
+        const egressTokens = new Map<string, string>();
+        try {
+          diagnostics.gpc_experiment = await runGpcExperiment({
+            browser, url: finalUrl, targetHost: effectiveDomain, proxyCountry: currentProxyCountry,
+            controls: consentV2Controls, navigationTimeoutMs: 6_000, budgetMs: Math.min(20_000, runtimeBudget.optionalAllowance() - 2_000),
+            inspectAccess: (page, response) => inspectPageAccess(page, response),
+            verifyEgress: async (experimentContext) => {
+              if (process.env.BROWSER_PROVIDER === 'local' && dependencies.consentGeoVerified === true)
+                return { country: 'us', fingerprint: 'local_fixture_session' };
+              const probePage = await experimentContext.newPage();
+              try {
+                const probeUrl = process.env.PROXY_EGRESS_PROBE_URL || 'https://ip.decodo.com/json';
+                const probeResponse = await probePage.goto(probeUrl, { waitUntil: 'domcontentloaded', timeout: 5_000 });
+                if (!probeResponse?.ok()) return { country: null, fingerprint: null };
+                const payload = await probeResponse.json() as Record<string, unknown>;
+                const country = parseEgressCountry(payload);
+                const ip = String(payload.ip || payload.proxy || '').trim();
+                if (!isIP(ip)) return { country, fingerprint: null };
+                if (!egressTokens.has(ip)) egressTokens.set(ip, 'egress_' + (egressTokens.size + 1));
+                return { country, fingerprint: egressTokens.get(ip)! };
+              } catch { return { country: null, fingerprint: null }; }
+              finally { await probePage.close().catch(() => {}); }
+            }
+          });
+        } catch {
+          diagnostics.gpc_experiment = unavailable('EXPERIMENT_RUNTIME_INCONCLUSIVE');
+        }
+        addTrace('gpc_experiment_completed', { outcome: diagnostics.gpc_experiment.outcome, reason_code: diagnostics.gpc_experiment.reason_code },
+          { module: 'consent', severity: diagnostics.gpc_experiment.state === 'completed' ? 'info' : 'warning' });
+      }
+    }
 
     finalError = 'none';
     finalStatus = finalStatus === 'partial' ? 'partial' : 'completed';

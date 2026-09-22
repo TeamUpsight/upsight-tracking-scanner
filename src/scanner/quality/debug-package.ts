@@ -154,6 +154,9 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
     'timeline.json': JSON.stringify(sanitizeValue(timeline), null, 2),
     'errors.json': JSON.stringify(sanitizeValue(normalizedErrors), null, 2)
   };
+  if (diagnostics?.gpc_experiment) {
+    files['gpc-experiment.json'] = JSON.stringify(sanitizeValue(diagnostics.gpc_experiment), null, 2);
+  }
   for (const screenshot of screenshots) {
     files[`screenshots/${screenshot.name.replace(/[^a-z0-9_.-]/gi, '_')}`] = Buffer.from(screenshot.content_base64, 'base64');
   }
