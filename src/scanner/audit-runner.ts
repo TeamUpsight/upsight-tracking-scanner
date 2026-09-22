@@ -204,6 +204,11 @@ function safeUrl(raw: string | null | undefined) {
   }
 }
 
+/** Signed screenshot time relative to its Consent observation boundary. */
+export function diagnosticScreenshotDeltaMs(observationCapturedAt: number, screenshotCapturedAt: number | null) {
+  return screenshotCapturedAt === null ? null : screenshotCapturedAt - observationCapturedAt;
+}
+
 export function parseEgressCountry(payload: Record<string, unknown>) {
   const country = payload.country && typeof payload.country === 'object'
     ? payload.country as Record<string, unknown>
@@ -1224,7 +1229,6 @@ export async function runStorefrontAudit(
   let sharedConsentObservationTask: Promise<void> | null = null;
   let sharedConsentObservationStatus: 'not_started' | 'pending' | 'completed' | 'incomplete' = 'not_started';
   let authoritativeSharedHomepage: { page: Page; context: BrowserContext; host: string } | null = null;
-  let homepageScreenshotCapturedAt: number | null = null;
   let consentV2Ran = false;
   let pdpPage: Page | null = null;
   let browserConnectedAt: number | null = null;
@@ -1332,7 +1336,7 @@ export async function runStorefrontAudit(
       capture_id: snapshot.capture_id, phase: snapshot.phase, context: snapshot.context, screenshot_name: screenshotName,
       consent_snapshot_id: snapshot.capture_id, captured_at_ms: snapshot.captured_at_ms, observation_complete: snapshot.observation_complete,
       observation_completed_at_ms: snapshot.captured_at_ms, screenshot_captured_at_ms: screenshotCapturedAt,
-      screenshot_observation_delta_ms: screenshotCapturedAt === null ? null : Math.max(0, screenshotCapturedAt - snapshot.captured_at_ms)
+      screenshot_observation_delta_ms: diagnosticScreenshotDeltaMs(snapshot.captured_at_ms, screenshotCapturedAt)
     });
     addTrace('diagnostic_consent_snapshot_captured', { context: snapshot.context, capture_id: snapshot.capture_id, observation_complete: snapshot.observation_complete }, { module: 'consent', severity: 'info' });
   };
@@ -2280,17 +2284,35 @@ export async function runStorefrontAudit(
       sharedConsentObservationStatus = 'pending';
       sharedConsentObservationTask = (async () => {
         try {
+          const boundaryStartedAt = Date.now();
           await wait(HOMEPAGE_OBSERVATION_MS, authoritativeHomepagePage);
+          const captureStartedAt = Date.now();
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
           const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic');
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
           sharedConsentObservation = observed;
           sharedConsentObservationStatus = 'completed';
-          if (observed.diagnostic_observation) recordConsentDiagnostic(observed.diagnostic_observation, homepageScreenshotCapturedAt ? 'homepage.jpg' : null, homepageScreenshotCapturedAt);
+          let consentScreenshotName: string | null = null;
+          let consentScreenshotCapturedAt: number | null = null;
+          if (observed.diagnostic_observation) {
+            const image = await authoritativeHomepagePage.screenshot({ type: 'jpeg', quality: 55, fullPage: false }).catch(() => null);
+            if (image) {
+              const screenshotCapturedAt = Date.now();
+              evidenceCollector.addScreenshot({ name: 'consent-shared.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
+              if (evidence.runtime.screenshots.some((screenshot) => screenshot.name === 'consent-shared.jpg')) {
+                consentScreenshotName = 'consent-shared.jpg';
+                consentScreenshotCapturedAt = screenshotCapturedAt;
+              }
+            }
+            recordConsentDiagnostic(observed.diagnostic_observation, consentScreenshotName, consentScreenshotCapturedAt);
+          }
           addTrace('homepage_shared_cmp_observation_completed', {
             provider: observed.provider,
             banner_visibility: observed.banner.visibility,
-            action_count: observed.actions.filter((action) => action.availability !== 'not_present' && action.availability !== 'unknown').length
+            action_count: observed.actions.filter((action) => action.availability !== 'not_present' && action.availability !== 'unknown').length,
+            homepage_settle_ms: captureStartedAt - boundaryStartedAt,
+            consent_capture_ms: Date.now() - captureStartedAt,
+            capture_stage_durations_ms: observed.diagnostic_observation?.capture_stage_durations_ms || null
           }, { module: 'consent', severity: 'info' });
         } catch (error) {
           sharedConsentObservationStatus = 'incomplete';
@@ -2315,11 +2337,7 @@ export async function runStorefrontAudit(
       if (evidence.mode === 'diagnostic') {
         const image = await authoritativeHomepagePage.screenshot({ type: 'jpeg', quality: 55, fullPage: false }).catch(() => null);
         if (image) {
-          homepageScreenshotCapturedAt = Date.now();
           evidenceCollector.addScreenshot({ name: 'homepage.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
-          const snapshotId = sharedConsentObservation?.diagnostic_observation?.capture_id;
-          const capture = snapshotId ? evidence.diagnostic_observability?.diagnostic_captures.find((item) => item.capture_id === snapshotId) : undefined;
-          if (capture) { capture.screenshot_name = 'homepage.jpg'; capture.screenshot_captured_at_ms = homepageScreenshotCapturedAt; capture.screenshot_observation_delta_ms = Math.max(0, homepageScreenshotCapturedAt - capture.observation_completed_at_ms!); }
         }
       }
     })().catch((error) => {

@@ -187,6 +187,59 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.available_actions.some((action) => action.availability === 'direct')).toBe(false);
   });
 
+  it('WP11.7-CONTROL-BOUND-01 retains visible primary controls after earlier hidden controls exhaust the DOM-order bound', async () => {
+    const page = await browser.newPage();
+    try {
+      const hidden = Array.from({ length: 35 }, (_, index) => `<a href="#vendor-${index}" style="display:none">Hidden vendor ${index}</a>`).join('');
+      await page.setContent(`<section role="dialog" class="cookie-consent" style="position:fixed;width:480px;height:240px">Cookie privacy settings${hidden}
+        <button aria-label="Choose privacy vendors">Ignored visual label</button>
+        <button>Continue with essentials</button>
+      </section>`);
+      const facts = await captureBrowserConsentFacts(page);
+      const names = facts.generic.controls.map((control) => control.accessible_name);
+
+      expect(names).toEqual(expect.arrayContaining(['Choose privacy vendors', 'Continue with essentials']));
+      expect(facts.generic.controls.slice(0, 2).map((control) => control.accessible_name)).toEqual(['Choose privacy vendors', 'Continue with essentials']);
+    } finally { await page.close(); }
+  });
+
+  it('WP11.7-A11Y-CENSUS-01 captures computed unknown names from a verified Consent scope without creating actions', async () => {
+    const hidden = Array.from({ length: 35 }, (_, index) => `<a href="#vendor-${index}" style="display:none">Hidden vendor ${index}</a>`).join('');
+    const result = await audit(`<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script>
+      <section id="CybotCookiebotDialog" role="dialog" style="position:fixed;width:520px;height:300px">Cookie privacy settings${hidden}
+        <button aria-label="Choose privacy vendors">Ignored visual label</button>
+        <button>Continue with essentials</button>
+        <input type="button" value="Use required cookies">
+        <span id="privacy-choice-name">Review consent options</span><button aria-labelledby="privacy-choice-name"></button>
+        <button><span>Confirm privacy choices</span></button>
+      </section>`, { ...input, diagnostic: true });
+    const census = result.diagnostic_observation?.semantic_discovery?.nearby_actionable_controls || [];
+    const names = census.map((control) => control.accessible_name);
+
+    expect(result.diagnostic_observation?.semantic_discovery).toMatchObject({ role_candidate_count: 0, link_candidate_count: 0, open_shadow_candidate_count: 0, text_candidate_count: 0, actionable_control_count: 0 });
+    expect(names).toEqual(expect.arrayContaining([
+      'Choose privacy vendors',
+      'Continue with essentials',
+      'Use required cookies',
+      'Review consent options',
+      'Confirm privacy choices'
+    ]));
+    expect(census).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'button', accessible_name: 'Choose privacy vendors', location: 'main_frame', consent_scope_corroborated: true }),
+      expect.objectContaining({ role: 'input', accessible_name: 'Use required cookies', location: 'main_frame', consent_scope_corroborated: true }),
+      expect.objectContaining({ role: 'button', accessible_name: 'Review consent options', location: 'main_frame', consent_scope_corroborated: true })
+    ]));
+    expect(census.length).toBeLessThanOrEqual(20);
+    expect(census.slice(0, 5).every((control) => control.visible && control.enabled && control.direct_actionable_target)).toBe(true);
+    expect(result.diagnostic_observation?.capture_stage_durations_ms).toMatchObject({
+      browser_facts: expect.any(Number), framework_observation: expect.any(Number), provider_context: expect.any(Number),
+      provider_selection: expect.any(Number), provider_operations: expect.any(Number), semantic_discovery: expect.any(Number),
+      ui_readiness: expect.any(Number), accessibility_census: expect.any(Number), total: expect.any(Number)
+    });
+    expect(result.diagnostic_observation!.capture_stage_durations_ms!.total).toBeGreaterThanOrEqual(result.diagnostic_observation!.capture_stage_durations_ms!.ui_readiness);
+    expect(result.result.available_actions.some((action) => action.availability === 'direct')).toBe(false);
+  }, 15_000);
+
   it('WP11.5-UC-BOOTSTRAP-01 is idempotent per context and captures startup lifecycle events after a recreated context', async () => {
     const first = await browser.newContext();
     const second = await browser.newContext();

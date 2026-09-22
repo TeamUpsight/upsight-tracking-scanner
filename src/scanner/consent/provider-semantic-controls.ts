@@ -20,6 +20,17 @@ export type ProviderSemanticDiscovery = {
   invoke(id: string): Promise<boolean>;
 };
 
+export type DiagnosticConsentControlCensusRecord = {
+  role: 'button' | 'link' | 'input' | 'other';
+  accessible_name: string;
+  visible: boolean;
+  enabled: boolean;
+  direct_actionable_target: boolean;
+  location: 'main_frame' | 'iframe' | 'shadow_dom';
+  shadow_depth: number;
+  consent_scope_corroborated: true;
+};
+
 type ProviderSemanticLookupClass = 'role' | 'link' | 'open_shadow' | 'text';
 type ProviderSemanticRejectionReason = 'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'unsupported_semantic_action';
 export type ProviderSemanticDiscoveryDiagnostic = {
@@ -117,6 +128,85 @@ export async function discoverProviderSemanticControls(page: Page, provider: Cmp
     }
   }
   return { controls, diagnostic, invoke: async (id) => targets.get(id)?.click().then(() => true).catch(() => false) || false };
+}
+
+/**
+ * Diagnostic-only accessibility census. It enumerates bounded actionable
+ * roles, keeps only controls corroborated by a local strong Consent scope, and
+ * obtains the computed accessible name from Playwright's accessibility tree.
+ */
+export async function captureDiagnosticConsentControlCensus(page: Page): Promise<DiagnosticConsentControlCensusRecord[]> {
+  const frames = page.frames().filter((frame) => frame === page.mainFrame() || frame.parentFrame() === page.mainFrame()).slice(0, 10);
+  const visibleCandidates: Array<{ locator: Locator; frame: Frame; sequence: number }> = [];
+  const remainingCandidates: Array<{ locator: Locator; frame: Frame; sequence: number }> = [];
+  let sequence = 0;
+  for (const frame of frames) {
+    for (const [visibleLocator, allLocator] of [
+      [frame.getByRole('button'), frame.getByRole('button', { includeHidden: true })],
+      [frame.getByRole('link'), frame.getByRole('link', { includeHidden: true })]
+    ]) {
+      const visibleMatches = await visibleLocator.all().catch(() => []);
+      const allMatches = await allLocator.all().catch(() => []);
+      for (const candidate of visibleMatches.slice(0, 20)) visibleCandidates.push({ locator: candidate, frame, sequence: sequence++ });
+      for (const candidate of allMatches.slice(0, 20)) remainingCandidates.push({ locator: candidate, frame, sequence: sequence++ });
+    }
+  }
+  const candidates = [...visibleCandidates, ...remainingCandidates].slice(0, 200);
+  const inspected = (await Promise.all(candidates.map(async ({ locator, frame, sequence: order }) => {
+    const metadata = await locator.evaluate((element) => {
+      const visible = (node: Element) => {
+        if (!(node instanceof HTMLElement)) return false;
+        const style = getComputedStyle(node); const box = node.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+      };
+      const enabled = !(element as HTMLButtonElement).disabled && element.getAttribute('aria-disabled') !== 'true';
+      const tag = element.tagName.toLowerCase(); const explicitRole = element.getAttribute('role');
+      const role: DiagnosticConsentControlCensusRecord['role'] = tag === 'input' ? 'input'
+        : explicitRole === 'button' || tag === 'button' ? 'button'
+          : explicitRole === 'link' || tag === 'a' ? 'link' : 'other';
+      const direct = element.matches('button, a[href], input[type="button"], input[type="submit"]') || explicitRole === 'button' || explicitRole === 'link';
+      let shadowDepth = 0; let root: Node = element;
+      while (root.getRootNode() instanceof ShadowRoot && shadowDepth < 4) { root = (root.getRootNode() as ShadowRoot).host; shadowDepth += 1; }
+      const parent = (node: Element) => node.parentElement || (node.getRootNode() instanceof ShadowRoot ? (node.getRootNode() as ShadowRoot).host : null);
+      let scope: Element | null = element; let corroborated = false;
+      for (let level = 0; scope && level < 8; level += 1) {
+        const style = scope instanceof HTMLElement ? getComputedStyle(scope) : null;
+        const marker = `${scope.id} ${scope.getAttribute('class') || ''} ${scope.getAttribute('role') || ''}`;
+        const boundedText = String((scope as HTMLElement).innerText || scope.textContent || '').slice(0, 1200);
+        const consentSemantics = /cookie|consent|privacy|tracking|cybot/i.test(`${marker} ${boundedText}`);
+        const strong = scope.getAttribute('role') === 'dialog' || scope.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky';
+        if (scope !== document.body && scope !== document.documentElement && visible(scope) && consentSemantics && strong) { corroborated = true; break; }
+        scope = parent(scope);
+      }
+      return { visible: visible(element), enabled, role, direct, shadowDepth, corroborated };
+    }).catch(() => null);
+    if (!metadata?.corroborated) return null;
+    return { locator, frame, order, ...metadata };
+  }))).filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const priority = (item: typeof inspected[number]) => item.visible && item.enabled && item.direct ? 0
+    : item.visible && item.direct ? 1 : item.visible ? 2 : item.enabled && item.direct ? 3 : 4;
+  inspected.sort((left, right) => priority(left) - priority(right) || left.order - right.order);
+  const records: DiagnosticConsentControlCensusRecord[] = [];
+  const retained = new Set<string>();
+  const named = await Promise.all(inspected.slice(0, 40).map(async (item) => {
+    const snapshot = await item.locator.ariaSnapshot({ depth: 1, timeout: 500 }).catch(() => '');
+    const match = snapshot.trim().split(/\r?\n/, 1)[0]?.match(/^\s*-\s+[^\s:]+(?:\s+"((?:\\.|[^"\\])*)")?/);
+    let accessibleName = '';
+    if (match?.[1]) {
+      try { accessibleName = JSON.parse(`"${match[1]}"`); } catch { accessibleName = match[1]; }
+    }
+    return { item, accessibleName: accessibleName.replace(/\s+/g, ' ').trim().slice(0, 120) };
+  }));
+  for (const { item, accessibleName } of named) {
+    if (records.length >= 20) break;
+    if (!accessibleName) continue;
+    const normalizedLocation: DiagnosticConsentControlCensusRecord['location'] = item.shadowDepth > 0 ? 'shadow_dom' : item.frame === page.mainFrame() ? 'main_frame' : 'iframe';
+    const key = `${item.role}:${normalizedLocation}:${item.shadowDepth}:${accessibleName}`;
+    if (retained.has(key)) continue;
+    retained.add(key);
+    records.push({ role: item.role, accessible_name: accessibleName, visible: item.visible, enabled: item.enabled, direct_actionable_target: item.direct, location: normalizedLocation, shadow_depth: item.shadowDepth, consent_scope_corroborated: true });
+  }
+  return records;
 }
 
 async function resolveActionableConsentTarget(locator: Locator) {

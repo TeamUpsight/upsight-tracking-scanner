@@ -170,6 +170,7 @@ export interface EvidenceBundle {
       phase: string;
       captured_at_ms: number;
       observation_complete: boolean;
+      capture_stage_durations_ms?: { browser_facts: number; framework_observation: number; provider_context: number; provider_selection: number; provider_operations: number; semantic_discovery: number; ui_readiness: number; accessibility_census: number; total: number };
       readiness?: { triggered: boolean; reason: string | null; started_at_ms: number | null; completed_at_ms: number | null; elapsed_ms: number; completion: 'positive_ui_ready' | 'timeout' | 'skipped'; initial: { provider_count: number; strong_surface_count: number; semantic_control_count: number }; final: { provider_count: number; strong_surface_count: number; semantic_control_count: number; open_shadow_roots: number; provider_root_visible: boolean }; reason_codes: string[] };
       provider_selection: {
         selected_provider: string | null;

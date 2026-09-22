@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { chromium } from 'playwright-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runStorefrontAudit, type AuditRunnerDependencies } from './audit-runner';
+import { diagnosticScreenshotDeltaMs, runStorefrontAudit, type AuditRunnerDependencies } from './audit-runner';
 import type { StorefrontAudit } from '../types';
 import { buildDebugPackageFiles } from './quality/debug-package';
 
@@ -88,6 +88,12 @@ describe('runStorefrontAudit production browser wiring', () => {
     window.OneTrust = { RejectAll() {} }; window.OnetrustActiveGroups = 'C001';
     function reject() { rejected = true; document.cookie = 'OptanonConsent=present; path=/'; window.dispatchEvent(new Event('OTConsentApplied')); setTimeout(() => listener?.(state(), true), 0); }
   </script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`;
+
+  it('WP11.7-DIAGNOSTIC-TIMING-01 preserves signed screenshot timing around the Consent boundary', () => {
+    expect(diagnosticScreenshotDeltaMs(1_000, 1_500)).toBe(500);
+    expect(diagnosticScreenshotDeltaMs(1_500, 1_000)).toBe(-500);
+    expect(diagnosticScreenshotDeltaMs(1_000, null)).toBeNull();
+  });
 
   it('RUNNER-V2-01 finalizes Consent V2 compatibility fields from the real runner', async () => {
     const result = await auditFixture(200, oneTrust);
@@ -205,12 +211,15 @@ describe('runStorefrontAudit production browser wiring', () => {
       <script>setTimeout(()=>{const root=document.querySelector('#uc-mount').attachShadow({mode:'open'});root.innerHTML='<section role="dialog" class="cookie-consent" style="position:fixed;width:360px;height:180px">Cookie settings<div role="button">Einstellungen verwalten</div><div role="button">Alles ablehnen</div><div role="button">Alles akzeptieren</div></section>'},250)</script>`;
     const result = await auditFixture(200, (path) => path === '/' ? fixture : path === '/sitemap.xml' ? { body: '', status: 404 } : '<main>Product</main>', true, ['consent', 'tracking'], false, { launchBrowser }, 'diagnostic') as unknown as StorefrontAudit;
     const shared = result.evidence_bundle?.diagnostic_observability?.consent_observations.find((observation) => observation.context === 'shared');
+    const capture = result.evidence_bundle?.diagnostic_observability?.diagnostic_captures.find((item) => item.consent_snapshot_id === shared?.capture_id);
     const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string; provider?: string | null; reason?: string; status?: string }>;
 
     expect(launches).toBeGreaterThan(1);
     expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_proxy_retry_started' })]));
     expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'homepage_shared_cmp_observation_boundary_settled', reason: 'session_replacement', status: 'completed', provider: 'usercentrics' })]));
     expect(shared).toMatchObject({ observation_complete: true, provider_selection: { selected_provider: 'usercentrics' }, banner: { visibility: 'visible' } });
+    expect(capture).toMatchObject({ screenshot_name: 'consent-shared.jpg', screenshot_observation_delta_ms: expect.any(Number) });
+    expect(capture!.screenshot_observation_delta_ms).toBeGreaterThanOrEqual(0);
     expect(result.evidence_bundle?.runtime.consent_v2?.shared_observation).toMatchObject({ provider: 'usercentrics', banner_visibility: 'visible' });
     expect(trace).not.toEqual(expect.arrayContaining([expect.objectContaining({ step: 'homepage_shared_cmp_observation_completed', provider: null })]));
   }, 45_000);

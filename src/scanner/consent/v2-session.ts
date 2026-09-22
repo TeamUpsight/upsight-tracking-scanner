@@ -17,7 +17,7 @@ import { collectRejectVerificationSignals } from './verification-evidence';
 import { captureConsentTrackingRequest, checkTrackingConsistency, ConsentRequestBuffer, normalizeConsentMeasurement, reconcileConsentMeasurement, type ConsentMeasurementSummary, type TrackingConsistencyResult } from './tracking-consistency';
 import { buildUnknownCmpFingerprint } from './unknown-cmp-fingerprint';
 import { consentV2ActionsEnabledFor, consentV2RolloutControls, type ConsentV2RolloutControls, type ConsentV2RolloutProvider } from './rollout-controls';
-import { discoverProviderSemanticControls, type ProviderSemanticDiscovery } from './provider-semantic-controls';
+import { captureDiagnosticConsentControlCensus, discoverProviderSemanticControls, type DiagnosticConsentControlCensusRecord, type ProviderSemanticDiscovery } from './provider-semantic-controls';
 
 export interface ConsentV2SessionInput { geo: 'USA' | 'EU' | 'UK'; geo_verified: boolean | null; page_valid: boolean | null; timings?: ConsentTimingValues; access_blocked?: boolean; rollout?: ConsentV2RolloutControls; rollout_key?: string; diagnostic?: boolean; }
 export type ConsentV2Telemetry = NonNullable<EvidenceBundle['runtime']['consent_v2']>;
@@ -41,7 +41,8 @@ type ProviderContexts = Map<CmpAdapterProviderId, unknown>;
 const CMP_UI_READINESS_MAX_MS = 4_000;
 type ProviderSelection = Awaited<ReturnType<typeof selectProvider>>;
 type ConsentUiReadinessSummary = NonNullable<DiagnosticConsentObservation['readiness']>;
-type ConsentUiSnapshot = { facts: BrowserConsentFacts; frameworkObservations: ConsentFrameworkObservations; contexts: ProviderContexts; selection: ProviderSelection; semanticDiscovery?: ProviderSemanticDiscovery };
+type ConsentCaptureStageDurations = NonNullable<DiagnosticConsentObservation['capture_stage_durations_ms']>;
+type ConsentUiSnapshot = { facts: BrowserConsentFacts; frameworkObservations: ConsentFrameworkObservations; contexts: ProviderContexts; selection: ProviderSelection; providerBannerVisibility: BannerState['visibility']; semanticDiscovery?: ProviderSemanticDiscovery; diagnosticControlCensus?: DiagnosticConsentControlCensusRecord[]; stageDurations: ConsentCaptureStageDurations };
 export interface ConsentV2Timeline {
   session_started_at: number;
   navigation_started_at: number | null;
@@ -157,20 +158,32 @@ function strongSurfaceCount(facts: BrowserConsentFacts) {
 }
 
 async function captureConsentUiSnapshot(page: Page, controls: ConsentV2RolloutControls): Promise<ConsentUiSnapshot> {
+  const captureStartedAt = Date.now();
+  let stageStartedAt = captureStartedAt;
   const facts = await captureBrowserConsentFacts(page);
+  const browserFactsMs = Date.now() - stageStartedAt; stageStartedAt = Date.now();
   const frameworkObservations = await observeConsentFrameworksInPage(page);
+  const frameworkObservationMs = Date.now() - stageStartedAt; stageStartedAt = Date.now();
   let contexts = await buildProviderContexts(page, facts, frameworkObservations);
+  let providerContextMs = Date.now() - stageStartedAt; stageStartedAt = Date.now();
   const selection = controls.enabled ? await selectProvider(contexts, controls) : { provider: undefined, candidates: [], conflict: false, evidence: [] };
+  const providerSelectionMs = Date.now() - stageStartedAt; stageStartedAt = Date.now();
   const candidate = selection.provider && selection.candidates.find((item) => item.provider_id === selection.provider);
   const operations = await providerOperations(selection.provider, contexts);
+  const providerOperationsMs = Date.now() - stageStartedAt;
+  const baseDurations = (): ConsentCaptureStageDurations => ({ browser_facts: browserFactsMs, framework_observation: frameworkObservationMs, provider_context: providerContextMs, provider_selection: providerSelectionMs, provider_operations: providerOperationsMs, semantic_discovery: 0, ui_readiness: 0, accessibility_census: 0, total: Date.now() - captureStartedAt });
   const needsFallback = Boolean(selection.provider && candidate && (candidate.high_confidence || candidate.deterministic_provider_signature) &&
     (operations.banner.visibility === 'visible' || strongSurfaceCount(facts) > 0) && semanticControlCount(facts) === 0 && !operations.actions.some((action) => action.availability === 'direct'));
-  if (!needsFallback || !selection.provider) return { facts, frameworkObservations, contexts, selection };
+  if (!needsFallback || !selection.provider) return { facts, frameworkObservations, contexts, selection, providerBannerVisibility: operations.banner.visibility, stageDurations: baseDurations() };
+  stageStartedAt = Date.now();
   const semanticDiscovery = await discoverProviderSemanticControls(page, selection.provider);
-  if (!semanticDiscovery.controls.length) return { facts, frameworkObservations, contexts, selection, semanticDiscovery };
+  const semanticDiscoveryMs = Date.now() - stageStartedAt;
+  if (!semanticDiscovery.controls.length) return { facts, frameworkObservations, contexts, selection, providerBannerVisibility: operations.banner.visibility, semanticDiscovery, stageDurations: { ...baseDurations(), semantic_discovery: semanticDiscoveryMs, total: Date.now() - captureStartedAt } };
   for (const control of semanticDiscovery.controls) facts.generic.controls.push({ id: control.id, surface_id: control.surface_id, visible: true, enabled: control.enabled, actionable: true, accessible_name: control.accessible_name, location: control.location, shadow_depth: 0 });
+  stageStartedAt = Date.now();
   contexts = await buildProviderContexts(page, facts, frameworkObservations, semanticDiscovery);
-  return { facts, frameworkObservations, contexts, selection, semanticDiscovery };
+  providerContextMs += Date.now() - stageStartedAt;
+  return { facts, frameworkObservations, contexts, selection, providerBannerVisibility: operations.banner.visibility, semanticDiscovery, stageDurations: { ...baseDurations(), provider_context: providerContextMs, semantic_discovery: semanticDiscoveryMs, total: Date.now() - captureStartedAt } };
 }
 
 async function readinessTrigger(snapshot: ConsentUiSnapshot) {
@@ -191,19 +204,41 @@ async function readinessTrigger(snapshot: ConsentUiSnapshot) {
 }
 
 /** One conditional readiness/capture path shared by homepage and fresh-session observations. */
-async function captureConsentUiReadySnapshot(page: Page, controls: ConsentV2RolloutControls, enabled = true): Promise<{ snapshot: ConsentUiSnapshot; readiness: ConsentUiReadinessSummary }> {
+async function captureConsentUiReadySnapshot(page: Page, controls: ConsentV2RolloutControls, enabled = true, diagnostic = false): Promise<{ snapshot: ConsentUiSnapshot; readiness: ConsentUiReadinessSummary }> {
+  const totalStartedAt = Date.now();
   const initial = await captureConsentUiSnapshot(page, controls);
+  const triggerStartedAt = Date.now();
   const trigger = await readinessTrigger(initial);
+  initial.stageDurations.provider_operations += Date.now() - triggerStartedAt;
   const skipped = (): ConsentUiReadinessSummary => ({
     triggered: false, reason: null, started_at_ms: null, completed_at_ms: null, elapsed_ms: 0, completion: 'skipped',
     initial: { provider_count: trigger.providerCount, strong_surface_count: trigger.strongSurfaces, semantic_control_count: trigger.semanticControls },
     final: { provider_count: trigger.providerCount, strong_surface_count: trigger.strongSurfaces, semantic_control_count: trigger.semanticControls, open_shadow_roots: 0, provider_root_visible: false }, reason_codes: []
   });
-  if (!enabled || !trigger.reason) return { snapshot: initial, readiness: skipped() };
+  const finalizeDiagnostic = async (snapshot: ConsentUiSnapshot, uiReadinessMs: number) => {
+    snapshot.stageDurations.ui_readiness = uiReadinessMs;
+    const semanticDiagnostic = snapshot.semanticDiscovery?.diagnostic;
+    const selectedCandidate = snapshot.selection.provider && snapshot.selection.candidates.find((candidate) => candidate.provider_id === snapshot.selection.provider);
+    const exactCandidateCount = semanticDiagnostic
+      ? semanticDiagnostic.role_candidate_count + semanticDiagnostic.link_candidate_count + semanticDiagnostic.open_shadow_candidate_count + semanticDiagnostic.text_candidate_count
+      : 0;
+    if (diagnostic && semanticDiagnostic?.attempted && selectedCandidate && (selectedCandidate.high_confidence || selectedCandidate.deterministic_provider_signature) &&
+      (snapshot.providerBannerVisibility === 'visible' || strongSurfaceCount(snapshot.facts) > 0) && semanticControlCount(snapshot.facts) === 0 && exactCandidateCount === 0) {
+      const censusStartedAt = Date.now();
+      snapshot.diagnosticControlCensus = await captureDiagnosticConsentControlCensus(page);
+      snapshot.stageDurations.accessibility_census = Date.now() - censusStartedAt;
+    }
+    snapshot.stageDurations.total = Date.now() - totalStartedAt;
+    return snapshot;
+  };
+  if (!enabled || !trigger.reason) return { snapshot: await finalizeDiagnostic(initial, 0), readiness: skipped() };
   const startedAt = Date.now();
   const probe = await waitForConsentUiReadiness(page, CMP_UI_READINESS_MAX_MS, trigger.requireSemanticControls);
   const completedAt = Date.now();
   const snapshot = await captureConsentUiSnapshot(page, controls);
+  for (const key of ['browser_facts', 'framework_observation', 'provider_context', 'provider_selection', 'provider_operations', 'semantic_discovery'] as const) {
+    snapshot.stageDurations[key] += initial.stageDurations[key];
+  }
   const finalProviderCount = snapshot.selection.candidates.filter((candidate) => candidate.high_confidence || candidate.deterministic_provider_signature).length;
   const elapsed = completedAt - startedAt;
   const positive = trigger.requireSemanticControls
@@ -211,7 +246,7 @@ async function captureConsentUiReadySnapshot(page: Page, controls: ConsentV2Roll
     : probe.strong_visible_surface_count > 0 || probe.visible_semantic_control_count > 0 || probe.provider_root_visible;
   const timedOut = !positive && elapsed >= CMP_UI_READINESS_MAX_MS - 50;
   return {
-    snapshot,
+    snapshot: await finalizeDiagnostic(snapshot, elapsed),
     readiness: {
       triggered: true, reason: trigger.reason, started_at_ms: startedAt, completed_at_ms: completedAt, elapsed_ms: elapsed,
       completion: positive ? 'positive_ui_ready' : 'timeout',
@@ -226,7 +261,7 @@ function diagnosticObservation(
   context: 'shared' | 'fresh', phase: string, facts: BrowserConsentFacts, framework: ConsentFrameworkObservations,
   selection: { provider?: CmpAdapterProviderId; candidates: ReturnType<typeof scoreProviderCandidates>; conflict: boolean; evidence: ProviderEvidenceSignal[] },
   banner: BannerState, actions: AvailableAction[], consentMode: string, observationComplete: boolean, readiness?: ConsentUiReadinessSummary,
-  semanticDiscovery?: ProviderSemanticDiscovery
+  semanticDiscovery?: ProviderSemanticDiscovery, diagnosticControlCensus?: DiagnosticConsentControlCensusRecord[], stageDurations?: ConsentCaptureStageDurations
 ): DiagnosticConsentObservation {
   const providerCandidates = selection.candidates.slice(0, 8).map((candidate) => ({
     provider: candidate.provider_id,
@@ -270,9 +305,12 @@ function diagnosticObservation(
   const nearbyActionableControls: NonNullable<NonNullable<DiagnosticConsentObservation['semantic_discovery']>['nearby_actionable_controls']> = [];
   if (exposeNearbyControls) {
     const retained = new Set<string>();
-    for (const control of facts.generic.controls) {
+    const controlsForDiagnostics = diagnosticControlCensus?.length ? diagnosticControlCensus : facts.generic.controls;
+    for (const control of controlsForDiagnostics) {
       const accessibleName = control.accessible_name.replace(/\s+/g, ' ').trim().slice(0, 120);
-      if (!accessibleName || !control.actionable || !verifiedConsentSurfaceIds.has(control.surface_id)) continue;
+      const consentScopeCorroborated = 'consent_scope_corroborated' in control ? control.consent_scope_corroborated : verifiedConsentSurfaceIds.has(control.surface_id);
+      const actionable = 'actionable' in control ? control.actionable : control.direct_actionable_target;
+      if (!accessibleName || !actionable || !consentScopeCorroborated) continue;
       const item = {
         role: control.role || 'other' as const,
         accessible_name: accessibleName,
@@ -292,6 +330,7 @@ function diagnosticObservation(
   }
   return {
     capture_id: `consent-${context}-${Date.now()}`, context, phase, captured_at_ms: Date.now(), observation_complete: observationComplete,
+    ...(stageDurations ? { capture_stage_durations_ms: { ...stageDurations } } : {}),
     provider_selection: { selected_provider: selection.provider || null, provider_conflict: selection.conflict, candidates: providerCandidates },
     banner: { visibility: banner.visibility, surface: banner.surface }, visible_surfaces: surfaces.slice(0, 12), visible_controls: controls.slice(0, 20),
     ...(semanticDiagnostic ? { semantic_discovery: {
@@ -325,10 +364,14 @@ export async function captureSharedConsentObservation(
   controls: ConsentV2RolloutControls = consentV2RolloutControls(),
   diagnostic = false
 ): Promise<SharedConsentObservation> {
-  const captured = await captureConsentUiReadySnapshot(page, controls);
+  const captured = await captureConsentUiReadySnapshot(page, controls, true, diagnostic);
   const { facts, frameworkObservations, contexts, selection } = captured.snapshot;
   const frameworks = frameworkStateFromObservations(frameworkObservations);
+  const providerOperationsStartedAt = Date.now();
   const provider = await providerOperations(selection.provider, contexts);
+  const finalProviderOperationsMs = Date.now() - providerOperationsStartedAt;
+  captured.snapshot.stageDurations.provider_operations += finalProviderOperationsMs;
+  captured.snapshot.stageDurations.total += finalProviderOperationsMs;
   const generic = genericDetection(facts, frameworks, new GoogleConsentModeObserver());
   const useGeneric = !selection.provider && !selection.conflict && controls.providers.generic.detection_enabled && generic.status === 'detected';
   const banner = selection.provider
@@ -340,7 +383,7 @@ export async function captureSharedConsentObservation(
         : { surface: 'unknown' as const, visibility: 'unknown' as const, evidence: [], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] };
   const actions = selection.provider ? provider.actions : selection.conflict ? [] : generic.actions;
   return { source: 'shared', provider: selection.provider || (useGeneric ? 'generic' : null), provider_conflict: selection.conflict, banner, actions,
-    ...(diagnostic ? { diagnostic_observation: diagnosticObservation('shared', 'homepage_shared_observation', facts, frameworkObservations, selection, banner, actions, 'not_recorded', true, captured.readiness, captured.snapshot.semanticDiscovery) } : {}) };
+    ...(diagnostic ? { diagnostic_observation: diagnosticObservation('shared', 'homepage_shared_observation', facts, frameworkObservations, selection, banner, actions, 'not_recorded', true, captured.readiness, captured.snapshot.semanticDiscovery, captured.snapshot.diagnosticControlCensus, captured.snapshot.stageDurations) } : {}) };
 }
 
 function available(action: AvailableAction | undefined) {
@@ -516,14 +559,14 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
   try {
     ledger.append({ phase: 'baseline', source: 'page', family: 'semantic', kind: 'presence', specificity: 'generic', stability: 'stable', provenance: 'browser_api', descriptor: { exists: true } });
     const observedGoogleCommands = new Set<string>();
-    const initialCapture = await captureConsentUiReadySnapshot(page, rollout, !input.access_blocked && rollout.enabled);
+    const initialCapture = await captureConsentUiReadySnapshot(page, rollout, !input.access_blocked && rollout.enabled, input.diagnostic === true);
     capture.markInitialObservationCompleted();
     const { facts: before, frameworkObservations: initialFrameworkObservations, contexts, selection } = initialCapture.snapshot; observeNewGoogleConsentCommands(gcm, before, observedGoogleCommands);
     let frameworkObservations = initialFrameworkObservations; let frameworks = frameworkStateFromObservations(frameworkObservations);
     const generic = genericDetection(before, frameworks, gcm); const shopify = await shopifyOperations(before); const provider = await providerOperations(selection.provider, contexts); const useGeneric = !selection.provider && !selection.conflict && rollout.providers.generic.detection_enabled && generic.status === 'detected';
     const baseMechanisms = input.access_blocked || !rollout.enabled ? [] : [...(shopify.mechanism ? [shopify.mechanism] : []), ...providerMechanism(selection.provider), ...(useGeneric && generic.mechanism ? [generic.mechanism] : [])]; const initial = selection.provider ? provider.state : selection.conflict ? unknownState() : shopify.state || provider.state; const banner = selection.provider ? provider.banner : selection.conflict ? { surface: 'unknown' as const, visibility: 'unknown' as const, evidence: [], reason_codes: [ConsentAuditCodes.PROVIDER_CONFLICT, ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] } : shopify.banner?.visibility === 'visible' ? shopify.banner : generic.action_plan.length ? { surface: generic.action_plan[0].surface_type, visibility: 'visible' as const, evidence: ['generic_detector_surface'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] } : unknownBanner(); const actions = selection.provider ? provider.actions : selection.conflict ? [] : shopify.actions.length ? shopify.actions : generic.actions;
     const blocked = Boolean(input.access_blocked) || !rollout.enabled;
-    if (blocked) { const mechanisms = input.access_blocked || !rollout.enabled ? [] : composeMechanisms(baseMechanisms, frameworkMechanisms(frameworks), googleConsentModeMechanism(gcm.result())); const result = buildResult(input, mechanisms, banner, actions, initial, null, [], { status: 'inconclusive', evidence: [], reason_codes: [ConsentAuditCodes.ACTION_INCONCLUSIVE] }, { status: 'not_applicable', evidence: [], reason_codes: [ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE] }, frameworks, gcm, requests, [input.access_blocked ? ConsentAuditCodes.BLOCKED_OR_CHALLENGED : ConsentAuditCodes.DETECTION_INCONCLUSIVE]); const tracking = checkTrackingConsistency({ rejection_verification: result.rejection_verification, user_choice_at: timeline.user_choice_at, post_reject_observation_completed: false, requests }); const telemetryResult = telemetry(result, tracking, before, generic, frameworkObservations, rollout, undefined, selection.conflict, blocked, false, timeline, input.geo, capture); return { result, tracking, ledger, telemetry: telemetryResult, google_consent_mode: gcm.result(), ...(input.diagnostic ? { diagnostic_observation: diagnosticObservation('fresh', 'consent_fresh_observation', before, frameworkObservations, selection, banner, actions, telemetryResult.consent_mode_classification, false, initialCapture.readiness, initialCapture.snapshot.semanticDiscovery) } : {}) }; }
+    if (blocked) { const mechanisms = input.access_blocked || !rollout.enabled ? [] : composeMechanisms(baseMechanisms, frameworkMechanisms(frameworks), googleConsentModeMechanism(gcm.result())); const result = buildResult(input, mechanisms, banner, actions, initial, null, [], { status: 'inconclusive', evidence: [], reason_codes: [ConsentAuditCodes.ACTION_INCONCLUSIVE] }, { status: 'not_applicable', evidence: [], reason_codes: [ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE] }, frameworks, gcm, requests, [input.access_blocked ? ConsentAuditCodes.BLOCKED_OR_CHALLENGED : ConsentAuditCodes.DETECTION_INCONCLUSIVE]); const tracking = checkTrackingConsistency({ rejection_verification: result.rejection_verification, user_choice_at: timeline.user_choice_at, post_reject_observation_completed: false, requests }); const telemetryResult = telemetry(result, tracking, before, generic, frameworkObservations, rollout, undefined, selection.conflict, blocked, false, timeline, input.geo, capture); return { result, tracking, ledger, telemetry: telemetryResult, google_consent_mode: gcm.result(), ...(input.diagnostic ? { diagnostic_observation: diagnosticObservation('fresh', 'consent_fresh_observation', before, frameworkObservations, selection, banner, actions, telemetryResult.consent_mode_classification, false, initialCapture.readiness, initialCapture.snapshot.semanticDiscovery, initialCapture.snapshot.diagnosticControlCensus, initialCapture.snapshot.stageDurations) } : {}) }; }
     const actionEnabled = consentV2ActionsEnabledFor(rollout, (selection.provider || 'generic') as ConsentV2RolloutProvider, input.rollout_key || page.url()); let after = before; const attempts: FinalConsentAuditResult['interactions'] = []; let attempt: FinalConsentAuditResult['interactions'][number] | null = null; let verification: VerificationResult = { status: 'inconclusive', evidence: [], reason_codes: [ConsentAuditCodes.ACTION_INCONCLUSIVE] }; let timestamp: number | null = null;
     if (selection.provider && actionEnabled) {
       timeline.reject_started_at = Date.now(); timeline.action_attempt_started_at = timeline.reject_started_at; gcm.markPreChoiceMeasurementWindowObserved();
@@ -557,7 +600,7 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
       if (attempt && (attempt.outcome === 'executed' || attempt.outcome === 'aborted') && timestamp !== null) { timeline.user_choice_at = timestamp; gcm.markUserChoice(timestamp); }
       after = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, after, observedGoogleCommands); const afterFrameworkObservations = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, afterFrameworkObservations); frameworks = frameworkStateFromObservations(frameworkObservations); const afterContexts = await buildProviderContexts(page, after, frameworkObservations); const afterState = (await providerOperations(selection.provider, afterContexts)).state; verification = verifyRequestedConsentAction({ requested_action: attempt?.action || 'reject_all', action_timestamp: timestamp, signals: collectRejectVerificationSignals({ timestamp, interactionExecuted: attempt?.outcome === 'executed', navigationInterrupted: attempt?.outcome === 'aborted', providerState: afterState, providerEventObserved: after.provider_events.length > before.provider_events.length || (after.onetrust?.provider_events.length || 0) > (before.onetrust?.provider_events.length || 0), providerActionCompleted: after.cookieyes?.is_user_action_completed === true, frameworks: frameworkObservations }), navigation_interrupted: attempt?.outcome === 'aborted' }); markTrackingGatedWhenObserved(gcm); }
     const afterContexts = await buildProviderContexts(page, after, frameworkObservations); const resulting = (await providerOperations(selection.provider, afterContexts)).state; const persistence = await verifySameContextReloadPersistence({ meaningful_action_attempt: attempt?.outcome === 'executed' || attempt?.outcome === 'aborted', semantic_verification: verification, after_action: { semantic_state: { provider: resulting.decision, tcf: tcfObservationDecision(frameworkObservations.tcf), gpp: frameworkObservations.gpp.lifecycle === 'ready' ? 'ambiguous' : 'unavailable', shopify_privacy: shopify.state?.decision, consent_mode: gcm.result().commands.length ? 'ambiguous' : 'unavailable' }, storage: buildPersistenceStorage(after) }, settle_timeout_ms: timings.reloadSettleMs }, { async reloadSameContext() { timeline.reload_started_at = Date.now(); const beforeUrl = page.url(); try { await page.reload({ waitUntil: 'commit' }); return { reloaded: true, same_context: true, origin_before: beforeUrl, origin_after: page.url(), navigation_interrupted: false }; } catch { return { reloaded: false, same_context: true, origin_before: beforeUrl, origin_after: page.url(), navigation_interrupted: true }; } }, async waitForSettle(timeoutMs) { try { await page.waitForLoadState('domcontentloaded', { timeout: timeoutMs }); return 'settled'; } catch { return 'timeout'; } }, async readPostReloadSnapshot() { const facts = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, facts, observedGoogleCommands); const reloadFrameworkObservations = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, reloadFrameworkObservations); frameworks = frameworkStateFromObservations(frameworkObservations); const contextsAfterReload = await buildProviderContexts(page, facts, frameworkObservations); const state = (await providerOperations(selection.provider, contextsAfterReload)).state; return { semantic_state: { provider: state.decision, tcf: tcfObservationDecision(frameworkObservations.tcf), gpp: frameworkObservations.gpp.lifecycle === 'ready' ? 'ambiguous' : 'unavailable', consent_mode: gcm.result().commands.length ? 'ambiguous' : 'unavailable' }, storage: buildPersistenceStorage(facts) }; } });
-    const mechanisms = composeMechanisms(baseMechanisms, frameworkMechanisms(frameworks), googleConsentModeMechanism(gcm.result())); const contradiction = hasGcmContradiction(verification, gcm); const hasCmpIdentity = baseMechanisms.some((mechanism) => mechanism.mechanism === 'cmp' || mechanism.mechanism === 'custom'); const result = buildResult(input, mechanisms, banner, actions, initial, resulting, attempts, verification, persistence, frameworks, gcm, requests, [...(hasCmpIdentity ? [] : [ConsentAuditCodes.NO_CMP_DETECTED]), ...(selection.conflict ? [ConsentAuditCodes.PROVIDER_CONFLICT] : []), ...verification.reason_codes, ...persistence.reason_codes, ...(contradiction ? [ConsentAuditCodes.STATE_CONTRADICTION] : [])]); const tracking = checkTrackingConsistency({ rejection_verification: verification, user_choice_at: timeline.user_choice_at, post_reject_observation_completed: persistence.post_reload_observation_completed, requests }); const telemetryResult = telemetry(result, tracking, before, generic, frameworkObservations, rollout, selection.provider, selection.conflict, false, actionEnabled, timeline, input.geo, capture); return { result, tracking, ledger, telemetry: telemetryResult, google_consent_mode: gcm.result(), ...(input.diagnostic ? { diagnostic_observation: diagnosticObservation('fresh', 'consent_fresh_observation', before, frameworkObservations, selection, banner, actions, telemetryResult.consent_mode_classification, true, initialCapture.readiness, initialCapture.snapshot.semanticDiscovery) } : {}) };
+    const mechanisms = composeMechanisms(baseMechanisms, frameworkMechanisms(frameworks), googleConsentModeMechanism(gcm.result())); const contradiction = hasGcmContradiction(verification, gcm); const hasCmpIdentity = baseMechanisms.some((mechanism) => mechanism.mechanism === 'cmp' || mechanism.mechanism === 'custom'); const result = buildResult(input, mechanisms, banner, actions, initial, resulting, attempts, verification, persistence, frameworks, gcm, requests, [...(hasCmpIdentity ? [] : [ConsentAuditCodes.NO_CMP_DETECTED]), ...(selection.conflict ? [ConsentAuditCodes.PROVIDER_CONFLICT] : []), ...verification.reason_codes, ...persistence.reason_codes, ...(contradiction ? [ConsentAuditCodes.STATE_CONTRADICTION] : [])]); const tracking = checkTrackingConsistency({ rejection_verification: verification, user_choice_at: timeline.user_choice_at, post_reject_observation_completed: persistence.post_reload_observation_completed, requests }); const telemetryResult = telemetry(result, tracking, before, generic, frameworkObservations, rollout, selection.provider, selection.conflict, false, actionEnabled, timeline, input.geo, capture); return { result, tracking, ledger, telemetry: telemetryResult, google_consent_mode: gcm.result(), ...(input.diagnostic ? { diagnostic_observation: diagnosticObservation('fresh', 'consent_fresh_observation', before, frameworkObservations, selection, banner, actions, telemetryResult.consent_mode_classification, true, initialCapture.readiness, initialCapture.snapshot.semanticDiscovery, initialCapture.snapshot.diagnosticControlCensus, initialCapture.snapshot.stageDurations) } : {}) };
   } finally { capture.dispose(); }
 }
 

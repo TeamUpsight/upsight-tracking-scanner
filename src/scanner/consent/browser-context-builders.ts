@@ -250,16 +250,19 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       return 'other';
     };
     const controls = (surface: Element) => {
-      const standard = Array.from(surface.querySelectorAll('button, [role="button"], a'));
+      const standard = Array.from(surface.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]'));
       // Non-button elements are intentionally limited to known, accessible
       // consent controls inside an already enumerated cookie/privacy surface.
-      const boundedCustom = Array.from(surface.querySelectorAll('input[type="button"], input[type="submit"], [tabindex="0"]'))
+      const boundedCustom = Array.from(surface.querySelectorAll('[tabindex="0"]'))
         .filter((control) => !standard.includes(control))
         .filter((control) => visible(control) && enabled(control) && knownConsentAction(accessibleName(control)));
-      return [...standard, ...boundedCustom].slice(0, 30).map((control) => ({
+      return [...standard, ...boundedCustom].map((control, index) => ({
         visible: visible(control), enabled: enabled(control), actionable: true,
-        accessible_name: accessibleName(control), role: normalizedRole(control), direct_actionable_target: true
-      }));
+        accessible_name: accessibleName(control), role: normalizedRole(control), direct_actionable_target: true, index
+      })).sort((left, right) => {
+        const priority = (control: { visible: boolean; enabled: boolean }) => control.visible && control.enabled ? 0 : control.visible ? 1 : 2;
+        return priority(left) - priority(right) || left.index - right.index;
+      }).slice(0, 30).map(({ index: _index, ...control }) => control);
     };
     const genericSurfaces = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i]')).slice(0, 30);
     const genericSurfaceFacts = genericSurfaces.map((surface, index) => {

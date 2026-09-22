@@ -23,6 +23,8 @@ Capture inputs are reduced to a versioned bundle with `page`, `network`, `consen
 
 Key distinctions must remain explicit: installation versus actual collection; generic Google collection versus GA4; third-party versus first/same-origin collection; CMP presence versus a verified consent transition; PDP discovery versus a valid URL-matched product event.
 
+Diagnostic Consent control evidence is bounded and non-decisional. When a deterministic provider has visible Consent UI but exact semantic discovery yields no candidates, Playwright accessibility roles may expose at most 20 normalized names from locally corroborated Consent scopes, prioritized by visible/enabled/direct actionability. These names never create actions. A diagnostic screenshot is associated only when captured at the same observation boundary; its signed delta is `screenshot_time - observation_time`, so an earlier image remains explicitly negative rather than appearing contemporaneous.
+
 ### Consent V2 pre-choice provenance (WP08)
 
 `tracking-consistency.ts` normalizes Consent request facts and owns reconciliation. Shared requests use only `consent_initial_load`, `product_discovery`, and `product_pdp_load`; fresh requests use that session's choice timestamp. Each normalized record retains context, phase, timestamp, timing, evidence type, signal kind, and measurement facts. The unchanged GA4 parser supplies the existing wire classification. Event presence alone never establishes full measurement. The GCM observer can add a denied analytics-storage fact from commands in the same context at or before the request; later commands and shared/fresh cross-context commands cannot classify it. Opaque `gcd` and GPP encodings are not decoded.
