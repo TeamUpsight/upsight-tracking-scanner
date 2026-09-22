@@ -21,7 +21,7 @@ import { boundedInteger, bulkProxyRetryLimit, consentTimingValues, globalScanTim
 import { buildMetadata } from '../build-metadata';
 import { browserGeoProfile, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
 import { createBrowserQlHandoff } from './browserless-bql';
-import { runGpcExperiment, type GpcExperimentEvidence } from './consent/gpc-experiment';
+import { GPC_ARM_MAX_BUDGET_MS, GPC_ARM_MIN_BUDGET_MS, GPC_FINALIZATION_MARGIN_MS, runGpcExperiment, type GpcExperimentEvidence } from './consent/gpc-experiment';
 import { attachAuthorizedAccessHeader } from './authorized-access';
 import { decideAccessTransition, type AccessIdentity } from './access-state-machine';
 import { detectCMP, type CmpRawEvidence } from './consent/detect-cmp';
@@ -111,6 +111,7 @@ export interface AuditRunnerDependencies {
   resolveHostname?: typeof resolveHostnameEvidence;
   consentGeoVerified?: boolean | null;
   createFreshConsentContext?: typeof createFreshConsentContext;
+  runGpcExperiment?: typeof runGpcExperiment;
 }
 
 class ScanTermination extends Error {
@@ -3342,14 +3343,19 @@ export async function runStorefrontAudit(
         enabled: true, state: 'inconclusive', control: null, treatment: null, identity_matched: false,
         access_matched: false, differences: [], outcome: 'inconclusive', reason_code
       });
-      if (!browser || !runtimeBudget.canRunOptional(25_000) || evidence.page.valid !== true) {
-        diagnostics.gpc_experiment = unavailable('BUDGET_OR_CANONICAL_ACCESS_UNAVAILABLE');
+      const optionalMs = runtimeBudget.optionalAllowance();
+      const minimumPairMs = GPC_ARM_MIN_BUDGET_MS * 2 + GPC_FINALIZATION_MARGIN_MS;
+      if (!browser || evidence.page.valid !== true) {
+        diagnostics.gpc_experiment = unavailable('CANONICAL_ACCESS_UNAVAILABLE');
+      } else if (optionalMs < minimumPairMs) {
+        diagnostics.gpc_experiment = unavailable('INSUFFICIENT_PAIR_BUDGET');
       } else {
+        const armBudgetMs = Math.min(GPC_ARM_MAX_BUDGET_MS, Math.floor((optionalMs - GPC_FINALIZATION_MARGIN_MS) / 2));
         const egressTokens = new Map<string, string>();
         try {
-          diagnostics.gpc_experiment = await runGpcExperiment({
+          diagnostics.gpc_experiment = await (dependencies.runGpcExperiment || runGpcExperiment)({
             browser, url: finalUrl, targetHost: effectiveDomain, proxyCountry: currentProxyCountry,
-            controls: consentV2Controls, navigationTimeoutMs: 6_000, budgetMs: Math.min(20_000, runtimeBudget.optionalAllowance() - 2_000),
+            controls: consentV2Controls, navigationTimeoutMs: 6_000, armBudgetMs, budgetMs: armBudgetMs * 2,
             inspectAccess: (page, response) => inspectPageAccess(page, response),
             verifyEgress: async (experimentContext) => {
               if (process.env.BROWSER_PROVIDER === 'local' && dependencies.consentGeoVerified === true)
@@ -3365,7 +3371,10 @@ export async function runStorefrontAudit(
                 if (!isIP(ip)) return { country, fingerprint: null };
                 if (!egressTokens.has(ip)) egressTokens.set(ip, 'egress_' + (egressTokens.size + 1));
                 return { country, fingerprint: egressTokens.get(ip)! };
-              } catch { return { country: null, fingerprint: null }; }
+              } catch (error) {
+                if (isNavigationTimeout(error)) throw error;
+                return { country: null, fingerprint: null };
+              }
               finally { await probePage.close().catch(() => {}); }
             }
           });

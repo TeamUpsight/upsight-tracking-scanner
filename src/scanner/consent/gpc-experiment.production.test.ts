@@ -78,13 +78,21 @@ describe('WP12B production-boundary GPC profile', () => {
     const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, headless: true });
     try {
       const result = await runGpcExperiment({
-        browser, url: fixture.url, targetHost: '127.0.0.1', proxyCountry: 'us',
+        browser, url: fixture.url, targetHost: '127.0.0.1', proxyCountry: 'us', armBudgetMs: 24_000, budgetMs: 48_000,
         verifyEgress: async () => ({ country: 'us', fingerprint: 'same_fixture' }),
         inspectAccess: async () => ({ category: 'none', reasonCode: 'STOREFRONT_VALID', botProvider: null, botSignals: [], challengeType: null, retryAfterMs: null })
       });
       expect(result.outcome).toBe('no_observable_change');
       expect(result.control?.transport.valid).toBe(true);
       expect(result.treatment?.transport.valid).toBe(true);
+      expect(result.timings).toMatchObject({
+        budget_ms: 48_000, arm_budget_ms: 24_000,
+        control: { failed_stage: null, context_ms: expect.any(Number), egress_ms: expect.any(Number), transport_setup_ms: expect.any(Number),
+          navigation_ms: expect.any(Number), observation_ms: expect.any(Number), transport_verification_ms: expect.any(Number), total_ms: expect.any(Number) },
+        treatment: { failed_stage: null, context_ms: expect.any(Number), egress_ms: expect.any(Number), transport_setup_ms: expect.any(Number),
+          navigation_ms: expect.any(Number), observation_ms: expect.any(Number), transport_verification_ms: expect.any(Number), total_ms: expect.any(Number) }
+      });
+      expect(result.timings!.total_ms).toBeLessThan(result.timings!.budget_ms);
       for (const observation of [result.control, result.treatment]) {
         expect(observation?.cmp).toMatchObject({ provider: 'cookiebot', banner_visibility: 'visible' });
         expect(observation?.cmp?.actions).not.toContain('reject_all');
@@ -99,6 +107,73 @@ describe('WP12B production-boundary GPC profile', () => {
       await closeServer(fixture.server);
     }
   }, 45_000);
+
+  it('retains completed control when treatment egress times out, distinct from the total deadline', async () => {
+    const fixture = await localFixture();
+    const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, headless: true });
+    const inspectAccess = async () => ({ category: 'none' as const, reasonCode: 'STOREFRONT_VALID', botProvider: null, botSignals: [], challengeType: null, retryAfterMs: null });
+    try {
+      let probes = 0;
+      const stageTimeout = await runGpcExperiment({
+        browser, url: fixture.url, targetHost: '127.0.0.1', proxyCountry: 'us',
+        armBudgetMs: 3_000, budgetMs: 12_000, inspectAccess,
+        verifyEgress: () => ++probes === 1
+          ? Promise.resolve({ country: 'us', fingerprint: 'same_fixture' })
+          : new Promise<never>(() => {})
+      });
+      expect(stageTimeout).toMatchObject({
+        state: 'inconclusive', outcome: 'inconclusive', reason_code: 'TREATMENT_EGRESS_TIMEOUT',
+        control: { transport: { valid: true } }, treatment: null,
+        timings: { control: { failed_stage: null }, treatment: { failed_stage: 'egress', egress_ms: expect.any(Number) } }
+      });
+      expect(stageTimeout.control?.identity.egress_fingerprint).toBeUndefined();
+
+      probes = 0;
+      const controlTimeout = await runGpcExperiment({
+        browser, url: fixture.url, targetHost: '127.0.0.1', proxyCountry: 'us',
+        armBudgetMs: 3_000, budgetMs: 12_000, inspectAccess,
+        verifyEgress: () => ++probes === 1
+          ? new Promise<never>(() => {})
+          : Promise.resolve({ country: 'us', fingerprint: 'same_fixture' })
+      });
+      expect(controlTimeout).toMatchObject({
+        state: 'inconclusive', outcome: 'inconclusive', reason_code: 'CONTROL_EGRESS_TIMEOUT',
+        control: null, treatment: { transport: { valid: true } },
+        timings: { control: { failed_stage: 'egress' }, treatment: { failed_stage: null } }
+      });
+      expect(controlTimeout.treatment?.identity.egress_fingerprint).toBeUndefined();
+
+      probes = 0;
+      const providerTimeout = await runGpcExperiment({
+        browser, url: fixture.url, targetHost: '127.0.0.1', proxyCountry: 'us',
+        armBudgetMs: 3_000, budgetMs: 12_000, inspectAccess,
+        verifyEgress: () => ++probes === 1
+          ? Promise.resolve({ country: 'us', fingerprint: 'same_fixture' })
+          : Promise.reject(new Error('Navigation timed out during egress probe'))
+      });
+      expect(providerTimeout).toMatchObject({
+        reason_code: 'TREATMENT_EGRESS_TIMEOUT', control: { transport: { valid: true } },
+        treatment: null, timings: { treatment: { failed_stage: 'egress' } }
+      });
+
+      probes = 0;
+      const totalTimeout = await runGpcExperiment({
+        browser, url: fixture.url, targetHost: '127.0.0.1', proxyCountry: 'us',
+        armBudgetMs: 10_000, budgetMs: 5_000, inspectAccess,
+        verifyEgress: () => ++probes === 1
+          ? Promise.resolve({ country: 'us', fingerprint: 'same_fixture' })
+          : new Promise<never>(() => {})
+      });
+      expect(totalTimeout).toMatchObject({
+        state: 'inconclusive', outcome: 'inconclusive', reason_code: 'TOTAL_EXPERIMENT_BUDGET_EXCEEDED',
+        control: { transport: { valid: true } }, treatment: null,
+        timings: { control: { failed_stage: null }, treatment: { failed_stage: 'egress' } }
+      });
+    } finally {
+      await browser.close();
+      await closeServer(fixture.server);
+    }
+  }, 30_000);
 
   it('rejects unmatched egress, access, and HTTP/DOM transport before comparing differences', () => {
     const base: GpcObservation = {

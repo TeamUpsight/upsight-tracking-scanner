@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { diagnosticScreenshotDeltaMs, runStorefrontAudit, type AuditRunnerDependencies } from './audit-runner';
 import type { StorefrontAudit } from '../types';
 import { buildDebugPackageFiles } from './quality/debug-package';
+import { compareGpcObservations } from './consent/gpc-experiment';
 
 // Full-runner fixtures validate orchestration, not wall-clock dwell time. Keep
 // the production constants intact while making each bounded observation short
@@ -43,7 +44,7 @@ async function auditFixture(
   consentV2Enabled = true,
   selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent'],
   actionsEnabled = consentV2Enabled,
-  dependencies: Pick<AuditRunnerDependencies, 'createFreshConsentContext' | 'launchBrowser'> = {},
+  dependencies: Pick<AuditRunnerDependencies, 'createFreshConsentContext' | 'launchBrowser' | 'runGpcExperiment'> = {},
   scanMode: 'normal' | 'diagnostic' = 'normal',
   geo: 'USA' | 'EU' | 'UK' = 'EU'
 ) {
@@ -107,6 +108,9 @@ describe('runStorefrontAudit production browser wiring', () => {
       treatment: { transport: { requested_profile: 'on', top_level_sec_gpc: '1', dom_global_privacy_control: true, valid: true } },
       identity_matched: true, access_matched: true
     });
+    expect(experiment?.timings?.arm_budget_ms).toBeGreaterThanOrEqual(24_000);
+    expect(experiment?.timings?.control?.failed_stage).toBeNull();
+    expect(experiment?.timings?.treatment?.failed_stage).toBeNull();
     for (const observation of [experiment?.control, experiment?.treatment]) {
       expect(observation?.cmp).toMatchObject({ provider: 'cookiebot', banner_visibility: 'visible' });
       expect(observation?.cmp?.actions).not.toContain('reject_all');
@@ -117,9 +121,25 @@ describe('runStorefrontAudit production browser wiring', () => {
       expect(observation?.identity.egress_fingerprint).toBeUndefined();
     }
     expect(JSON.parse(String(buildDebugPackageFiles(enabled)['gpc-experiment.json']))).toMatchObject({
-      outcome: 'no_observable_change', identity_matched: true, access_matched: true
+      outcome: 'no_observable_change', identity_matched: true, access_matched: true,
+      timings: { control: { context_ms: expect.any(Number), egress_ms: expect.any(Number), navigation_ms: expect.any(Number),
+        observation_ms: expect.any(Number), transport_verification_ms: expect.any(Number), total_ms: expect.any(Number) } }
     });
-  }, 60_000);
+    const timedOut = await auditFixture(200, html, true, ['consent'], false, {
+      runGpcExperiment: async () => ({ ...compareGpcObservations(null, null), reason_code: 'TREATMENT_EGRESS_TIMEOUT' })
+    }, 'diagnostic', 'USA') as unknown as StorefrontAudit;
+    expect(timedOut).toMatchObject({
+      consent_status: disabled.consent_status, cmp_provider: disabled.cmp_provider,
+      site_ga4_detected: disabled.site_ga4_detected, site_meta_detected: disabled.site_meta_detected,
+      product_payload_status: disabled.product_payload_status, server_side_status: disabled.server_side_status
+    });
+    expect(timedOut.evidence_bundle?.diagnostic_observability?.gpc_experiment).toMatchObject({
+      outcome: 'inconclusive', reason_code: 'TREATMENT_EGRESS_TIMEOUT'
+    });
+    expect(JSON.parse(String(buildDebugPackageFiles(timedOut)['gpc-experiment.json']))).toMatchObject({
+      reason_code: 'TREATMENT_EGRESS_TIMEOUT'
+    });
+  }, 75_000);
 
   const oneTrust = `<script>window.OneTrust={RejectAll(){ window.__rejectCalled = true; }};</script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`;
   const verifiedOneTrust = `<script>

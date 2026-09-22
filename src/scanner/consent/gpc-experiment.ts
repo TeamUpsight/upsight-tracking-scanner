@@ -11,6 +11,24 @@ export type GpcProfile = 'off' | 'on';
 export type GpcHeaderState = 'absent' | '1' | 'other' | 'unknown';
 export type GpcOutcome = 'transport_invalid' | 'identity_unmatched' | 'access_inconclusive' | 'no_observable_change' |
   'observable_ui_change' | 'observable_privacy_state_change' | 'observable_measurement_change' | 'multiple_observable_changes' | 'inconclusive';
+export type GpcStage = 'context' | 'egress' | 'transport_setup' | 'navigation' | 'observation' | 'transport_verification';
+export interface GpcArmTiming {
+  context_ms: number | null;
+  egress_ms: number | null;
+  transport_setup_ms: number | null;
+  navigation_ms: number | null;
+  observation_ms: number | null;
+  transport_verification_ms: number | null;
+  total_ms: number;
+  failed_stage: GpcStage | null;
+}
+export interface GpcExperimentTiming {
+  budget_ms: number;
+  arm_budget_ms: number;
+  total_ms: number;
+  control: GpcArmTiming | null;
+  treatment: GpcArmTiming | null;
+}
 
 export interface GpcTransportEvidence {
   requested_profile: GpcProfile;
@@ -40,6 +58,7 @@ export interface GpcExperimentEvidence {
   differences: Array<'acknowledgement' | 'cmp' | 'us_privacy' | 'gpp' | 'measurement'>;
   outcome: GpcOutcome;
   reason_code: string | null;
+  timings?: GpcExperimentTiming;
 }
 
 const headerState = (value: unknown): GpcHeaderState => value === undefined ? 'absent' : value === '1' ? '1' : 'other';
@@ -135,6 +154,28 @@ export function compareGpcObservations(control: GpcObservation | null, treatment
   return { ...result, state: 'completed', outcome, reason_code: null };
 }
 
+export const GPC_ARM_MIN_BUDGET_MS = 24_000;
+export const GPC_ARM_MAX_BUDGET_MS = 30_000;
+export const GPC_FINALIZATION_MARGIN_MS = 2_000;
+
+const STAGE_BUDGET_MS: Record<GpcStage, number> = {
+  context: 8_000,
+  egress: 6_000,
+  transport_setup: 4_000,
+  navigation: 7_000,
+  observation: 10_000,
+  transport_verification: 3_000
+};
+
+class GpcStageTimeout extends Error {
+  constructor(readonly reasonCode: string) { super(reasonCode); }
+}
+
+function emptyArmTiming(): GpcArmTiming {
+  return { context_ms: null, egress_ms: null, transport_setup_ms: null, navigation_ms: null,
+    observation_ms: null, transport_verification_ms: null, total_ms: 0, failed_stage: null };
+}
+
 export async function runGpcExperiment(input: {
   browser: Browser;
   url: string;
@@ -146,73 +187,148 @@ export async function runGpcExperiment(input: {
   inspectAccess: (page: Page, response: Response | null) => Promise<AccessDecision>;
   navigationTimeoutMs?: number;
   budgetMs?: number;
+  armBudgetMs?: number;
 }): Promise<GpcExperimentEvidence> {
+  const startedAt = Date.now();
+  const armBudgetMs = Math.max(1, Math.floor(input.armBudgetMs ?? GPC_ARM_MAX_BUDGET_MS));
+  const budgetMs = Math.max(1, Math.floor(input.budgetMs ?? armBudgetMs * 2));
+  const totalDeadline = startedAt + budgetMs;
   const controls = input.controls || consentV2RolloutControls();
   const expected = browserGeoProfile(input.proxyCountry);
-  let activeContext: BrowserContext | null = null;
-  let timedOut = false;
-  let rejectBudget!: (error: Error) => void;
-  const budgetExpired = new Promise<never>((_, reject) => { rejectBudget = reject; });
-  const timer = setTimeout(() => {
-    timedOut = true;
-    rejectBudget(new Error('EXPERIMENT_BUDGET_EXCEEDED'));
-    if (activeContext) void activeContext.close().catch(() => {});
-  }, input.budgetMs || 20_000);
+  const timings: GpcExperimentTiming = { budget_ms: budgetMs, arm_budget_ms: armBudgetMs, total_ms: 0, control: null, treatment: null };
   const observe = async (profile: GpcProfile): Promise<GpcObservation> => {
-    const opening = input.browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true, serviceWorkers: 'block' });
-    void opening.then((lateContext) => { if (timedOut) void lateContext.close().catch(() => {}); }).catch(() => {});
-    const context = await Promise.race([opening, budgetExpired]);
-    activeContext = context;
-    try {
-      const page = await context.newPage();
-      const geoApplied = await configureBrowserGeo(context, page, input.proxyCountry);
-      const egress = await input.verifyEgress(context);
-      const readTransport = await installGpcProfile(context, page, profile, input.targetHost, expected.acceptLanguage);
-      const prepared = await prepareConsentV2Session(page);
+    const label = profile === 'off' ? 'CONTROL' : 'TREATMENT';
+    const armStarted = Date.now();
+    const armDeadline = armStarted + armBudgetMs;
+    const timing = emptyArmTiming();
+    timings[profile === 'off' ? 'control' : 'treatment'] = timing;
+    let activeContext: BrowserContext | null = null;
+    let armExpired = false;
+    let prepared: Awaited<ReturnType<typeof prepareConsentV2Session>> | null = null;
+    const stage = async <T>(name: GpcStage, operation: () => Promise<T>): Promise<T> => {
+      const stageStarted = Date.now();
+      const remainingTotal = totalDeadline - stageStarted;
+      const remainingArm = armDeadline - stageStarted;
+      const limit = STAGE_BUDGET_MS[name];
+      const totalLimited = remainingTotal <= remainingArm && remainingTotal <= limit;
+      const reasonCode = totalLimited ? 'TOTAL_EXPERIMENT_BUDGET_EXCEEDED' : label + '_' + name.toUpperCase() + '_TIMEOUT';
+      const allowance = Math.min(remainingTotal, remainingArm, limit);
+      const key = (name + '_ms') as keyof Pick<GpcArmTiming, 'context_ms' | 'egress_ms' | 'transport_setup_ms' | 'navigation_ms' | 'observation_ms' | 'transport_verification_ms'>;
+      if (allowance <= 0) {
+        timing.failed_stage = name;
+        timing[key] = 0;
+        armExpired = true;
+        throw new GpcStageTimeout(reasonCode);
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
+        return await Promise.race([
+          operation(),
+          new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new GpcStageTimeout(reasonCode)), allowance); })
+        ]);
+      } catch (error) {
+        timing.failed_stage = name;
+        const timeout = error instanceof GpcStageTimeout
+          ? error
+          : /Timeout|timed out/i.test(String((error as Error)?.message || error))
+            ? new GpcStageTimeout(label + '_' + name.toUpperCase() + '_TIMEOUT')
+            : null;
+        if (timeout) {
+          armExpired = true;
+          if (activeContext) void activeContext.close().catch(() => {});
+        }
+        throw timeout || error;
+      } finally {
+        if (timer) clearTimeout(timer);
+        timing[key] = Date.now() - stageStarted;
+      }
+    };
+    try {
+      const { context, page, geoApplied } = await stage('context', async () => {
+        const opening = input.browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true, serviceWorkers: 'block' });
+        void opening.then((lateContext) => {
+          if (armExpired) void lateContext.close().catch(() => {});
+          else activeContext = lateContext;
+        }).catch(() => {});
+        const context = await opening;
+        activeContext = context;
+        const page = await context.newPage();
+        const geoApplied = await configureBrowserGeo(context, page, input.proxyCountry);
+        return { context, page, geoApplied };
+      });
+      const egress = await stage('egress', () => input.verifyEgress(context));
+      const readTransport = await stage('transport_setup', async () => {
+        const read = await installGpcProfile(context, page, profile, input.targetHost, expected.acceptLanguage);
+        prepared = await prepareConsentV2Session(page);
+        return read;
+      });
+      const response = await stage('navigation', async () => {
         prepared.markNavigationStarted();
-        const response = await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: input.navigationTimeoutMs || 7_000 });
+        const navigated = await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: input.navigationTimeoutMs || 7_000 });
         prepared.markDOMContentLoaded();
+        return navigated;
+      });
+      const observed = await stage('observation', async () => {
         const consent = await captureSharedConsentObservation(page, controls, false, 'USA');
         prepared.markInitialObservationCompleted();
         const framework = await observeConsentFrameworksInPage(page);
-        const transport = await readTransport();
         const access = await input.inspectAccess(page, response);
         const host = new URL(page.url()).hostname.toLowerCase();
         const measurement = normalizeConsentMeasurement(prepared.requests, 'fresh', null, prepared.gcm.result(), prepared.request_buffer.truncated, prepared.request_buffer.observed);
-        return {
+        return { consent, framework, access, host, measurement };
+      });
+      const transport = await stage('transport_verification', readTransport);
+      return {
           transport,
           identity: { same_browser_session: true, browser_configuration_verified: geoApplied.localeApplied && geoApplied.timezoneApplied,
             locale: expected.locale, timezone: expected.timezoneId, viewport: '1280x800', usa_egress_verified: egress.country === 'us', egress_fingerprint: egress.fingerprint },
-          access: { page_valid: isValidStorefrontStatus(response?.status() ?? null) && host === input.targetHost,
-            canonical_host: host, category: access.category, geo_verified: egress.country === 'us', observation_complete: true },
-          cmp: { provider: consent.provider, provider_conflict: consent.provider_conflict, banner_visibility: consent.banner.visibility,
-            actions: consent.actions.filter((action) => action.availability === 'direct').map((action) => action.action).sort().slice(0, 10) },
-          us_privacy: consent.us_privacy ? { choices: consent.us_privacy.choices.slice(0, 20), gpc_acknowledgement_observed: consent.us_privacy.gpc.gpc_acknowledgement_observed } : null,
-          gpp: { lifecycle: framework.gpp.lifecycle, section_list: framework.gpp.ping?.section_list || [], applicable_sections: framework.gpp.ping?.applicable_sections || [], signal_status: framework.gpp.ping?.signal_status || null },
-          measurement: { state: measurement.state, retained: measurement.tracking_requests_retained, full: measurement.full_measurement_count,
-            limited: measurement.limited_measurement_count, unknown: measurement.unknown_measurement_count, truncated: measurement.truncated }
-        };
-      } finally { prepared.dispose(); }
+          access: { page_valid: isValidStorefrontStatus(response?.status() ?? null) && observed.host === input.targetHost,
+            canonical_host: observed.host, category: observed.access.category, geo_verified: egress.country === 'us', observation_complete: true },
+          cmp: { provider: observed.consent.provider, provider_conflict: observed.consent.provider_conflict, banner_visibility: observed.consent.banner.visibility,
+            actions: observed.consent.actions.filter((action) => action.availability === 'direct').map((action) => action.action).sort().slice(0, 10) },
+          us_privacy: observed.consent.us_privacy ? { choices: observed.consent.us_privacy.choices.slice(0, 20), gpc_acknowledgement_observed: observed.consent.us_privacy.gpc.gpc_acknowledgement_observed } : null,
+          gpp: { lifecycle: observed.framework.gpp.lifecycle, section_list: observed.framework.gpp.ping?.section_list || [], applicable_sections: observed.framework.gpp.ping?.applicable_sections || [], signal_status: observed.framework.gpp.ping?.signal_status || null },
+          measurement: { state: observed.measurement.state, retained: observed.measurement.tracking_requests_retained, full: observed.measurement.full_measurement_count,
+            limited: observed.measurement.limited_measurement_count, unknown: observed.measurement.unknown_measurement_count, truncated: observed.measurement.truncated }
+      };
     } finally {
-      await context.close().catch(() => {});
-      if (activeContext === context) activeContext = null;
+      prepared?.dispose();
+      if (activeContext) {
+        // Cleanup is best-effort and must not consume the canonical audit's
+        // reserved finalization time if a remote CDP close stalls.
+        let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            activeContext.close().catch(() => {}),
+            new Promise<void>((resolve) => { cleanupTimer = setTimeout(resolve, 500); })
+          ]);
+        } finally { if (cleanupTimer) clearTimeout(cleanupTimer); }
+      }
+      timing.total_ms = Date.now() - armStarted;
     }
   };
   let control: GpcObservation | null = null;
   let treatment: GpcObservation | null = null;
-  try {
-    try { control = await Promise.race([observe('off'), budgetExpired]); } catch { /* Failed observations cannot be compared. */ }
-    if (!timedOut) {
-      try { treatment = await Promise.race([observe('on'), budgetExpired]); } catch { /* Failed observations cannot be compared. */ }
+  const failures: string[] = [];
+  try { control = await observe('off'); } catch (error) {
+    failures.push(error instanceof GpcStageTimeout ? error.reasonCode : 'CONTROL_' + (timings.control?.failed_stage || 'OBSERVATION').toUpperCase() + '_FAILED');
+  }
+  if (Date.now() < totalDeadline) {
+    try { treatment = await observe('on'); } catch (error) {
+      failures.push(error instanceof GpcStageTimeout ? error.reasonCode : 'TREATMENT_' + (timings.treatment?.failed_stage || 'OBSERVATION').toUpperCase() + '_FAILED');
     }
-  } finally { clearTimeout(timer); }
+  } else if (!treatment) {
+    failures.push('TOTAL_EXPERIMENT_BUDGET_EXCEEDED');
+  }
   const result = compareGpcObservations(control, treatment);
-  if (timedOut) {
+  timings.total_ms = Date.now() - startedAt;
+  result.timings = timings;
+  if (failures.length) result.reason_code = failures.find((reason) => reason !== 'TOTAL_EXPERIMENT_BUDGET_EXCEEDED') || failures[0];
+  if (timings.total_ms > budgetMs && result.state === 'completed') {
     result.state = 'inconclusive';
     result.outcome = 'inconclusive';
     result.differences = [];
-    result.reason_code = 'EXPERIMENT_BUDGET_EXCEEDED';
+    result.reason_code = 'TOTAL_EXPERIMENT_BUDGET_EXCEEDED';
   }
   // Tokens only exist to compare identity in memory; debug evidence retains
   // the matched boolean, not an IP, hash, proxy identifier, or token.
