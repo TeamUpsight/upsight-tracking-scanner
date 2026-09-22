@@ -21,7 +21,7 @@ import { boundedInteger, bulkProxyRetryLimit, consentTimingValues, globalScanTim
 import { buildMetadata } from '../build-metadata';
 import { browserGeoProfile, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
 import { createBrowserQlHandoff } from './browserless-bql';
-import { GPC_ARM_MAX_BUDGET_MS, GPC_ARM_MIN_BUDGET_MS, GPC_FINALIZATION_MARGIN_MS, runGpcExperiment, type GpcExperimentEvidence } from './consent/gpc-experiment';
+import { GPC_ARM_MAX_BUDGET_MS, GPC_ARM_MIN_BUDGET_MS, GPC_FINALIZATION_MARGIN_MS, openBrowserlessGpcExperimentSession, runGpcExperiment, type GpcExperimentEvidence } from './consent/gpc-experiment';
 import { attachAuthorizedAccessHeader } from './authorized-access';
 import { decideAccessTransition, type AccessIdentity } from './access-state-machine';
 import { detectCMP, type CmpRawEvidence } from './consent/detect-cmp';
@@ -1223,6 +1223,7 @@ export async function runStorefrontAudit(
   const lifecycle = new FinalizeOnce();
   const traceLimit = evidence.mode === 'diagnostic' ? 500 : 200;
   let browser: Browser | null = null;
+  let gpcExperimentCdpUrl: string | null = null;
   let context: BrowserContext | null = null;
   let homepage: Page | null = null;
   let consentContext: BrowserContext | null = null;
@@ -1465,6 +1466,7 @@ export async function runStorefrontAudit(
   };
 
   const closeSession = async () => {
+    gpcExperimentCdpUrl = null;
     if (consentHomepage && !consentHomepage.isClosed()) await consentHomepage.close().catch(() => {});
     consentHomepage = null;
     if (consentContext) await consentContext.close().catch(() => {});
@@ -1858,6 +1860,7 @@ export async function runStorefrontAudit(
       throw error;
     }
     const connectDuration = Date.now() - connectStart;
+    gpcExperimentCdpUrl = provider === 'browserless' ? cdpUrl : null;
     const lastAttempt = evidence.runtime.proxy_attempts?.at(-1);
     if (lastAttempt) lastAttempt.connection_ms = connectDuration;
     evidenceCollector.updateAccessProxyAttempt(attempt + 1, { connect_duration_ms: connectDuration });
@@ -3355,6 +3358,8 @@ export async function runStorefrontAudit(
         try {
           diagnostics.gpc_experiment = await (dependencies.runGpcExperiment || runGpcExperiment)({
             browser, url: finalUrl, targetHost: effectiveDomain, proxyCountry: currentProxyCountry,
+            ...(gpcExperimentCdpUrl ? { openBrowserSession: (profile: 'off' | 'on') =>
+              openBrowserlessGpcExperimentSession(gpcExperimentCdpUrl!, profile) } : {}),
             controls: consentV2Controls, navigationTimeoutMs: 6_000, armBudgetMs, budgetMs: armBudgetMs * 2,
             inspectAccess: (page, response) => inspectPageAccess(page, response),
             verifyEgress: async (experimentContext) => {

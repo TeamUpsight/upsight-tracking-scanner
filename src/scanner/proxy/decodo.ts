@@ -270,6 +270,23 @@ export function buildBrowserlessCdpUrl(options: {
   return `wss://${options.host}${options.route === 'stealth' ? '/stealth' : ''}?${params.toString()}`;
 }
 
+/** Preserve the canonical Browserless route and proxy session. Only the OFF
+ * experiment launch disables Chromium's GPC force/test features; neither URL is
+ * suitable for persistence because it contains connection credentials. */
+export function buildBrowserlessGpcExperimentUrl(canonicalUrl: string, profile: 'off' | 'on') {
+  const url = new URL(canonicalUrl);
+  if (url.protocol !== 'wss:' || !['/', '/stealth'].includes(url.pathname) || !url.searchParams.has('token'))
+    throw new Error('Unsupported Browserless GPC experiment connection');
+  if (profile === 'off') {
+    const launch = JSON.parse(url.searchParams.get('launch') || '{}') as { args?: string[] };
+    if (launch.args && (!Array.isArray(launch.args) || launch.args.some((arg) => typeof arg !== 'string')))
+      throw new Error('Unsupported Browserless launch arguments');
+    launch.args = [...(launch.args || []), '--disable-features=GlobalPrivacyControlForce,GlobalPrivacyControlTest'];
+    url.searchParams.set('launch', JSON.stringify(launch));
+  }
+  return url.toString();
+}
+
 export function summarizeCdpUrlForTrace(cdpUrl: string) {
   try {
     const parsed = new URL(cdpUrl);

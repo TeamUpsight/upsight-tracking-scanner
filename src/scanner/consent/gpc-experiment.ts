@@ -1,4 +1,4 @@
-import type { Browser, BrowserContext, Page, Response } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext, type Page, type Response } from 'playwright-core';
 import { browserGeoProfile, configureBrowserGeo } from '../browser-session';
 import { isValidStorefrontStatus, type AccessDecision } from '../navigation';
 import { captureSharedConsentObservation, prepareConsentV2Session } from './v2-session';
@@ -6,8 +6,16 @@ import { observeConsentFrameworksInPage } from './browser-context-builders';
 import { normalizeConsentMeasurement } from './tracking-consistency';
 import { consentV2RolloutControls, type ConsentV2RolloutControls } from './rollout-controls';
 import type { USPrivacyObservation } from './domain-types';
+import { buildBrowserlessGpcExperimentUrl } from '../proxy/decodo';
 
 export type GpcProfile = 'off' | 'on';
+export async function openBrowserlessGpcExperimentSession(
+  canonicalCdpUrl: string, profile: GpcProfile,
+  connect: (url: string) => Promise<Browser> = (url) => chromium.connectOverCDP(url, { timeout: 8_000 })
+) {
+  const url = buildBrowserlessGpcExperimentUrl(canonicalCdpUrl, profile);
+  return { browser: await connect(url), configurationVerified: true };
+}
 export type GpcHeaderState = 'absent' | '1' | 'other' | 'unknown';
 export type GpcOutcome = 'transport_invalid' | 'identity_unmatched' | 'access_inconclusive' | 'no_observable_change' |
   'observable_ui_change' | 'observable_privacy_state_change' | 'observable_measurement_change' | 'multiple_observable_changes' | 'inconclusive';
@@ -40,7 +48,7 @@ export interface GpcTransportEvidence {
 
 export interface GpcObservation {
   transport: GpcTransportEvidence;
-  identity: { same_browser_session: boolean; browser_configuration_verified: boolean; locale: string; timezone: string; viewport: '1280x800'; usa_egress_verified: boolean; egress_fingerprint?: string | null };
+  identity: { same_browser_session: boolean; browser_configuration_verified: boolean; browser_version?: string; locale: string; timezone: string; viewport: '1280x800'; usa_egress_verified: boolean; egress_fingerprint?: string | null };
   access: { page_valid: boolean; canonical_host: string | null; category: AccessDecision['category']; geo_verified: boolean; observation_complete: boolean };
   cmp: { provider: string | null; provider_conflict: boolean; banner_visibility: string; actions: string[] } | null;
   us_privacy: { choices: USPrivacyObservation['choices']; gpc_acknowledgement_observed: boolean | null } | null;
@@ -65,7 +73,7 @@ const headerState = (value: unknown): GpcHeaderState => value === undefined ? 'a
 const emptyCounts = () => ({ observed: 0, absent: 0, value_1: 0, other: 0 });
 
 /** The route changes wire intent; CDP records what Chromium actually sent. */
-export async function installGpcProfile(context: BrowserContext, page: Page, profile: GpcProfile, targetHost: string, acceptLanguage?: string) {
+export async function installGpcProfile(context: BrowserContext, page: Page, profile: GpcProfile, targetHost: string, acceptLanguage?: string, nativeSessionOff = false) {
   await context.addInitScript((enabled: boolean) => {
     Object.defineProperty(navigator, 'globalPrivacyControl', { configurable: true, get: () => enabled });
   }, profile === 'on');
@@ -73,7 +81,7 @@ export async function installGpcProfile(context: BrowserContext, page: Page, pro
     ...(acceptLanguage ? { 'Accept-Language': acceptLanguage } : {}),
     ...(profile === 'on' ? { 'Sec-GPC': '1' } : {})
   });
-  await context.route('**/*', async (route) => {
+  if (!(nativeSessionOff && profile === 'off')) await context.route('**/*', async (route) => {
     const headers = await route.request().allHeaders();
     for (const key of Object.keys(headers)) if (key.toLowerCase() === 'sec-gpc') delete headers[key];
     if (profile === 'on') headers['sec-gpc'] = '1';
@@ -129,7 +137,10 @@ export function compareGpcObservations(control: GpcObservation | null, treatment
     access_matched: false, differences: [], outcome: 'inconclusive', reason_code: 'OBSERVATION_INCOMPLETE' };
   if (!control || !treatment) return result;
   if (!control.transport.valid || !treatment.transport.valid) return { ...result, outcome: 'transport_invalid', reason_code: 'GPC_HTTP_DOM_MISMATCH' };
-  const identityMatched = control.identity.same_browser_session && treatment.identity.same_browser_session &&
+  const browserMatched = (control.identity.same_browser_session && treatment.identity.same_browser_session) ||
+    (!control.identity.same_browser_session && !treatment.identity.same_browser_session &&
+      Boolean(control.identity.browser_version && control.identity.browser_version === treatment.identity.browser_version));
+  const identityMatched = browserMatched &&
     control.identity.browser_configuration_verified && treatment.identity.browser_configuration_verified &&
     control.identity.usa_egress_verified && treatment.identity.usa_egress_verified &&
     Boolean(control.identity.egress_fingerprint && control.identity.egress_fingerprint === treatment.identity.egress_fingerprint) &&
@@ -159,7 +170,7 @@ export const GPC_ARM_MAX_BUDGET_MS = 30_000;
 export const GPC_FINALIZATION_MARGIN_MS = 2_000;
 
 const STAGE_BUDGET_MS: Record<GpcStage, number> = {
-  context: 8_000,
+  context: 12_000,
   egress: 6_000,
   transport_setup: 4_000,
   navigation: 7_000,
@@ -178,6 +189,8 @@ function emptyArmTiming(): GpcArmTiming {
 
 export async function runGpcExperiment(input: {
   browser: Browser;
+  /** Separate Browserless processes for native, browser-level GPC control. */
+  openBrowserSession?: (profile: GpcProfile) => Promise<{ browser: Browser; configurationVerified: boolean }>;
   url: string;
   targetHost: string;
   proxyCountry: string;
@@ -203,6 +216,8 @@ export async function runGpcExperiment(input: {
     const timing = emptyArmTiming();
     timings[profile === 'off' ? 'control' : 'treatment'] = timing;
     let activeContext: BrowserContext | null = null;
+    let activeBrowser: Browser | null = null;
+    let sessionConfigurationVerified = true;
     let armExpired = false;
     let prepared: Awaited<ReturnType<typeof prepareConsentV2Session>> | null = null;
     const stage = async <T>(name: GpcStage, operation: () => Promise<T>): Promise<T> => {
@@ -245,7 +260,14 @@ export async function runGpcExperiment(input: {
     };
     try {
       const { context, page, geoApplied } = await stage('context', async () => {
-        const opening = input.browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true, serviceWorkers: 'block' });
+        const opened = input.openBrowserSession ? await input.openBrowserSession(profile) : null;
+        sessionConfigurationVerified = opened?.configurationVerified ?? true;
+        const experimentBrowser = opened?.browser || input.browser;
+        if (input.openBrowserSession) {
+          activeBrowser = experimentBrowser;
+          if (armExpired) { void experimentBrowser.close().catch(() => {}); throw new GpcStageTimeout(label + '_CONTEXT_TIMEOUT'); }
+        }
+        const opening = experimentBrowser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true, serviceWorkers: 'block' });
         void opening.then((lateContext) => {
           if (armExpired) void lateContext.close().catch(() => {});
           else activeContext = lateContext;
@@ -258,7 +280,7 @@ export async function runGpcExperiment(input: {
       });
       const egress = await stage('egress', () => input.verifyEgress(context));
       const readTransport = await stage('transport_setup', async () => {
-        const read = await installGpcProfile(context, page, profile, input.targetHost, expected.acceptLanguage);
+        const read = await installGpcProfile(context, page, profile, input.targetHost, expected.acceptLanguage, Boolean(input.openBrowserSession));
         prepared = await prepareConsentV2Session(page);
         return read;
       });
@@ -280,7 +302,8 @@ export async function runGpcExperiment(input: {
       const transport = await stage('transport_verification', readTransport);
       return {
           transport,
-          identity: { same_browser_session: true, browser_configuration_verified: geoApplied.localeApplied && geoApplied.timezoneApplied,
+          identity: { same_browser_session: !input.openBrowserSession, browser_configuration_verified: geoApplied.localeApplied && geoApplied.timezoneApplied && sessionConfigurationVerified,
+            ...(input.openBrowserSession ? { browser_version: activeBrowser!.version().match(/\d+(?:\.\d+){1,3}/)?.[0] } : {}),
             locale: expected.locale, timezone: expected.timezoneId, viewport: '1280x800', usa_egress_verified: egress.country === 'us', egress_fingerprint: egress.fingerprint },
           access: { page_valid: isValidStorefrontStatus(response?.status() ?? null) && observed.host === input.targetHost,
             canonical_host: observed.host, category: observed.access.category, geo_verified: egress.country === 'us', observation_complete: true },
@@ -300,6 +323,15 @@ export async function runGpcExperiment(input: {
         try {
           await Promise.race([
             activeContext.close().catch(() => {}),
+            new Promise<void>((resolve) => { cleanupTimer = setTimeout(resolve, 500); })
+          ]);
+        } finally { if (cleanupTimer) clearTimeout(cleanupTimer); }
+      }
+      if (activeBrowser) {
+        let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            activeBrowser.close().catch(() => {}),
             new Promise<void>((resolve) => { cleanupTimer = setTimeout(resolve, 500); })
           ]);
         } finally { if (cleanupTimer) clearTimeout(cleanupTimer); }
