@@ -48,6 +48,23 @@ describe('Cookiebot adapter fixtures', () => {
     expect(calls).toEqual(['#CybotCookiebotDialogBodyButtonDecline']);
   });
 
+  it('US-COOKIEBOT-01 does not treat a USA sale/share opt-out label as reject all from the decline selector alone', () => {
+    const context = {
+      geo: 'USA' as const,
+      controls: [{
+        id: '#CybotCookiebotDialogBodyButtonDecline',
+        accessible_name: 'Do not sell or share my personal information',
+        visible: true,
+        enabled: true,
+        actionable: true,
+        within_confirmed_cookiebot_surface: true
+      }]
+    };
+
+    expect(cookiebotActionInventory(context).actions.find((action) => action.action === 'reject_all'))
+      .toMatchObject({ availability: 'not_present' });
+  });
+
   it('CB-03 retains Cookiebot decline events as supporting, not final verified, evidence', () => {
     const context = { provider_events: ['CookiebotOnDecline'] };
 

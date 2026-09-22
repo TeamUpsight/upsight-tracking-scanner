@@ -1323,6 +1323,7 @@ export async function runStorefrontAudit(
     evidence.consent.accept_action_available = has('accept_all');
     evidence.consent.reject_action_available = has('reject_all') || has('only_necessary');
     evidence.consent.preferences_action_available = has('open_preferences');
+    evidence.consent.us_privacy = merged.us_privacy;
     evidence.consent.actions_rollout_enabled = !telemetry.observation_only;
     return merged;
   };
@@ -2288,7 +2289,7 @@ export async function runStorefrontAudit(
           await wait(HOMEPAGE_OBSERVATION_MS, authoritativeHomepagePage);
           const captureStartedAt = Date.now();
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
-          const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic');
+          const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic', geo);
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
           sharedConsentObservation = observed;
           sharedConsentObservationStatus = 'completed';

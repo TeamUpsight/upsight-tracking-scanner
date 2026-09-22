@@ -301,6 +301,8 @@ export interface EvidenceBundle {
     resolved_provider_evidence?: string[];
     technical_blocker_reason?: string;
     pre_choice_measurement?: false | 'full_measurement' | 'limited_measurement' | 'unknown';
+    /** Parallel descriptive US privacy evidence; never an executable Consent action. */
+    us_privacy?: import('./scanner/consent/domain-types').USPrivacyObservation | null;
   };
   product: {
     executed: boolean;

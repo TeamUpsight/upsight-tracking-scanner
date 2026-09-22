@@ -20,6 +20,8 @@ import {
   type PersistenceResult,
   type VerificationResult
 } from './domain-types';
+import { semanticActionForConsentLabel } from './generic-consent-detector';
+import { classifyUSPrivacyLabel } from './us-privacy';
 
 export const COOKIEBOT_STANDARD_ROOT = '#CybotCookiebotDialog';
 export const COOKIEBOT_STANDARD_CONTROLS = {
@@ -46,6 +48,7 @@ export interface CookiebotRuntimeState {
 
 export interface CookiebotControlObservation {
   id: CookiebotControlId;
+  accessible_name?: string;
   visible: boolean;
   enabled: boolean;
   actionable: boolean;
@@ -68,6 +71,7 @@ export interface CookiebotCookieDescriptor {
 
 /** Input is transient browser evidence; adapter outputs omit cookie values and cbid identifiers. */
 export interface CookiebotAdapterContext {
+  geo?: 'USA' | 'EU' | 'UK';
   window_globals?: readonly string[];
   asset_urls?: readonly string[];
   script_ids?: readonly string[];
@@ -129,8 +133,20 @@ function semanticControl(context: CookiebotAdapterContext, action: CookiebotSema
   return context.controls?.find((control) => control.semantic_action === action && isActionable(control));
 }
 
-function anyControl(context: CookiebotAdapterContext, ids: readonly CookiebotControlId[], action?: CookiebotSemanticAction) {
-  const standard = ids.map((id) => standardControl(context, id)).find((control) => isActionable(control));
+function validStandardCookieAction(
+  context: CookiebotAdapterContext,
+  control: CookiebotControlObservation | undefined,
+  expected: 'accept_all' | 'reject_all' | 'only_necessary' | 'open_preferences'
+) {
+  if (!isActionable(control)) return false;
+  if (context.geo !== 'USA') return true;
+  const label = control?.accessible_name || '';
+  if (!label || classifyUSPrivacyLabel(label)) return false;
+  return semanticActionForConsentLabel(label) === expected;
+}
+
+function anyControl(context: CookiebotAdapterContext, ids: readonly CookiebotControlId[], action?: CookiebotSemanticAction, expected?: 'accept_all' | 'reject_all' | 'only_necessary' | 'open_preferences') {
+  const standard = ids.map((id) => standardControl(context, id)).find((control) => expected ? validStandardCookieAction(context, control, expected) : isActionable(control));
   return standard || (action ? semanticControl(context, action) : undefined);
 }
 
@@ -239,10 +255,12 @@ export function cookiebotConsentState(context: CookiebotAdapterContext): Consent
 }
 
 export function cookiebotActionInventory(context: CookiebotAdapterContext): CookiebotActionInventory {
-  const decline = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.decline, COOKIEBOT_STANDARD_CONTROLS.level_decline_all], 'decline_all') || semanticControl(context, 'reject_all');
-  const onlyNecessary = semanticControl(context, 'only_necessary');
-  const preferences = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.preferences], 'open_preferences');
-  const accept = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.accept], 'accept_all');
+  const decline = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.decline, COOKIEBOT_STANDARD_CONTROLS.level_decline_all], 'decline_all', 'reject_all') || semanticControl(context, 'reject_all');
+  const onlyNecessary = context.geo === 'USA'
+    ? anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.decline, COOKIEBOT_STANDARD_CONTROLS.level_decline_all], 'only_necessary', 'only_necessary')
+    : semanticControl(context, 'only_necessary');
+  const preferences = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.preferences], 'open_preferences', 'open_preferences');
+  const accept = anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.accept], 'accept_all', 'accept_all');
   const save = semanticControl(context, 'save_preferences');
   const categoryControls = (context.controls || []).filter((control) =>
     control.semantic_action === 'set_category' && control.semantic_category && isActionable(control)
@@ -314,9 +332,9 @@ async function invokeCookiebotControl(
 }
 
 function actionControl(context: CookiebotAdapterContext, action: 'accept' | 'reject' | 'preferences' | 'save') {
-  if (action === 'accept') return anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.accept]);
-  if (action === 'reject') return anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.decline, COOKIEBOT_STANDARD_CONTROLS.level_decline_all], 'decline_all');
-  if (action === 'preferences') return anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.preferences], 'open_preferences');
+  if (action === 'accept') return anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.accept], 'accept_all', 'accept_all');
+  if (action === 'reject') return anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.decline, COOKIEBOT_STANDARD_CONTROLS.level_decline_all], 'decline_all', 'reject_all') || semanticControl(context, 'reject_all');
+  if (action === 'preferences') return anyControl(context, [COOKIEBOT_STANDARD_CONTROLS.preferences], 'open_preferences', 'open_preferences');
   return semanticControl(context, 'save_preferences');
 }
 

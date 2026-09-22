@@ -1232,7 +1232,7 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
       server_side_status: 'not_detected', ss_collection_type: 'third_party', trace_steps: '[]', evidence_bundle: replayed.evidence_bundle
     });
     expect(Object.keys(files)).toEqual(expect.arrayContaining([
-      'audit-result.json', 'trace.jsonl', 'evidence.json', 'network-summary.json', 'cmp-evidence.json',
+      'audit-result.json', 'trace.jsonl', 'evidence.json', 'network-summary.json', 'cmp-evidence.json', 'us-privacy.json',
       'product-evidence.json', 'normalized-evidence.json', 'quality-summary.json', 'access-summary.json', 'proxy-attempt-summary.json',
       'build-metadata.json', 'screenshots/home_page.jpg'
     ]));
@@ -1621,6 +1621,42 @@ describe('decision hardening regression pack', () => {
   it('treats denied/cookieless Consent Mode traffic as limited, not a prior-consent violation', () => {
     expect(resolveConsentStatus({ executed: true, page_valid: true, geo: 'EU', cmp_provider: 'OneTrust', tracking_before_interaction: 'limited_measurement', rejection_attempted: false, rejection_verified: false, post_reject_observation_completed: false, tracking_after_verified_rejection: false }).status)
       .not.toBe('prior_consent_violation');
+  });
+
+  it('WP12A-USA-STATUS-01 does not apply EU/UK prior-consent gating to a USA opt-out context', () => {
+    const decision = resolveConsentStatus({
+      executed: true,
+      page_valid: true,
+      geo: 'USA',
+      cmp_provider: 'Cookiebot',
+      tracking_before_interaction: 'full_measurement',
+      rejection_attempted: false,
+      rejection_verified: false,
+      post_reject_observation_completed: false,
+      tracking_after_verified_rejection: false
+    });
+
+    expect(decision).toMatchObject({ status: 'inconclusive', reason_code: 'CMP_BEHAVIOR_NOT_VERIFIED' });
+    expect(decision.status).not.toBe('prior_consent_violation');
+  });
+
+  it('WP12A-USA-STATUS-02 preserves US privacy evidence through canonical replay without a prior-consent verdict', () => {
+    const evidence = baseEvidence('usa-opt-out.example');
+    evidence.selected_modules = ['consent'];
+    evidence.page.valid = true;
+    evidence.consent.executed = true;
+    evidence.consent.resolved_provider = 'Cookiebot';
+    evidence.consent.pre_choice_measurement = 'full_measurement';
+    evidence.consent.us_privacy = {
+      observed: true,
+      jurisdiction: { requested_geo: 'USA', state_verified: null, framework_declared_sections: [7, 8] },
+      choices: [{ choice: 'opt_out', rights: ['sale', 'sharing'], availability: 'direct', evidence: ['semantic_us_sale_sharing_opt_out'], accessible_name: 'Do Not Sell or Share My Personal Information', source: 'provider_control', provider: 'cookiebot' }],
+      gpc: { browser_signal: 'unavailable', signal_evidence: 'gpc_signal_unavailable', gpc_acknowledgement_observed: null, gpp_present: true, gpp_applicable_sections: [7, 8] }
+    };
+
+    const replayed = replayEvidence(evidence);
+    expect(replayed.consent_status).not.toBe('prior_consent_violation');
+    expect(replayed.evidence_bundle?.consent.us_privacy).toEqual(evidence.consent.us_privacy);
   });
 
   it('Server absence is inconclusive when request capture is incomplete', () => {

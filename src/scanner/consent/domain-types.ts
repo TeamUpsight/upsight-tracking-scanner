@@ -59,6 +59,50 @@ export type ConsentActionType =
   | 'save_preferences'
   | 'close';
 
+/** US privacy rights are descriptive facts, never executable cookie actions. */
+export type USPrivacyRight =
+  | 'sale'
+  | 'sharing'
+  | 'targeted_advertising'
+  | 'profiling'
+  | 'sensitive_data_use';
+
+export type USPrivacyChoiceType = 'opt_out' | 'limit' | 'opt_in' | 'manage';
+
+export type USPrivacyChoiceAvailability = 'direct' | 'preferences_only' | 'unknown';
+
+export type GpcBrowserSignal = 'present' | 'absent' | 'unavailable';
+
+export interface USPrivacyChoice {
+  choice: USPrivacyChoiceType;
+  rights: USPrivacyRight[];
+  availability: USPrivacyChoiceAvailability;
+  evidence: string[];
+  /** Canonical label from the bounded lexicon, never arbitrary page text. */
+  accessible_name: string;
+  source: 'provider_control' | 'confirmed_privacy_surface';
+  provider: string | null;
+}
+
+export interface USPrivacyObservation {
+  observed: boolean;
+  jurisdiction: {
+    requested_geo: 'USA';
+    /** WP12A does not independently verify a US state. */
+    state_verified: null;
+    /** Framework-declared context only; not proof of physical location. */
+    framework_declared_sections: number[];
+  };
+  choices: USPrivacyChoice[];
+  gpc: {
+    browser_signal: GpcBrowserSignal;
+    signal_evidence: 'gpc_signal_present' | 'gpc_signal_absent' | 'gpc_signal_unavailable';
+    gpc_acknowledgement_observed: boolean | null;
+    gpp_present: boolean;
+    gpp_applicable_sections: number[];
+  };
+}
+
 export type ActionAvailability =
   | 'direct'
   | 'preferences_only'
@@ -284,6 +328,8 @@ export interface FinalConsentAuditResult {
   persistence: PersistenceResult;
   frameworks: FrameworkState;
   google_consent_mode: GoogleConsentModeState;
+  /** Parallel US privacy semantics; intentionally outside available_actions. */
+  us_privacy?: USPrivacyObservation | null;
   storage_changes: StorageChange[];
   network_signals: NetworkSignal[];
   reason_codes: ConsentAuditCode[];

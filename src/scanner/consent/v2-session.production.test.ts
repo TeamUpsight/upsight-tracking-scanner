@@ -113,6 +113,90 @@ async function auditSourcepoint(preferences = false, contradictory = false) {
 }
 
 describe('Consent V2 production session wiring', () => {
+  const usaInput: ConsentV2SessionInput = { ...input, geo: 'USA' };
+
+  it('WP12A-US-01 classifies an Issuu-style Cookiebot control as sale/share opt-out without inventing reject all', async () => {
+    const result = await audit(`<script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script>
+      <script src="https://consent.cookiebot.com/uc.js"></script>
+      <div id="CybotCookiebotDialog" role="dialog" style="position:fixed;width:420px;height:180px">
+        Privacy choices. Global Privacy Control is honored when present.
+        <button id="CybotCookiebotDialogBodyButtonAccept">OK</button>
+        <button id="CybotCookiebotDialogBodyButtonDecline">Do not sell or share my personal information</button>
+      </div>`, usaInput);
+
+    expect(result.telemetry).toMatchObject({ provider: 'cookiebot', banner_visibility: 'visible' });
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions.find((action) => action.action === 'reject_all')).toMatchObject({ availability: 'not_present' });
+    expect(result.result.available_actions.find((action) => action.action === 'accept_all')).toMatchObject({ availability: 'not_present' });
+    expect(result.result.us_privacy).toMatchObject({
+      observed: true,
+      choices: [expect.objectContaining({ choice: 'opt_out', rights: ['sale', 'sharing'], availability: 'direct', source: 'provider_control', provider: 'cookiebot' })],
+      gpc: { gpc_acknowledgement_observed: true }
+    });
+  });
+
+  it('WP12A-EU-02 preserves Cookiebot accept-all and only-necessary semantics in the EU', async () => {
+    const result = await audit(`<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script>
+      <div id="CybotCookiebotDialog" role="dialog" style="position:fixed;width:360px;height:160px">Cookie preferences
+        <button id="CybotCookiebotDialogBodyButtonAccept">Alle akzeptieren</button>
+        <button id="CybotCookiebotDialogBodyButtonDecline">Nur notwendige</button>
+      </div>`);
+
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
+      expect.objectContaining({ action: 'only_necessary', availability: 'direct' })
+    ]));
+    expect(result.result.us_privacy).toBeNull();
+  });
+
+  it('WP12A-US-03 preserves an explicit USA cookie reject without inventing privacy rights', async () => {
+    const result = await audit(`<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script>
+      <div id="CybotCookiebotDialog" role="dialog" style="position:fixed;width:360px;height:140px">Cookie preferences
+        <button id="CybotCookiebotDialogBodyButtonDecline">Reject all</button>
+      </div>`, usaInput);
+
+    expect(result.result.available_actions.find((action) => action.action === 'reject_all')).toMatchObject({ availability: 'direct' });
+    expect(result.result.us_privacy?.choices).toEqual([]);
+  });
+
+  it.each([
+    ['Your Privacy Choices', 'manage', []],
+    ['Opt out of targeted advertising', 'opt_out', ['targeted_advertising']],
+    ['Limit the Use of My Sensitive Personal Information', 'limit', ['sensitive_data_use']]
+  ])('WP12A-US-04 through WP12A-US-06 classify %s only in the US privacy model', async (label, choice, rights) => {
+    const result = await audit(`<div role="dialog" class="privacy-choices" style="position:fixed;width:420px;height:140px">Privacy choices
+      <button>${label}</button></div>`, usaInput);
+
+    expect(result.result.us_privacy?.choices).toEqual([
+      expect.objectContaining({ choice, rights, availability: 'direct' })
+    ]);
+    expect(result.result.available_actions.find((action) => action.action === 'reject_all')?.availability).not.toBe('direct');
+  });
+
+  it('WP12A-GPC-07 passively reports present, absent, and unavailable browser states without a compliance claim', async () => {
+    const present = await audit(`<script>Object.defineProperty(navigator,'globalPrivacyControl',{value:true,configurable:true});</script>
+      <div role="dialog" class="privacy-choices" style="position:fixed;width:320px;height:100px">Privacy choices<button>Your Privacy Choices</button></div>`, usaInput);
+    const absent = await audit(`<script>Object.defineProperty(navigator,'globalPrivacyControl',{value:false,configurable:true});</script>
+      <main>Storefront</main>`, usaInput);
+    const unavailable = await audit('<main>Storefront</main>', usaInput);
+
+    expect(present.result.us_privacy?.gpc).toMatchObject({ browser_signal: 'present', signal_evidence: 'gpc_signal_present' });
+    expect(absent.result.us_privacy?.gpc).toMatchObject({ browser_signal: 'absent', signal_evidence: 'gpc_signal_absent' });
+    expect(unavailable.result.us_privacy?.gpc).toMatchObject({ browser_signal: 'unavailable', signal_evidence: 'gpc_signal_unavailable' });
+    expect(JSON.stringify(present.result.us_privacy)).not.toMatch(/honored|compliant/i);
+  });
+
+  it('WP12A-GPP-08 projects applicable section IDs without verifying a physical state', async () => {
+    const result = await audit(`<script>
+      window.__gpp=(command,callback)=>{if(command==='ping')callback({gppVersion:'1.1',cmpStatus:'loaded',cmpDisplayStatus:'visible',signalStatus:'ready',supportedAPIs:['7:usnat','8:usca'],sectionList:[7,8],applicableSections:[7,8]},true);};
+      </script><main>Storefront</main>`, usaInput);
+
+    expect(result.result.us_privacy).toMatchObject({
+      jurisdiction: { state_verified: null, framework_declared_sections: [7, 8] },
+      gpc: { gpp_present: true, gpp_applicable_sections: [7, 8] }
+    });
+  });
+
   it('WP11.4-SEMANTIC-LOCATOR-01 resolves Cookiebot controls inside an accessible child frame only after provider-first fallback', async () => {
     const result = await audit('<script src="https://consent.cookiebot.com/uc.js"></script><section role="dialog" class="cookie-consent" style="position:fixed;width:320px;height:120px">Cookie preferences<iframe srcdoc="&lt;section role=\'dialog\' class=\'cookie-consent\'&gt;&lt;input type=\'button\' value=\'NUR NOTWENDIGE\'&gt;&lt;button aria-label=\'ALLE AKZEPTIEREN\'&gt;&lt;span aria-hidden=\'true\'&gt;accept&lt;/span&gt;&lt;/button&gt;&lt;/section&gt;"></iframe></section>', { ...input, diagnostic: true });
     expect(result.telemetry).toMatchObject({ provider: 'cookiebot', provider_confidence: 'high' });

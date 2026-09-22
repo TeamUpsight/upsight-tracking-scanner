@@ -3,6 +3,7 @@ import { mergeSharedConsentObservation, type SharedConsentObservation } from './
 
 const shared = (): SharedConsentObservation => ({
   source: 'shared', provider: 'onetrust', provider_conflict: false,
+  us_privacy: null,
   banner: { surface: 'banner', visibility: 'visible', evidence: ['shared_visible'], reason_codes: [] },
   actions: [
     { action: 'accept_all', availability: 'direct', category: null, evidence: ['shared_accept'], reason_codes: [] },
