@@ -49,11 +49,27 @@ function sampleBucket(key: string) {
   return hash % 100;
 }
 
+/**
+ * Cohort assignment follows the storefront hostname, not the route used for
+ * this audit. Callers should prefer the submitted normalized domain so a
+ * redirect to another host cannot move the same audit target between cohorts.
+ */
+export function normalizeConsentV2RolloutKey(key: string) {
+  const trimmed = key.trim();
+  try {
+    const url = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
 /** Stable sampling keeps a domain consistently in or out of the action cohort. */
 export function consentV2ActionsEnabledFor(
   controls: ConsentV2RolloutControls,
   provider: ConsentV2RolloutProvider,
   stableKey: string
 ) {
-  return controls.enabled && controls.providers[provider].actions_enabled && sampleBucket(stableKey) < controls.action_sample_percent;
+  return controls.enabled && controls.providers[provider].actions_enabled &&
+    sampleBucket(normalizeConsentV2RolloutKey(stableKey)) < controls.action_sample_percent;
 }

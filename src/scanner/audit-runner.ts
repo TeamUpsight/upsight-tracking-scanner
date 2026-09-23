@@ -3226,7 +3226,8 @@ export async function runStorefrontAudit(
           consentV2 = await withinPhaseBudget('consent_pdp_reject', Math.min(available, 15_000), () => runConsentV2Session(consentHomepage!, {
             geo, geo_verified: freshConsent.geo.verified,
             page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
-            timings: consentTimings, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic'
+            timings: consentTimings, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic',
+            rollout_key: normalizedDomain
           }, consentCapture!));
           consentV2Ran = true;
           evidence.runtime.consent_v2 = consentV2.telemetry;

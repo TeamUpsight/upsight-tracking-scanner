@@ -998,6 +998,17 @@ describe('Consent V2 production session wiring', () => {
     expect(changed.telemetry.unknown_cmp_fingerprint).not.toBe(first.telemetry.unknown_cmp_fingerprint);
   });
 
+  it('keeps generic/custom mechanisms observation-only even when their provider flag is explicitly enabled', async () => {
+    const fixture = '<script src="https://cmp-unknown.example/consent.js"></script><div role="dialog">We use cookies.<button>Accept all</button><button>Reject all</button></div>';
+    const result = await audit(fixture, {
+      ...input,
+      rollout: { ...actionRollout, providers: { ...actionRollout.providers, generic: { detection_enabled: true, actions_enabled: true } } }
+    });
+    expect(result.telemetry.provider).toBe('generic');
+    expect(result.telemetry.observation_only).toBe(true);
+    expect(result.result.interactions).toEqual([]);
+  });
+
   it('TELEM-CONFLICT-01 records provider conflict independently from final provider attribution', async () => {
     const result = await audit(`<script>window.OneTrust={RejectAll(){}};window.CookieYes={};window.performBannerAction=()=>{};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><script src="https://cdn-cookieyes.com/client_data/test/script.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div><div class="cky-consent-container" style="display:none"></div>`);
     expect(result.telemetry).toMatchObject({ provider: 'onetrust', provider_conflict: true });
