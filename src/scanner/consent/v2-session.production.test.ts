@@ -81,6 +81,34 @@ async function auditNavigation(html: string, accessBlocked = false, sessionInput
   }
 }
 
+async function auditQueuedTcfStubTransition(populateAggregates: boolean) {
+  const consentMap = populateAggregates ? '{1:true,2:true}' : '{}';
+  const rejectMap = populateAggregates ? '{1:false,2:false}' : '{}';
+  const html = `<script>
+    const queued=[]; let listener=null; let rejected=false;
+    const event=()=>({listenerId:9,cmpStatus:'loaded',eventStatus:rejected?'useractioncomplete':'cmpuishown',purpose:{consents:rejected?${rejectMap}:${consentMap}},vendor:{consents:rejected?${rejectMap}:${consentMap}}});
+    window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:false,cmpStatus:'stub',apiVersion:'2.2',gdprApplies:true},true);else if(command==='addEventListener')queued.push(callback);};
+    window.OneTrust={RejectAll(){}};
+    window.rejectConsent=()=>{rejected=true;listener?.(event(),true);};
+    setTimeout(()=>{const pending=queued.splice(0);window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:true,cmpStatus:'loaded',apiVersion:'2.2',gdprApplies:true},true);else if(command==='addEventListener'){listener=callback;callback(event(),true);}};pending.forEach(callback=>{listener=callback;callback(event(),true);});},180);
+  </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk" style="display:block;width:320px;height:120px"><button id="onetrust-reject-all-handler" onclick="rejectConsent()">Reject all</button></div>`;
+  const server = createServer((_request, response) => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); response.end(html); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('TCF stale-ping fixture server did not expose a TCP port.');
+  const page = await browser.newPage();
+  try {
+    await installDeterministicExternalFixtureRouting(page);
+    const capture = await prepareConsentV2Session(page);
+    await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'domcontentloaded' });
+    const preflightFramework = await observeConsentFrameworksInPage(page);
+    expect(preflightFramework.tcf).toMatchObject({ lifecycle: 'ready', ping: { cmp_loaded: false, cmp_status: 'stub' }, lifecycle_reconciled: true, listener_registered: true, latest_event: { cmp_status: 'loaded', event_status: 'cmpuishown' } });
+    return await runConsentV2Session(page, { ...input, rollout: actionRollout }, capture);
+  } finally {
+    await page.close(); await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
 async function auditSourcepoint(preferences = false, contradictory = false) {
   const iframe = createServer((_request, response) => response.end(`<!doctype html>${preferences
     ? '<button class="sp_choice_type_12" onclick="document.body.innerHTML=\'<button class=&quot;sp_choice_type_REJECT_ALL&quot; onclick=&quot;parent.postMessage(\\\'sourcepoint-reject\\\', \\\'*\\\')&quot;>Reject all</button>\'">Preferences</button>'
@@ -384,6 +412,39 @@ describe('Consent V2 production session wiring', () => {
     } finally { await page.close(); }
   });
 
+  it('FW-ASYNC-TCF-03 reconciles an early stub ping after queued registration reports a loaded CMP', async () => {
+    const result = await auditQueuedTcfStubTransition(true);
+    expect(result.telemetry.tcf_capability_diagnostics).toMatchObject({ lifecycle: 'ready', cmp_loaded: false, ping_state: 'stub', latest_semantic_state: 'loaded', lifecycle_reconciled: true, aggregate_availability: 'populated', event_status: 'cmpuishown', listener_registered: true, listener_event_observed: true, purpose_consents: { known: true, total_count: 2 }, vendor_consents: { known: true, total_count: 2 } });
+    expect(result.telemetry).toMatchObject({ verification_capability: 'available', action_execution_eligible: true, activation_occurred: true, verification_strong_families: ['framework_tcf'] });
+    expect(result.result.interactions[0]).toMatchObject({ outcome: 'executed' });
+    // TCF evidence alone remains below the independent-family requirement.
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+  }, 20_000);
+
+  it('FW-ASYNC-TCF-05 retains a later populated listener callback after an incomplete initial callback', async () => {
+    const page = await browser.newPage();
+    try {
+      const capture = await prepareConsentV2Session(page);
+      await page.goto(`data:text/html,<script>
+        window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:true,cmpStatus:'loaded',apiVersion:'2.2'},true);if(command==='addEventListener'){callback({listenerId:5,cmpStatus:'loaded',eventStatus:'cmpuishown',purpose:{consents:{}},vendor:{consents:{}}},true);setTimeout(()=>callback({listenerId:5,cmpStatus:'loaded',eventStatus:'cmpuishown',purpose:{consents:{1:false}},vendor:{consents:{2:false}}},true),100);}};
+      </script>`);
+      await page.waitForFunction(() => {
+        const tcf = (window as any).__upsightConsentFrameworkObservations?.tcf;
+        return tcf?.event_count >= 2 && tcf?.latest_event?.purpose?.consents?.total_count === 1;
+      }, null, { timeout: 5_000 });
+      const observed = await observeConsentFrameworksInPage(page);
+      expect(observed.tcf).toMatchObject({ listener_registered: true, listener_event_observed: true, event_count: 2, latest_event: { event_status: 'cmpuishown', purpose_consents: { known: true, total_count: 1, denied_count: 1 }, vendor_consents: { known: true, total_count: 1, denied_count: 1 } } });
+      capture.dispose();
+    } finally { await page.close(); }
+  }, 10_000);
+
+  it('FW-ASYNC-TCF-04 reconciles a loaded CMP but keeps empty aggregates non-capable', async () => {
+    const result = await auditQueuedTcfStubTransition(false);
+    expect(result.telemetry.tcf_capability_diagnostics).toMatchObject({ lifecycle: 'ready', cmp_loaded: false, ping_state: 'stub', latest_semantic_state: 'loaded', lifecycle_reconciled: true, aggregate_availability: 'empty', event_status: 'cmpuishown', listener_registered: true, listener_event_observed: true, purpose_consents: { known: true, total_count: 0 }, vendor_consents: { known: true, total_count: 0 } });
+    expect(result.telemetry).toMatchObject({ verification_capability: 'unavailable', action_execution_eligible: false, activation_occurred: false });
+    expect(result.result.interactions).toEqual([]);
+  }, 20_000);
+
   it('FW-ASYNC-GPP-01 and USP-E2E-01 preserve asynchronous GPP and legacy USP independently', async () => {
     const result = await auditNavigation(`<script>
       window.__uspapi=()=>{};
@@ -489,7 +550,7 @@ describe('Consent V2 production session wiring', () => {
       function reject(){rejected=true;listener?.(state(),true);window.dispatchEvent(new Event('OTConsentApplied'));}
     </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
     expect(result.telemetry).toMatchObject({ rollout_gate_eligible: true, verification_capability: 'available', action_execution_eligible: true, activation_occurred: true });
-    expect(result.telemetry.tcf_capability_diagnostics).toMatchObject({ lifecycle: 'loading', event_status: 'cmpuishown', listener_registered: true, listener_event_observed: true, purpose_consents: { known: true, total_count: 2 }, vendor_consents: { known: true, total_count: 2 } });
+    expect(result.telemetry.tcf_capability_diagnostics).toMatchObject({ lifecycle: 'ready', event_status: 'cmpuishown', listener_registered: true, listener_event_observed: true, purpose_consents: { known: true, total_count: 2 }, vendor_consents: { known: true, total_count: 2 } });
     expect(result.result.rejection_verification.status).toBe('verified');
   }, 20_000);
 
@@ -500,7 +561,7 @@ describe('Consent V2 production session wiring', () => {
     </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
     expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('direct');
     expect(result.result.interactions).toEqual([]);
-    expect(result.telemetry).toMatchObject({ verification_capability: 'inconclusive', action_execution_eligible: false, tcf_capability_diagnostics: { event_status: 'cmpuishown', listener_registered: true } });
+    expect(result.telemetry).toMatchObject({ verification_capability: 'unavailable', action_execution_eligible: false, tcf_capability_diagnostics: { aggregate_availability: 'empty', event_status: 'cmpuishown', listener_registered: true } });
   }, 20_000);
 
   it('VER-OT-07 does not activate when a cmpuishown listener remains registered but no callback arrives', async () => {

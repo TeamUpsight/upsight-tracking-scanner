@@ -113,16 +113,41 @@ describe('Consent framework observers', () => {
     expect(calls.at(-1)).toEqual({ command: 'removeEventListener', parameter: 12 });
   });
 
-  it('keeps cmpuishown as a loading UI state while recording a usable listener callback', () => {
+  it('keeps cmpuishown pre-choice while recognizing a loaded CMP and usable listener callback', () => {
     const { runtime } = tcfFixture({
       ping: { cmpLoaded: null, apiVersion: '2.2', cmpStatus: 'loading' },
       events: [{ listenerId: 8, eventStatus: 'cmpuishown', cmpStatus: 'loaded', purpose: { consents: { 1: false } }, vendor: { consents: { 2: false } } }]
     });
     const state = observeTcfFramework(runtime).state;
     expect(state).toMatchObject({
-      lifecycle: 'loading', listener_registered: true, listener_event_observed: true, event_count: 1,
+      lifecycle: 'ready', listener_registered: true, listener_event_observed: true, event_count: 1,
       latest_event: { event_status: 'cmpuishown', cmp_status: 'loaded', purpose_consents: { known: true, total_count: 1, denied_count: 1 }, vendor_consents: { known: true, total_count: 1, denied_count: 1 } }
     });
+  });
+
+  it('reconciles an initial stub ping only after a successful loaded listener event', () => {
+    const loaded = tcfFixture({
+      ping: { cmpLoaded: false, cmpStatus: 'stub', apiVersion: '2.2' },
+      events: [{ listenerId: 11, cmpStatus: 'loaded', eventStatus: 'cmpuishown', purpose: { consents: { 1: false } }, vendor: { consents: { 2: false } } }]
+    });
+    expect(observeTcfFramework(loaded.runtime).state).toMatchObject({ lifecycle: 'ready', lifecycle_reconciled: true, ping: { cmp_loaded: false }, listener_registered: true, latest_event: { cmp_status: 'loaded', event_status: 'cmpuishown' } });
+
+    const unregistered = tcfFixture({
+      ping: { cmpLoaded: false, cmpStatus: 'stub', apiVersion: '2.2' },
+      events: [{ cmpStatus: 'loaded', eventStatus: 'cmpuishown', purpose: { consents: { 1: false } }, vendor: { consents: { 2: false } } }]
+    });
+    expect(observeTcfFramework(unregistered.runtime).state).toMatchObject({ lifecycle: 'stub_present', lifecycle_reconciled: false, listener_registered: false });
+  });
+
+  it('keeps a later TCF error authoritative after a loaded listener event', () => {
+    const { runtime } = tcfFixture({
+      ping: { cmpLoaded: false, cmpStatus: 'stub', apiVersion: '2.2' },
+      events: [
+        { listenerId: 12, cmpStatus: 'loaded', eventStatus: 'cmpuishown', purpose: { consents: { 1: false } }, vendor: { consents: { 2: false } } },
+        { listenerId: 12, cmpStatus: 'error', eventStatus: 'unknown' }
+      ]
+    });
+    expect(observeTcfFramework(runtime).state).toMatchObject({ lifecycle: 'error', lifecycle_reconciled: true, latest_event: { cmp_status: 'error', event_status: 'unknown' } });
   });
 
   it('records TCF listener registration failure as an error', () => {
@@ -275,6 +300,20 @@ describe('Consent framework observers', () => {
     );
     expect(merged.gpp.ping?.signal_status).toBe('ready');
     expect(merged.gpp.structure?.sections[0]).toMatchObject({ section_id: 7, cmp_declared_applicable: true, parsed_available: true });
+  });
+
+  it('preserves a loaded TCF listener lifecycle across a later stub-only sample and accepts a later error', () => {
+    const loaded = observeTcfFramework(tcfFixture({
+      ping: { cmpLoaded: false, cmpStatus: 'stub', apiVersion: '2.2' },
+      events: [{ listenerId: 2, cmpStatus: 'loaded', eventStatus: 'cmpuishown', purpose: { consents: { 1: false } }, vendor: { consents: { 2: false } } }]
+    }).runtime).state;
+    const stub = observeTcfFramework(tcfFixture({ ping: { cmpLoaded: false, cmpStatus: 'stub', apiVersion: '2.2' } }).runtime).state;
+    const empty = { tcf: observeTcfFramework({}).state, gpp: observeGppFramework({}).state, usp: observeUspFramework({}) };
+    const retained = mergeConsentFrameworkObservations({ ...empty, tcf: loaded }, { ...empty, tcf: stub });
+    expect(retained.tcf).toMatchObject({ lifecycle: 'ready', ping: { cmp_loaded: false }, latest_event: { cmp_status: 'loaded' }, lifecycle_reconciled: true });
+
+    const errored = observeTcfFramework(tcfFixture({ ping: { cmpLoaded: false, cmpStatus: 'error', apiVersion: '2.2' } }).runtime).state;
+    expect(mergeConsentFrameworkObservations({ ...empty, tcf: loaded }, { ...empty, tcf: errored }).tcf.lifecycle).toBe('error');
   });
 
   it('treats USP as legacy read-only evidence without converting it into GPP', () => {

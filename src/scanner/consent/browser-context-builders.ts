@@ -754,18 +754,23 @@ export async function observeConsentFrameworksInPage(page: Page): Promise<Consen
   // The bridge is already observing for the page lifetime. Only a framework
   // that is present but has not replied gets this short bounded chance to
   // deliver its delayed ping/listener callback.
-  const awaitingCallback = (captured.tcf.present && !captured.tcf.latest_event) || (captured.gpp.present && !captured.gpp.ping && !captured.gpp.latest_event);
+  const awaitingCallback = (captured.tcf.present && !captured.tcf.listener_event_observed && !captured.tcf.listener_registration_failed) || (captured.gpp.present && !captured.gpp.ping && !captured.gpp.latest_event);
   if (awaitingCallback) {
     await page.waitForFunction((frameworkKey) => {
       const state = (window as any)[frameworkKey];
-      return Boolean(state && ((state.tcf?.ping || state.tcf?.latest_event) || (state.gpp?.ping || state.gpp?.latest_event)));
+      if (!state) return false;
+      const tcfPresent = state.tcf?.present === true || typeof (window as any).__tcfapi === 'function';
+      const gppPresent = state.gpp?.present === true || typeof (window as any).__gpp === 'function';
+      const tcfDone = !tcfPresent || state.tcf?.listener_event_observed === true || state.tcf?.listener_registration_failed === true;
+      const gppDone = !gppPresent || Boolean(state.gpp?.ping || state.gpp?.latest_event);
+      return tcfDone && gppDone;
     }, FRAMEWORK_OBSERVATIONS_KEY, { timeout: 350 }).catch(() => undefined);
     captured = await readBridge();
   }
   const runtime = {
     __tcfapi: captured.tcf.present ? ((command: string, _version: number, callback: (payload: unknown, success?: boolean) => void) => {
       if (command === 'ping' && captured.tcf.ping) callback(captured.tcf.ping, true);
-      if (command === 'addEventListener' && captured.tcf.latest_event) callback(captured.tcf.latest_event, true);
+      if (command === 'addEventListener' && captured.tcf.latest_event) callback({ ...captured.tcf.latest_event, ...(captured.tcf.listener_registered ? { listenerId: 1 } : {}) }, true);
     }) : undefined,
     __gpp: captured.gpp.present ? ((command: string, callback: (payload: unknown, success?: boolean) => void) => {
       if (command === 'ping') callback(captured.gpp.ping, Boolean(captured.gpp.ping));

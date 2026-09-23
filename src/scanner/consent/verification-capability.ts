@@ -39,9 +39,9 @@ function tcfChannelIsAvailable(input: ConsentFrameworkObservations['tcf']) {
   ));
   const hasOperationalListener = input.listener_registered === true && input.listener_event_observed === true && input.listener_registration_failed !== true;
   const errored = input.lifecycle === 'error' || input.ping?.cmp_status === 'error' || event?.cmp_status === 'error' || input.listener_registration_failed === true;
-  // `cmpLoaded:false` explicitly means the stub is still serving. A valid
-  // event cannot overrule that contradictory ping state for action preflight.
-  const stubContradiction = input.ping?.cmp_loaded === false;
+  // `cmpLoaded:false` remains authoritative until a later successful listener
+  // callback with a listener id and cmpStatus=loaded reconciles that early ping.
+  const stubContradiction = input.ping?.cmp_loaded === false && input.lifecycle_reconciled !== true;
   return { available: input.present && !errored && !stubContradiction && hasOperationalListener && recognizedEvent && hasAggregate, errored, stubContradiction };
 }
 

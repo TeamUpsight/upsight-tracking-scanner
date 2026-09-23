@@ -481,6 +481,10 @@ export interface EvidenceBundle {
         lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error';
         cmp_loaded: boolean | null;
         cmp_status: 'stub' | 'loading' | 'loaded' | 'error' | null;
+        ping_state: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown';
+        latest_semantic_state: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown';
+        lifecycle_reconciled: boolean;
+        aggregate_availability: 'populated' | 'empty' | 'incomplete' | 'unknown';
         event_status: 'cmpuishown' | 'tcloaded' | 'useractioncomplete' | 'unknown' | null;
         listener_registered: boolean;
         listener_event_observed: boolean;
@@ -493,6 +497,10 @@ export interface EvidenceBundle {
         lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error';
         cmp_loaded: boolean | null;
         cmp_status: 'stub' | 'loading' | 'loaded' | 'error' | null;
+        ping_state: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown';
+        latest_semantic_state: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown';
+        lifecycle_reconciled: boolean;
+        aggregate_availability: 'populated' | 'empty' | 'incomplete' | 'unknown';
         event_status: 'cmpuishown' | 'tcloaded' | 'useractioncomplete' | 'unknown' | null;
         listener_registered: boolean;
         listener_event_observed: boolean;

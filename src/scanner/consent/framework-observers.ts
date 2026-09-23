@@ -43,6 +43,8 @@ export interface TcfFrameworkObservation {
   /** True when at least one successful listener callback supplied TCData. */
   listener_event_observed?: boolean;
   listener_registration_failed?: boolean;
+  /** A later successful loaded TCData listener event superseded the stub ping. */
+  lifecycle_reconciled?: boolean;
   reason_codes: ConsentAuditCode[];
 }
 
@@ -125,16 +127,21 @@ export function mergeConsentFrameworkObservations(
 ): ConsentFrameworkObservations {
   const mergeCodes = (left: ConsentAuditCode[], right: ConsentAuditCode[]) => [...new Set([...left, ...right])];
   const preserveCompletedGpp = earlier.gpp.ping?.signal_status === 'ready' && later.gpp.ping?.signal_status !== 'ready';
+  const tcfEventLoaded = (value: TcfFrameworkObservation) => value.listener_registered === true && value.latest_event?.cmp_status === 'loaded';
+  const laterTcfError = later.tcf.lifecycle === 'error' || later.tcf.ping?.cmp_status === 'error' || later.tcf.latest_event?.cmp_status === 'error';
+  const earlierTcfLoaded = earlier.tcf.lifecycle === 'ready' && earlier.tcf.listener_registered === true && earlier.tcf.latest_event?.cmp_status === 'loaded';
+  const preserveEarlierTcfLoaded = earlierTcfLoaded && !laterTcfError && !tcfEventLoaded(later.tcf) && !later.tcf.listener_event_observed && (later.tcf.lifecycle === 'stub_present' || later.tcf.lifecycle === 'loading' || later.tcf.lifecycle === 'absent');
   return {
     tcf: {
       present: earlier.tcf.present || later.tcf.present,
-      lifecycle: later.tcf.lifecycle === 'absent' ? earlier.tcf.lifecycle : later.tcf.lifecycle,
-      ping: later.tcf.ping || earlier.tcf.ping,
-      latest_event: later.tcf.latest_event || earlier.tcf.latest_event,
+      lifecycle: laterTcfError ? 'error' : preserveEarlierTcfLoaded ? earlier.tcf.lifecycle : later.tcf.lifecycle === 'absent' ? earlier.tcf.lifecycle : later.tcf.lifecycle,
+      ping: preserveEarlierTcfLoaded ? earlier.tcf.ping : later.tcf.ping || earlier.tcf.ping,
+      latest_event: preserveEarlierTcfLoaded ? earlier.tcf.latest_event : later.tcf.latest_event || earlier.tcf.latest_event,
       event_count: earlier.tcf.event_count + later.tcf.event_count,
       listener_registered: earlier.tcf.listener_registered === true || later.tcf.listener_registered === true,
       listener_event_observed: earlier.tcf.listener_event_observed === true || later.tcf.listener_event_observed === true,
       listener_registration_failed: earlier.tcf.listener_registration_failed === true || later.tcf.listener_registration_failed === true,
+      lifecycle_reconciled: earlier.tcf.lifecycle_reconciled === true || later.tcf.lifecycle_reconciled === true,
       reason_codes: mergeCodes(earlier.tcf.reason_codes, later.tcf.reason_codes)
     },
     gpp: {
@@ -532,6 +539,7 @@ export function observeTcfFramework(runtime: FrameworkApiWindow): FrameworkObser
       listener_registered: false,
       listener_event_observed: false,
       listener_registration_failed: false,
+      lifecycle_reconciled: false,
       reason_codes: []
     };
     return { state: absent, stop() {} };
@@ -549,6 +557,7 @@ export function observeTcfFramework(runtime: FrameworkApiWindow): FrameworkObser
     listener_registered: false,
     listener_event_observed: false,
     listener_registration_failed: false,
+    lifecycle_reconciled: false,
     reason_codes: [ConsentAuditCodes.TCF_PRESENT]
   };
   const fail = () => {
@@ -559,7 +568,9 @@ export function observeTcfFramework(runtime: FrameworkApiWindow): FrameworkObser
     api('ping', 2, (payload, success) => {
       if (stopped || success === false) return fail();
       const ping = tcfPingSummary(payload);
-      state = { ...state, ping, lifecycle: tcfLifecycleFromPing(ping) };
+      const loadedListenerEvent = state.listener_registered === true && state.latest_event?.cmp_status === 'loaded';
+      const pingIsError = ping?.cmp_status === 'error';
+      state = { ...state, ping, lifecycle: pingIsError ? 'error' : loadedListenerEvent ? 'ready' : tcfLifecycleFromPing(ping) };
     });
     api('addEventListener', 2, (payload, success) => {
       if (stopped) return;
@@ -574,14 +585,16 @@ export function observeTcfFramework(runtime: FrameworkApiWindow): FrameworkObser
       const event = tcfSemanticSummary(payload);
       if (!event) return;
       const registered = eventListenerId(payload) !== null;
+      const loadedListenerEvent = registered && event.cmp_status === 'loaded';
       const ready = event.event_status === 'tcloaded' || event.event_status === 'useractioncomplete';
       state = {
         ...state,
-        lifecycle: state.lifecycle === 'error' || event.cmp_status === 'error' ? 'error' : ready ? 'ready' : state.lifecycle,
+        lifecycle: state.lifecycle === 'error' || event.cmp_status === 'error' ? 'error' : ready || loadedListenerEvent ? 'ready' : state.lifecycle,
         latest_event: event,
         event_count: state.event_count + 1,
         listener_registered: state.listener_registered || registered,
-        listener_event_observed: true
+        listener_event_observed: true,
+        lifecycle_reconciled: state.lifecycle_reconciled === true || (state.ping?.cmp_loaded === false && loadedListenerEvent)
       };
     });
   } catch {

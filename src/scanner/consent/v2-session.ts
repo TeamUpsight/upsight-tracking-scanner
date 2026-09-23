@@ -495,17 +495,28 @@ async function shopifyOperations(facts: BrowserConsentFacts) {
 function providerMechanism(provider: CmpAdapterProviderId | undefined): MechanismResult[] { return provider ? [{ mechanism: 'cmp', detection: { status: 'verified', evidence: ['adapter_detection'], reason_codes: [ConsentAuditCodes.CMP_DETECTED] }, provider: { attribution: 'identified', confidence: 'high', candidates: [{ provider_name: provider, attribution: 'identified', confidence: 'high', evidence: ['adapter_detection'], reason_codes: [ConsentAuditCodes.CMP_PROVIDER_IDENTIFIED] }], reason_codes: [ConsentAuditCodes.CMP_PROVIDER_IDENTIFIED] }, adapter_maturity: cmpAdapterRegistry.getCapability(provider, 'detection').maturity }] : []; }
 
 function tcfDiagnosticSummary(observation: ConsentFrameworkObservations['tcf']) {
+  const purpose = observation.latest_event?.purpose_consents || { known: false, total_count: 0, granted_count: 0, denied_count: 0 };
+  const vendor = observation.latest_event?.vendor_consents || { known: false, total_count: 0, granted_count: 0, denied_count: 0 };
+  const pingState: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown' = observation.ping?.cmp_status || (observation.ping?.cmp_loaded === true ? 'loaded' : observation.ping?.cmp_loaded === false ? 'stub' : 'unknown');
+  const semanticState: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown' = observation.latest_event?.cmp_status || 'unknown';
+  const aggregateAvailability: 'populated' | 'empty' | 'incomplete' | 'unknown' = (purpose.known && purpose.total_count > 0) || (vendor.known && vendor.total_count > 0) ? 'populated'
+    : purpose.known && vendor.known ? 'empty'
+      : purpose.known || vendor.known ? 'incomplete' : 'unknown';
   return {
     lifecycle: observation.lifecycle,
     cmp_loaded: observation.ping?.cmp_loaded ?? null,
     cmp_status: observation.latest_event?.cmp_status ?? observation.ping?.cmp_status ?? null,
+    ping_state: pingState,
+    latest_semantic_state: semanticState,
+    lifecycle_reconciled: observation.lifecycle_reconciled === true,
+    aggregate_availability: aggregateAvailability,
     event_status: observation.latest_event?.event_status ?? null,
     listener_registered: observation.listener_registered === true,
     listener_event_observed: observation.listener_event_observed === true,
     listener_registration_failed: observation.listener_registration_failed === true,
     event_count: Math.max(0, Math.min(100, observation.event_count)),
-    purpose_consents: { ...(observation.latest_event?.purpose_consents || { known: false, total_count: 0, granted_count: 0, denied_count: 0 }) },
-    vendor_consents: { ...(observation.latest_event?.vendor_consents || { known: false, total_count: 0, granted_count: 0, denied_count: 0 }) }
+    purpose_consents: { ...purpose },
+    vendor_consents: { ...vendor }
   };
 }
 
