@@ -8,11 +8,12 @@ const frameworks = (applicableSections: number[] = []): ConsentFrameworkObservat
     ? {
         present: true,
         lifecycle: 'ready',
-        ping: { gpp_version: '1.1', cmp_status: 'loaded', cmp_display_status: 'visible', signal_status: 'ready', supported_apis: ['7:usnat'], section_list: applicableSections, applicable_sections: applicableSections },
+        ping: { gpp_version: '1.1', cmp_status: 'loaded', cmp_display_status: 'visible', signal_status: 'ready', supported_apis: ['7:usnat'], supported_section_ids: [7], section_list: applicableSections, applicable_sections: applicableSections, parsed_sections_available: false, parsed_section_prefixes: [], supported_apis_valid: true, section_list_valid: true, applicable_sections_valid: true },
+        structure: null,
         event_count: 0,
         reason_codes: []
       }
-    : { present: false, lifecycle: 'absent', ping: null, event_count: 0, reason_codes: [] },
+    : { present: false, lifecycle: 'absent', ping: null, structure: null, event_count: 0, reason_codes: [] },
   usp: { present: false, mode: 'absent', reason_codes: [] }
 });
 

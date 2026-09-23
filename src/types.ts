@@ -193,7 +193,12 @@ export interface EvidenceBundle {
         candidate_samples: Array<{ lookup_class: 'role' | 'link' | 'open_shadow' | 'text'; accessible_name: string; role: 'button' | 'link' | 'input' | 'other'; accepted: boolean; rejection_reason: 'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'unsupported_semantic_action' | null }>;
         nearby_actionable_controls?: Array<{ role: 'button' | 'link' | 'input' | 'other'; accessible_name: string; location: 'main_frame' | 'iframe' | 'shadow_dom'; shadow_depth: number; visible: boolean; enabled: boolean; direct_actionable_target: boolean; consent_scope_corroborated: true }>;
       };
-      frameworks: { tcf: boolean; gpp: boolean; consent_mode: string };
+      frameworks: {
+        tcf: boolean;
+        gpp: boolean;
+        consent_mode: string;
+        gpp_observation?: import('./scanner/consent/framework-observers').GppFrameworkObservation;
+      };
     }>;
     diagnostic_captures: Array<{ capture_id: string; phase: string; context: 'shared' | 'fresh'; screenshot_name: string | null; consent_snapshot_id: string | null; captured_at_ms: number; observation_complete: boolean; observation_completed_at_ms?: number; screenshot_captured_at_ms?: number | null; screenshot_observation_delta_ms?: number | null }>;
     product_rejections: { observed_count: number; truncated: boolean; candidates: Array<{ sanitized_url: string | null; source: string; sources: string[]; stage: string; score: number | null; reason_code: string }> };

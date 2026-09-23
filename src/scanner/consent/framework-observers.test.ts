@@ -4,6 +4,7 @@ import {
   observeGppFramework,
   observeTcfFramework,
   observeUspFramework,
+  mergeConsentFrameworkObservations,
   type FrameworkApiWindow
 } from './framework-observers';
 import { ConsentAuditCodes } from './domain-types';
@@ -144,6 +145,112 @@ describe('Consent framework observers', () => {
     expect(JSON.stringify(observer.state)).not.toContain('must-not-be-persisted');
     observer.stop();
     expect(calls.at(-1)).toEqual({ command: 'removeEventListener', parameter: 'listener-1' });
+  });
+
+  it('records no applicable section separately from supported and payload sections', () => {
+    const { runtime } = gppFixture({ ...readyGppPing, supportedAPIs: ['7:usnat'], sectionList: [7], applicableSections: [-1], parsedSections: { usnat: [{ SaleOptOut: 1 }] } });
+    const structure = observeGppFramework(runtime).state.structure!;
+    expect(structure).toMatchObject({ supported_sections: [7], present_sections: [7], cmp_declared_applicable_sections: [-1], structural_consistency: 'consistent' });
+    expect(structure.sections[0]).toMatchObject({ section_id: 7, supported: true, present: true, cmp_declared_applicable: false, parsed_available: true, state: 'not_declared_applicable' });
+  });
+
+  it('normalizes a known applicable US section as technical identity with parsed data available only', () => {
+    const { runtime } = gppFixture({ ...readyGppPing, supportedAPIs: ['7:usnat'], sectionList: [7], applicableSections: [7], parsedSections: { usnat: [{ SaleOptOut: 1, CmpId: 123, PublisherId: 'private' }] } });
+    const structure = observeGppFramework(runtime).state.structure!;
+    expect(structure.sections).toEqual([expect.objectContaining({
+      section_id: 7, api_prefix: 'usnat', known: true, family: 'us_national', technical_label: 'US National',
+      supported: true, present: true, cmp_declared_applicable: true, parsed_available: true, state: 'parsed_uninterpreted'
+    })]);
+    expect(JSON.stringify(structure)).not.toMatch(/SaleOptOut|CmpId|PublisherId|private/);
+    expect(JSON.stringify(structure)).not.toMatch(/law applies|state_verified/i);
+  });
+
+  it('preserves two CMP-declared applicable sections independently', () => {
+    const { runtime } = gppFixture({ ...readyGppPing, supportedAPIs: ['7:usnat', '8:usca'], sectionList: [7, 8], applicableSections: [7, 8], parsedSections: { usnat: [{}], usca: [{}] } });
+    const structure = observeGppFramework(runtime).state.structure!;
+    expect(structure.sections.map((section) => [section.section_id, section.cmp_declared_applicable, section.parsed_available])).toEqual([[7, true, true], [8, true, true]]);
+  });
+
+  it('preserves an unknown future section without invalidating known GPP evidence', () => {
+    const { runtime } = gppFixture({ ...readyGppPing, supportedAPIs: ['7:usnat', '99:usfuture'], sectionList: [7, 99], applicableSections: [99], parsedSections: { usnat: [{}], usfuture: [{}] } });
+    const structure = observeGppFramework(runtime).state.structure!;
+    expect(structure.sections.find((section) => section.section_id === 99)).toMatchObject({ section_id: 99, api_prefix: 'usfuture', known: false, supported: true, present: true, cmp_declared_applicable: true, parsed_available: true });
+    expect(structure.sections.find((section) => section.section_id === 7)).toMatchObject({ known: true, present: true });
+    expect(structure.structural_consistency).toBe('consistent');
+  });
+
+  it('flags a ready applicable section missing from the physical section list', () => {
+    const { runtime } = gppFixture({ ...readyGppPing, supportedAPIs: ['7:usnat'], sectionList: [], applicableSections: [7], parsedSections: { usnat: [{}] } });
+    const structure = observeGppFramework(runtime).state.structure!;
+    expect(structure.structural_consistency).toBe('inconsistent');
+    expect(structure.reason_codes).toContain('GPP_APPLICABLE_SECTION_MISSING_FROM_PAYLOAD');
+    expect(structure.sections[0]).toMatchObject({ present: false, cmp_declared_applicable: true, state: 'unavailable' });
+  });
+
+  it('keeps an applicable and present section inconclusive when parsed data is unavailable', () => {
+    const { runtime } = gppFixture({ ...readyGppPing, supportedAPIs: ['7:usnat'], sectionList: [7], applicableSections: [7], parsedSections: {} });
+    const structure = observeGppFramework(runtime).state.structure!;
+    expect(structure.structural_consistency).toBe('inconclusive');
+    expect(structure.parsed_sections_available).toBe(false);
+    expect(structure.sections[0]).toMatchObject({ present: true, cmp_declared_applicable: true, parsed_available: false, state: 'unavailable' });
+    expect(structure.reason_codes).toContain('GPP_APPLICABLE_PARSED_SECTION_UNAVAILABLE');
+  });
+
+  it('keeps parsed data incomplete while signalStatus is not ready', () => {
+    const { runtime } = gppFixture({ ...readyGppPing, signalStatus: 'not ready', supportedAPIs: ['7:usnat'], sectionList: [7], applicableSections: [7], parsedSections: { usnat: [{ SaleOptOut: 1 }] } });
+    const structure = observeGppFramework(runtime).state.structure!;
+    expect(structure.structural_consistency).toBe('inconclusive');
+    expect(structure.sections[0]).toMatchObject({ parsed_available: true, state: 'incomplete' });
+    expect(structure.reason_codes).toContain('GPP_SIGNAL_NOT_READY');
+    expect(JSON.stringify(structure)).not.toMatch(/opt_out|opt_in/i);
+  });
+
+  it('retains the -1 no-applicable sentinel and resolves not-ready to the final ready event', () => {
+    const notReady = { ...readyGppPing, signalStatus: 'not ready', supportedAPIs: ['7:usnat'], sectionList: [7], applicableSections: [-1], parsedSections: { usnat: [{}] } };
+    const sectionChange = { ...notReady, applicableSections: [7] };
+    const ready = { ...sectionChange, signalStatus: 'ready' };
+    const { runtime } = gppFixture(notReady, [
+      { listenerId: 'listener-ready', pingData: notReady },
+      { listenerId: 'listener-ready', eventName: 'sectionChange', pingData: sectionChange },
+      { listenerId: 'listener-ready', pingData: ready }
+    ]);
+    const observer = observeGppFramework(runtime);
+    expect(observer.state.ping?.applicable_sections).toEqual([7]);
+    expect(observer.state.structure?.sections[0]).toMatchObject({ cmp_declared_applicable: true, state: 'parsed_uninterpreted' });
+    expect(observer.state.event_count).toBe(3);
+  });
+
+  it('does not multiply cumulative GPP event counts when the same page is sampled again', () => {
+    const { runtime } = gppFixture(readyGppPing, [{ listenerId: 1, pingData: readyGppPing }]);
+    const gpp = observeGppFramework(runtime).state;
+    const observation = observeConsentFrameworks({ __gpp: runtime.__gpp });
+    const merged = mergeConsentFrameworkObservations({ tcf: observeTcfFramework({}).state, gpp, usp: observeUspFramework({}) }, {
+      tcf: observation.tcf.state, gpp: observation.gpp.state, usp: observation.usp
+    });
+    expect(merged.gpp.event_count).toBe(1);
+  });
+
+  it('uses the bridge cumulative event count when replaying its latest event', () => {
+    const { runtime } = gppFixture(readyGppPing, [{ listenerId: 1, pingData: readyGppPing, eventCount: 7 }]);
+    expect(observeGppFramework(runtime).state.event_count).toBe(7);
+  });
+
+  it('preserves a completed GPP structure when a later sample is not ready', () => {
+    const { runtime: readyRuntime } = gppFixture({ ...readyGppPing, supportedAPIs: ['7:usnat'], sectionList: [7], applicableSections: [7], parsedSections: { usnat: [{}] } });
+    const { runtime: pendingRuntime } = gppFixture({ ...readyGppPing, signalStatus: 'not ready', supportedAPIs: [], sectionList: [], applicableSections: [] });
+    const empty = {
+      tcf: observeTcfFramework({}).state,
+      gpp: observeGppFramework({}).state,
+      usp: observeUspFramework({})
+    };
+    const ready = observeGppFramework(readyRuntime).state;
+    const pending = observeGppFramework(pendingRuntime).state;
+    const merged = mergeConsentFrameworkObservations(
+      { ...empty, gpp: ready },
+      { ...empty, gpp: pending }
+    );
+    expect(merged.gpp.ping?.signal_status).toBe('ready');
+    expect(merged.gpp.structure?.sections[0]).toMatchObject({ section_id: 7, cmp_declared_applicable: true, parsed_available: true });
   });
 
   it('treats USP as legacy read-only evidence without converting it into GPP', () => {

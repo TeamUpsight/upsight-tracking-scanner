@@ -175,7 +175,32 @@ export async function installConsentCommandBootstrap(page: Page) {
     w[frameworkKey] = framework;
     const tcfPing = (value: any) => value && typeof value === 'object' ? { cmpLoaded: value.cmpLoaded === true ? true : value.cmpLoaded === false ? false : null, apiVersion: typeof value.apiVersion === 'string' ? value.apiVersion.slice(0, 16) : null, gdprApplies: value.gdprApplies === true ? true : value.gdprApplies === false ? false : null } : null;
     const tcfEvent = (value: any) => value && typeof value === 'object' ? { eventStatus: typeof value.eventStatus === 'string' ? value.eventStatus.slice(0, 32) : null, gdprApplies: value.gdprApplies === true ? true : value.gdprApplies === false ? false : null, purpose: { consents: countBooleans(value.purpose?.consents) }, vendor: { consents: countBooleans(value.vendor?.consents) } } : null;
-    const gppPing = (value: any) => value && typeof value === 'object' ? { gppVersion: typeof value.gppVersion === 'string' ? value.gppVersion.slice(0, 16) : null, cmpStatus: typeof value.cmpStatus === 'string' ? value.cmpStatus.slice(0, 32) : null, cmpDisplayStatus: typeof value.cmpDisplayStatus === 'string' ? value.cmpDisplayStatus.slice(0, 32) : null, signalStatus: typeof value.signalStatus === 'string' ? value.signalStatus.slice(0, 32) : null, supportedAPIs: Array.isArray(value.supportedAPIs) ? value.supportedAPIs.filter((item: unknown) => typeof item === 'string').slice(0, 50) : [], sectionList: Array.isArray(value.sectionList) ? value.sectionList.filter((item: unknown) => Number.isInteger(item)).slice(0, 50) : [], applicableSections: Array.isArray(value.applicableSections) ? value.applicableSections.filter((item: unknown) => Number.isInteger(item)).slice(0, 50) : [] } : null;
+    const gppPing = (value: any) => {
+      if (!value || typeof value !== 'object') return null;
+      const parsedSections = value.parsedSections && typeof value.parsedSections === 'object' && !Array.isArray(value.parsedSections) ? value.parsedSections : null;
+      const parsedSectionPrefixes: string[] = [];
+      if (parsedSections) {
+        for (const prefix in parsedSections) {
+          if (!Object.prototype.hasOwnProperty.call(parsedSections, prefix)) continue;
+          const segments = parsedSections[prefix];
+          if (/^[a-z][a-z0-9]{0,15}$/i.test(prefix) && Array.isArray(segments) && segments.length > 0 && segments[0] && typeof segments[0] === 'object' && !Array.isArray(segments[0])) {
+            parsedSectionPrefixes.push(prefix.toLowerCase());
+            if (parsedSectionPrefixes.length >= 50) break;
+          }
+        }
+      }
+      return {
+        gppVersion: typeof value.gppVersion === 'string' ? value.gppVersion.slice(0, 16) : null,
+        cmpStatus: typeof value.cmpStatus === 'string' ? value.cmpStatus.slice(0, 32) : null,
+        cmpDisplayStatus: typeof value.cmpDisplayStatus === 'string' ? value.cmpDisplayStatus.slice(0, 32) : null,
+        signalStatus: typeof value.signalStatus === 'string' ? value.signalStatus.slice(0, 32) : null,
+        supportedAPIs: Array.isArray(value.supportedAPIs) ? value.supportedAPIs.filter((item: unknown) => typeof item === 'string').slice(0, 50) : [],
+        sectionList: Array.isArray(value.sectionList) ? value.sectionList.filter((item: unknown) => Number.isInteger(item)).slice(0, 50) : [],
+        applicableSections: Array.isArray(value.applicableSections) ? value.applicableSections.filter((item: unknown) => Number.isInteger(item)).slice(0, 50) : [],
+        parsedSectionsAvailable: parsedSectionPrefixes.length > 0,
+        parsedSectionPrefixes
+      };
+    };
     const installFrameworkListeners = () => {
       framework.usp_present ||= typeof w.__uspapi === 'function';
       if (typeof w.__tcfapi === 'function' && !framework.tcf.registered) {
@@ -689,10 +714,34 @@ export async function observeConsentFrameworksInPage(page: Page): Promise<Consen
         try { invoke((payload, success) => finish(success === false ? null : payload)); } catch { finish(null); }
         setTimeout(() => finish(null), 250);
       });
+      const sanitizeGppPing = (value: any) => {
+        if (!value || typeof value !== 'object') return null;
+        const parsedSections = value.parsedSections && typeof value.parsedSections === 'object' && !Array.isArray(value.parsedSections) ? value.parsedSections : null;
+        const parsedSectionPrefixes: string[] = [];
+        if (parsedSections) for (const prefix in parsedSections) {
+          if (!Object.prototype.hasOwnProperty.call(parsedSections, prefix)) continue;
+          const segments = parsedSections[prefix];
+          if (/^[a-z][a-z0-9]{0,15}$/i.test(prefix) && Array.isArray(segments) && segments.length > 0 && segments[0] && typeof segments[0] === 'object' && !Array.isArray(segments[0])) {
+            parsedSectionPrefixes.push(prefix.toLowerCase());
+            if (parsedSectionPrefixes.length >= 50) break;
+          }
+        }
+        return {
+          gppVersion: typeof value.gppVersion === 'string' ? value.gppVersion.slice(0, 16) : null,
+          cmpStatus: typeof value.cmpStatus === 'string' ? value.cmpStatus.slice(0, 32) : null,
+          cmpDisplayStatus: typeof value.cmpDisplayStatus === 'string' ? value.cmpDisplayStatus.slice(0, 32) : null,
+          signalStatus: typeof value.signalStatus === 'string' ? value.signalStatus.slice(0, 32) : null,
+          supportedAPIs: Array.isArray(value.supportedAPIs) ? value.supportedAPIs.filter((item: unknown) => typeof item === 'string').slice(0, 50) : [],
+          sectionList: Array.isArray(value.sectionList) ? value.sectionList.filter((item: unknown) => Number.isInteger(item)).slice(0, 50) : [],
+          applicableSections: Array.isArray(value.applicableSections) ? value.applicableSections.filter((item: unknown) => Number.isInteger(item)).slice(0, 50) : [],
+          parsedSectionsAvailable: parsedSectionPrefixes.length > 0,
+          parsedSectionPrefixes
+        };
+      };
       const w = window as any;
       return {
         tcf: typeof w.__tcfapi === 'function' ? await call((callback) => w.__tcfapi('ping', 2, callback)) : null,
-        gpp: typeof w.__gpp === 'function' ? await call((callback) => w.__gpp('ping', callback)) : null
+        gpp: typeof w.__gpp === 'function' ? sanitizeGppPing(await call((callback) => w.__gpp('ping', callback))) : null
       };
     });
     if (!captured.tcf.ping && direct.tcf) captured.tcf.ping = direct.tcf as any;
@@ -716,7 +765,7 @@ export async function observeConsentFrameworksInPage(page: Page): Promise<Consen
     }) : undefined,
     __gpp: captured.gpp.present ? ((command: string, callback: (payload: unknown, success?: boolean) => void) => {
       if (command === 'ping') callback(captured.gpp.ping, Boolean(captured.gpp.ping));
-      if (command === 'addEventListener' && captured.gpp.latest_event) callback({ pingData: captured.gpp.latest_event }, true);
+      if (command === 'addEventListener' && captured.gpp.latest_event) callback({ pingData: captured.gpp.latest_event, eventCount: captured.gpp.event_count }, true);
     }) : undefined,
     __uspapi: captured.usp ? (() => undefined) : undefined
   };

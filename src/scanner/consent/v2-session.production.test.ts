@@ -607,6 +607,26 @@ describe('Consent V2 production session wiring', () => {
     expect(result.telemetry).toMatchObject({ gpp_present: true, gpp_lifecycle: 'ready', usp_present: false });
   });
 
+  it('GPP-13 captures parsed section availability without returning parsed values or the GPP string', async () => {
+    const result = await audit(`<script>
+      const ping={gppVersion:'1.1',cmpStatus:'loaded',cmpDisplayStatus:'hidden',signalStatus:'ready',supportedAPIs:['7:usnat','8:usca'],sectionList:[7,8],applicableSections:[7,8],gppString:'raw-gpp-secret',parsedSections:{usnat:[{SaleOptOut:1,CmpId:24601,PublisherId:'publisher-secret'}],usca:[{SharingOptOut:2}]}};
+      window.__gpp=(command,callback)=>{if(command==='ping')callback(ping,true);if(command==='addEventListener')callback({listenerId:1,pingData:ping},true);};
+    </script>`, { ...input, diagnostic: true });
+    const observation = result.diagnostic_observation?.frameworks.gpp_observation;
+    expect(observation?.structure).toMatchObject({
+      supported_sections: [7, 8], present_sections: [7, 8], cmp_declared_applicable_sections: [7, 8],
+      parsed_sections_available: true, parsed_section_prefixes: ['usca', 'usnat'], structural_consistency: 'consistent',
+      sections: [
+        expect.objectContaining({ section_id: 7, api_prefix: 'usnat', known: true, supported: true, present: true, cmp_declared_applicable: true, parsed_available: true }),
+        expect.objectContaining({ section_id: 8, api_prefix: 'usca', known: true, supported: true, present: true, cmp_declared_applicable: true, parsed_available: true })
+      ]
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('raw-gpp-secret');
+    expect(serialized).not.toContain('publisher-secret');
+    expect(serialized).not.toMatch(/SaleOptOut|SharingOptOut|CmpId|PublisherId/);
+  }, 20_000);
+
   it('MM-01 preserves Shopify, OneTrust, GPP, and GCM as independent mechanisms', async () => {
     const result = await audit(`<script>
       window.dataLayer=[['consent','default',{ad_storage:'denied',analytics_storage:'denied'}]];

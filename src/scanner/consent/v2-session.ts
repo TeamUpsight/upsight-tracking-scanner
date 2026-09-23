@@ -348,7 +348,7 @@ function diagnosticObservation(
       candidate_samples: semanticDiagnostic.candidate_samples.slice(0, 20).map((candidate) => ({ ...candidate, accessible_name: candidate.accessible_name.slice(0, 120) })),
       ...(exposeNearbyControls ? { nearby_actionable_controls: nearbyActionableControls } : {})
     } } : {}),
-    frameworks: { tcf: framework.tcf.present, gpp: framework.gpp.present, consent_mode: consentMode }, ...(readiness ? { readiness } : {})
+    frameworks: { tcf: framework.tcf.present, gpp: framework.gpp.present, consent_mode: consentMode, gpp_observation: framework.gpp }, ...(readiness ? { readiness } : {})
   };
 }
 async function providerOperations(provider: CmpAdapterProviderId | undefined, contexts: ProviderContexts) {

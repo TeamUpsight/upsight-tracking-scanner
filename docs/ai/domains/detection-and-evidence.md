@@ -31,6 +31,12 @@ US privacy rights are a parallel descriptive model under `evidence.consent.us_pr
 
 The projection passively reads `navigator.globalPrivacyControl` as present, absent, or unavailable and separately records a bounded on-page GPC acknowledgement. It does not set GPC, send `Sec-GPC`, exercise a right, or claim that GPC was honored. Existing sanitized GPP ping facts remain framework-owned; applicable section IDs are copied as framework-declared context with `state_verified: null`, never as proof of physical state or a legal-compliance verdict. Canonical replay preserves this evidence without deriving `consent_status` from it. The existing status resolver already limits prior-consent violations to EU/UK, so USA pre-choice tracking remains outside that verdict.
 
+### GPP structure (WP13B)
+
+The GPP observer keeps CMP-supported section IDs, payload-present section IDs, and CMP-declared applicable section IDs as separate bounded facts. The GPP `[-1]` applicable-sections sentinel is preserved as the CMP declaration that no section applies to the current transaction; it is not a legal applicability conclusion. Known section IDs receive technical labels from a small registry; unknown IDs remain observable without invalidating the rest of the observation. These labels identify framework representation only and do not infer visitor geography or governing law.
+
+The browser bridge reads the API's parsed-section keys and persists only bounded API prefixes and whether parsed data was exposed. It never copies parsed field values or `gppString`. An applicable ID absent from `sectionList` is structurally inconsistent; missing parsed representation is inconclusive/unavailable. A signal that is not ready keeps applicable section state incomplete even when parsed data exists. Parsed field values are intentionally uninterpreted: WP13B does not normalize GPP choices into WP12A rights because this structural observer has not established a safe, section-specific field mapping. No compliance verdict is derived.
+
 Regression entry points: `us-privacy.test.ts`, `cookiebot-adapter.test.ts`, `v2-session.production.test.ts` (WP12A cases), and the USA status/replay cases in `scanner-core.test.ts`. Debug packages expose the same bounded projection in `us-privacy.json` and `consent-summary.json`.
 
 ### Controlled GPC comparison (WP12B)
