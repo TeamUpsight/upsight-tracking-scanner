@@ -90,6 +90,18 @@ describe('Consent V2 compatibility mapper', () => {
     expect(mapConsentV2ToExisting(unsupported, context)).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive' });
   });
 
+  it('preserves the verification-capability reason when Reject is available but execution is skipped', () => {
+    const skipped = result({
+      available_actions: [{ action: 'reject_all', availability: 'direct', category: null, evidence: [], reason_codes: ['REJECT_AVAILABLE'] }],
+      interactions: [],
+      rejection_verification: { status: 'inconclusive', evidence: [], reason_codes: ['CMP_VERIFICATION_CAPABILITY_UNAVAILABLE'] },
+      persistence: { status: 'not_applicable', evidence: [], reason_codes: ['PERSISTENCE_NOT_APPLICABLE'] }
+    });
+    expect(mapConsentV2ToExisting(skipped, { ...context, post_reject_observation_completed: false })).toMatchObject({
+      cmp_provider: 'OneTrust', consent_status: 'inconclusive', reason_code: 'CMP_VERIFICATION_CAPABILITY_UNAVAILABLE'
+    });
+  });
+
   it('maps an explicit clean no-CMP technical result through the existing business resolver', () => {
     const noCmp = result({ mechanisms: [], interactions: [], reason_codes: ['NO_CMP_DETECTED'] });
     expect(mapConsentV2ToExisting(noCmp, context)).toMatchObject({ cmp_provider: 'Not Found', consent_status: 'not_detected' });

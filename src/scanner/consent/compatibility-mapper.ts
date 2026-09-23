@@ -168,7 +168,9 @@ export function mapConsentV2ToExisting(
         : codes.has(ConsentAuditCodes.INTERACTION_UNSUPPORTED) ? ConsentAuditCodes.INTERACTION_UNSUPPORTED
           : codes.has(ConsentAuditCodes.BLOCKED_OR_CHALLENGED) ? ConsentAuditCodes.BLOCKED_OR_CHALLENGED
             : technicalStatus.reason_code
-      : technicalStatus.reason_code,
+      : codes.has(ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_UNAVAILABLE)
+        ? ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_UNAVAILABLE
+        : technicalStatus.reason_code,
     trace_steps: JSON.stringify([...existingTrace, ...appended]),
     trace_events: appended.map((entry) => String(entry.step))
   };

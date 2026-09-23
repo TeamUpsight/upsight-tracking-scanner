@@ -431,12 +431,18 @@ describe('Consent V2 production session wiring', () => {
     expect(result.telemetry.timeline?.user_choice_at).not.toBeNull();
   }, 20_000);
 
-  it('VER-OT-01 prefers the visible OneTrust Reject control over its API capability', async () => {
+  it('VER-OT-01 preserves visible Reject availability but skips OneTrust interaction without a semantic verifier', async () => {
     const result = await audit(`<script>
       window.OneTrust={RejectAll(){window.apiCalled=true;}}; window.OnetrustActiveGroups='C001';
-      function reject(){window.OnetrustActiveGroups='C001';}
+      function reject(){window.didReject=true;}
     </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, { ...input, rollout: actionRollout });
-    expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('direct');
+    expect(result.result.interactions).toEqual([]);
+    expect(result.telemetry).toMatchObject({
+      reject_availability: 'direct', action_execution_eligible: false, interaction_outcome: 'not_attempted',
+      verification_capability: 'unavailable', verification_capability_strong_families: [],
+      verification_capability_reason_codes: ['CMP_VERIFICATION_CAPABILITY_UNAVAILABLE']
+    });
   });
 
   it('VER-OT-02 verifies OneTrust Reject only with an emitted transition and TCF rejection', async () => {
@@ -451,13 +457,27 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.rejection_verification.evidence).toEqual(expect.arrayContaining(['strong:framework_tcf:matches_requested', 'supporting:provider_event:matches_requested']));
   }, 20_000);
 
-  it('VER-OT-03 keeps OneTrust Reject inconclusive without authoritative semantic evidence', async () => {
+  it('VER-OT-03 treats OneTrust events alone as supporting and skips a destructive action', async () => {
     const result = await auditNavigation(`<script>
       window.OneTrust={RejectAll(){}}; window.OnetrustActiveGroups='C001';
-      function reject(){window.dispatchEvent(new Event('OTConsentApplied'));}
+      function reject(){window.dispatchEvent(new Event('OneTrustGroupsUpdated'));window.dispatchEvent(new Event('OTConsentApplied'));}
     </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.interactions).toEqual([]);
+    expect(result.telemetry.verification_capability).toBe('unavailable');
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+  }, 20_000);
+
+  it('VER-OT-04 allows a TCF-capable OneTrust action but does not infer verification when post-action TCF state stays unresolved', async () => {
+    const result = await auditNavigation(`<script>
+      const tcfState={listenerId:1,eventStatus:'tcloaded',cmpLoaded:true,apiVersion:'2.2',gdprApplies:true,purpose:{consents:{1:true,2:true}},vendor:{consents:{1:true,2:true}}};
+      window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:true,apiVersion:'2.2',gdprApplies:true},true);if(command==='addEventListener')callback(tcfState,true);};
+      window.OneTrust={RejectAll(){}}; window.OnetrustActiveGroups='C001';
+      function reject(){window.didReject=true;window.dispatchEvent(new Event('OTConsentApplied'));}
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.telemetry).toMatchObject({ verification_capability: 'available', action_execution_eligible: true, activation_occurred: true, execution_strategy: 'provider_selector' });
     expect(result.result.interactions[0]).toMatchObject({ outcome: 'executed' });
     expect(result.result.rejection_verification.status).toBe('inconclusive');
+    expect(result.result.persistence).toMatchObject({ status: 'not_applicable', reload_attempted: false, post_reload_observation_completed: false });
   }, 20_000);
   it('uses the OneTrust adapter for provider evidence, state, banner, and actions', async () => {
     const result = await audit(`<script>window.OneTrust={RejectAll(){}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`);
@@ -493,9 +513,10 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('usercentrics');
     expect(result.result.banner).toMatchObject({ visibility: 'visible' });
     expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('direct');
-    expect(result.result.interactions[0]).toMatchObject({ outcome: 'executed' });
+    expect(result.result.interactions).toEqual([]);
+    expect(result.telemetry).toMatchObject({ verification_capability: 'unavailable', action_execution_eligible: false });
     expect(result.result.rejection_verification.status).toBe('inconclusive');
-    expect(result.result.persistence).toMatchObject({ status: 'inconclusive', post_reload_observation_completed: true, storage_continuity: 'matching' });
+    expect(result.result.persistence).toMatchObject({ status: 'not_applicable', reload_attempted: false, post_reload_observation_completed: false });
   }, 20_000);
 
   it("DI-03 verifies Didomi's fresh rejected state after consent.changed and persists it", async () => {
@@ -718,15 +739,16 @@ describe('Consent V2 production session wiring', () => {
   });
 
   it('PREF-OT-01 runs Preferences then re-discovers the preference-center Reject', async () => {
-    const result = await audit(`<script>
+    const result = await auditNavigation(`<script>
+      window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:true,apiVersion:'2.2',gdprApplies:true},true);if(command==='addEventListener')callback({listenerId:1,eventStatus:'tcloaded',purpose:{consents:{1:true,2:true}},vendor:{consents:{1:true,2:true}}},true);};
       window.OneTrust={ToggleInfoDisplay(){document.querySelector('#onetrust-banner-sdk').innerHTML='<div id="onetrust-pc-sdk"><button id="onetrust-reject-all-handler" onclick="window.rejected=true">Reject all</button></div>';}};
-    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-pc-btn-handler" onclick="OneTrust.ToggleInfoDisplay()">Preferences</button></div>`, { ...input, rollout: actionRollout });
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-pc-btn-handler" onclick="OneTrust.ToggleInfoDisplay()">Preferences</button></div>`, false, { ...input, rollout: actionRollout });
     expect(result.result.interactions.map((item) => item.action)).toEqual(['open_preferences', 'reject_all']);
     expect(result.result.interactions.every((item) => item.outcome === 'executed')).toBe(true);
   }, 10_000);
 
   it('PREF-AMB-01 leaves ambiguous preference categories untouched', async () => {
-    const result = await audit(`<script>window.OneTrust={ToggleInfoDisplay(){document.querySelector('#onetrust-banner-sdk').innerHTML='<div id="onetrust-pc-sdk"><button>Toggle</button><button>Save preferences</button></div>';}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-pc-btn-handler" onclick="OneTrust.ToggleInfoDisplay()">Preferences</button></div>`, { ...input, rollout: actionRollout });
+    const result = await auditNavigation(`<script>window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:true,apiVersion:'2.2',gdprApplies:true},true);if(command==='addEventListener')callback({listenerId:1,eventStatus:'tcloaded',purpose:{consents:{1:true,2:true}},vendor:{consents:{1:true,2:true}}},true);};window.OneTrust={ToggleInfoDisplay(){document.querySelector('#onetrust-banner-sdk').innerHTML='<div id="onetrust-pc-sdk"><button>Toggle</button><button>Save preferences</button></div>';}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-pc-btn-handler" onclick="OneTrust.ToggleInfoDisplay()">Preferences</button></div>`, false, { ...input, rollout: actionRollout });
     // Opening preferences is preparatory; the session must explicitly record
     // that no safe Reject became available after rediscovery.
     expect(result.result.interactions).toMatchObject([
@@ -1049,7 +1071,7 @@ describe('Consent V2 production session wiring', () => {
   });
 
   it('TIMESTAMP-01 through TIMESTAMP-03 use activation rather than action-attempt start', async () => {
-    const result = await auditNavigation(`<script>let rejected=false;window.OneTrust={RejectAll(){rejected=true;}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk" style="display:block;width:320px;height:120px"><button id="onetrust-reject-all-handler" onclick="const until=Date.now()+25;while(Date.now()<until){};OneTrust.RejectAll()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    const result = await auditNavigation(`<script>window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:true,apiVersion:'2.2',gdprApplies:true},true);if(command==='addEventListener')callback({listenerId:1,eventStatus:'tcloaded',purpose:{consents:{1:true,2:true}},vendor:{consents:{1:true,2:true}}},true);};let rejected=false;window.OneTrust={RejectAll(){rejected=true;}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk" style="display:block;width:320px;height:120px"><button id="onetrust-reject-all-handler" onclick="const until=Date.now()+25;while(Date.now()<until){};OneTrust.RejectAll()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
     expect(result.telemetry.timeline?.action_attempt_started_at).not.toBeNull();
     expect(result.telemetry.timeline?.user_choice_at).toBeGreaterThan(result.telemetry.timeline?.action_attempt_started_at || 0);
   }, 20_000);

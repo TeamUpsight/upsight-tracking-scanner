@@ -182,7 +182,7 @@ describe('runStorefrontAudit production browser wiring', () => {
   it('RUNNER-V2-01 finalizes Consent V2 compatibility fields from the real runner', async () => {
     const result = await auditFixture(200, oneTrust);
     expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive', scan_status: 'completed' });
-    expect((result.finding_confidence as { consent?: { reason_code?: string } } | undefined)?.consent?.reason_code).toBe('CMP_REJECT_NOT_VERIFIED');
+    expect((result.finding_confidence as { consent?: { reason_code?: string } } | undefined)?.consent?.reason_code).toBe('CMP_VERIFICATION_CAPABILITY_UNAVAILABLE');
     expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([
       expect.objectContaining({ step: 'cmp_provider_detected' }),
       expect.objectContaining({ step: 'consent_context_started', module: 'consent', severity: 'info' }),
@@ -615,7 +615,7 @@ describe('runStorefrontAudit production browser wiring', () => {
       return `${tracking}${oneTrust}`;
     });
     expect(result).toMatchObject({ consent_status: 'inconclusive', scan_status: 'completed' });
-    expect((result.evidence_bundle as { consent: { post_reject_observation_completed: boolean } }).consent.post_reject_observation_completed).toBe(true);
+    expect((result.evidence_bundle as { consent: { post_reject_observation_completed: boolean } }).consent.post_reject_observation_completed).toBe(false);
   }, 35_000);
 
   it.each([

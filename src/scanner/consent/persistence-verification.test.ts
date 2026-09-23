@@ -79,6 +79,17 @@ describe('same-context persistence verification', () => {
     expect(result).toMatchObject({ reload_attempted: false, reload_succeeded: false, post_reload_observation_completed: false });
   });
 
+  it('skips reload when Reject verification is inconclusive because semantic persistence cannot be established', async () => {
+    let reloaded = false;
+    const result = await verifySameContextReloadPersistence({
+      meaningful_action_attempt: true,
+      semantic_verification: { status: 'inconclusive', evidence: [], reason_codes: [ConsentAuditCodes.ACTION_INCONCLUSIVE] },
+      after_action: snapshot({ provider: 'ambiguous' })
+    }, bridge({ reloadSameContext: async () => { reloaded = true; return { reloaded: true, same_context: true, origin_before: 'https://store.example', origin_after: 'https://store.example', navigation_interrupted: false }; } }));
+    expect(reloaded).toBe(false);
+    expect(result).toMatchObject({ status: 'not_applicable', reload_attempted: false, post_reload_observation_completed: false, reason_codes: [ConsentAuditCodes.ACTION_INCONCLUSIVE, ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE] });
+  });
+
   it('records completion only after a post-reload snapshot is successfully read', async () => {
     const result = await verifySameContextReloadPersistence(input(snapshot({ provider: 'rejected' })), bridge());
     expect(result).toMatchObject({ reload_attempted: true, reload_succeeded: true, post_reload_observation_completed: true });

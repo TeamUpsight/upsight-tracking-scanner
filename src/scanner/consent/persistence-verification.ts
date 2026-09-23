@@ -165,6 +165,10 @@ export async function verifySameContextReloadPersistence(
   input: PersistenceVerificationInput,
   bridge: PersistenceReloadBridge
 ): Promise<SameContextPersistenceResult> {
+  if (input.semantic_verification.status !== 'verified') {
+    const rejectionCode = input.semantic_verification.status === 'not_verified' ? ConsentAuditCodes.ACTION_NOT_VERIFIED : ConsentAuditCodes.ACTION_INCONCLUSIVE;
+    return result('not_applicable', [], [rejectionCode, ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE], 'not_tested');
+  }
   if (!input.meaningful_action_attempt) {
     return result('not_applicable', [], [ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE], 'not_tested');
   }

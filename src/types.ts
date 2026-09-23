@@ -463,6 +463,17 @@ export interface EvidenceBundle {
       preferences_opened?: boolean;
       reject_attempted?: boolean;
       reject_outcome?: 'executed' | 'not_executed' | 'timeout' | 'unsupported' | 'aborted' | 'not_attempted';
+      action_execution_eligible?: boolean;
+      requested_action?: string | null;
+      execution_strategy?: string | null;
+      activation_occurred?: boolean;
+      verification_capability?: 'available' | 'unavailable' | 'inconclusive';
+      verification_capability_strong_families?: string[];
+      verification_capability_reason_codes?: string[];
+      verification_strong_families?: string[];
+      verification_supporting_families?: string[];
+      verification_contradicting_families?: string[];
+      verification_reason_codes?: string[];
       verification: 'verified' | 'not_verified' | 'inconclusive';
       persistence: 'confirmed' | 'not_confirmed' | 'inconclusive' | 'not_applicable';
       generic_fallback: boolean;
