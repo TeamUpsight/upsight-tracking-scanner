@@ -9,6 +9,7 @@ export const GOOGLE_CONSENT_FIELDS = [
   'personalization_storage',
   'security_storage'
 ] as const;
+export const GOOGLE_CONSENT_CORE_FIELDS = ['ad_storage', 'analytics_storage', 'ad_user_data', 'ad_personalization'] as const;
 
 export const GOOGLE_CONSENT_NETWORK_PARAMETERS = [
   'gcs',
@@ -67,6 +68,8 @@ export interface GoogleConsentModeResult {
   classification: GoogleConsentModeClassification;
   lifecycle: 'not_observed' | 'default_observed' | 'default_and_update' | 'update_only';
   commands: GoogleConsentCommandObservation[];
+  effective_state: NormalizedGoogleConsentState;
+  core_signals: { observed_count: number; explicitly_set: string[]; missing: string[]; unknown: string[] };
   network: GoogleConsentNetworkObservation[];
   user_choice_timestamp: number | null;
   tracking_gated: boolean;
@@ -91,16 +94,9 @@ export function googleMeasurementFacts(
   if (request.consent_measurement === 'full_measurement' || request.consent_measurement === 'limited_measurement') {
     facts.push({ type: 'request_classification', classification: request.consent_measurement, timestamp: request.timestamp });
   }
-  // Apply partial commands in timestamp/sequence order, only at or before this hit.
-  // A later default/update must not retroactively classify an earlier request.
-  let analytics: { value: GoogleConsentValue; timestamp: number } | undefined;
-  for (const command of [...(observed?.commands || [])].sort((a, b) => a.timestamp - b.timestamp || a.sequence - b.sequence)) {
-    if (command.timestamp > request.timestamp) continue;
-    if (command.state.analytics_storage !== 'unset') analytics = { value: command.state.analytics_storage, timestamp: command.timestamp };
-  }
-  if (analytics?.value === 'denied') facts.push({ type: 'gcm_command', classification: 'limited_measurement', timestamp: analytics.timestamp });
-  // Granted commands alone do not establish full network measurement. The existing
-  // shared parser's explicit full classification is required for that conclusion.
+  // Command state and network behavior are independent evidence families.
+  // Neither a denied nor granted command proves the resulting request class.
+  void observed;
   return facts;
 }
 
@@ -220,16 +216,12 @@ function safeNetworkParameters(url: string, body: string | undefined) {
   return Object.keys(parameters).length ? parameters : null;
 }
 
-function hasDeniedState(command: GoogleConsentCommandObservation) {
-  return GOOGLE_CONSENT_FIELDS.some((field) => command.state[field] === 'denied');
-}
-
-function hasGrantedState(command: GoogleConsentCommandObservation) {
-  return GOOGLE_CONSENT_FIELDS.some((field) => command.state[field] === 'granted');
-}
-
-function hasGcsParameter(observation: GoogleConsentNetworkObservation) {
-  return Boolean(observation.parameters.gcs);
+function hasCoreDenied(state: NormalizedGoogleConsentState) { return GOOGLE_CONSENT_CORE_FIELDS.some((field) => state[field] === 'denied'); }
+function hasCoreGranted(state: NormalizedGoogleConsentState) { return GOOGLE_CONSENT_CORE_FIELDS.some((field) => state[field] === 'granted'); }
+function applyCommand(state: NormalizedGoogleConsentState, patch: NormalizedGoogleConsentState): NormalizedGoogleConsentState {
+  const next = { ...state };
+  for (const field of GOOGLE_CONSENT_FIELDS) if (patch[field] !== 'unset') next[field] = patch[field];
+  return { ...next, wait_for_update_present: patch.wait_for_update_present, wait_for_update_ms: patch.wait_for_update_ms };
 }
 
 function reasonCodes(input: {
@@ -321,8 +313,21 @@ export class GoogleConsentModeObserver {
     const preChoiceNetwork = choiceTimestamp === null ? [] : network.filter((item) => item.timestamp < choiceTimestamp);
     const postChoiceNetwork = choiceTimestamp === null ? [] : network.filter((item) => item.timestamp >= choiceTimestamp);
     const defaultIssuedLate = Boolean(firstDefault && network.some((item) => item.timestamp + this.timestampToleranceMs < firstDefault.timestamp));
-    const defaultDenied = defaults.some(hasDeniedState);
-    const positiveUpdate = updates.some((command) => hasGrantedState(command) && (choiceTimestamp === null || command.timestamp >= choiceTimestamp));
+    const ordered = [...commands].sort((a, b) => a.timestamp - b.timestamp || a.sequence - b.sequence);
+    let effective = { ...EMPTY_STATE };
+    let stateBeforeChoice = { ...EMPTY_STATE };
+    const explicitlySet = new Set<string>();
+    for (const command of ordered) {
+      effective = applyCommand(effective, command.state);
+      for (const field of GOOGLE_CONSENT_CORE_FIELDS) if (command.state[field] !== 'unset') explicitlySet.add(field);
+      if (choiceTimestamp === null || command.timestamp < choiceTimestamp) stateBeforeChoice = effective;
+    }
+    const stateAtDefault = firstDefault ? applyCommand({ ...EMPTY_STATE }, firstDefault.state) : { ...EMPTY_STATE };
+    const defaultDenied = defaults.some((command) => hasCoreDenied(applyCommand({ ...EMPTY_STATE }, command.state)));
+    const positiveUpdate = updates.some((command) => hasCoreGranted(command.state) && (choiceTimestamp === null || command.timestamp >= choiceTimestamp));
+    const conflictingDefaults = defaults.some((command, index) => index > 0 && GOOGLE_CONSENT_CORE_FIELDS.some((field) => {
+      const first = stateAtDefault[field]; const other = command.state[field]; return other !== 'unset' && first !== 'unset' && other !== first;
+    }));
     const lifecycle = defaults.length && updates.length ? 'default_and_update'
       : defaults.length ? 'default_observed'
         : updates.length ? 'update_only'
@@ -335,11 +340,13 @@ export class GoogleConsentModeObserver {
       classification = 'manual_gating_candidate';
     } else if (!hasLifecycle && !hasNetworkEvidence) {
       classification = 'not_configured';
+    } else if (conflictingDefaults) {
+      classification = 'ambiguous';
     } else if (
       choiceTimestamp !== null &&
       !defaultIssuedLate &&
-      defaultDenied &&
-      preChoiceNetwork.some(hasGcsParameter)
+      defaultDenied && hasCoreDenied(stateBeforeChoice) &&
+      preChoiceNetwork.length > 0
     ) {
       // gcs is retained only as opaque presence evidence. The observed denied
       // default supplies the consent state; no network encoding is decoded.
@@ -362,6 +369,13 @@ export class GoogleConsentModeObserver {
       classification,
       lifecycle,
       commands,
+      effective_state: effective,
+      core_signals: {
+        observed_count: explicitlySet.size,
+        explicitly_set: GOOGLE_CONSENT_CORE_FIELDS.filter((field) => explicitlySet.has(field)),
+        missing: GOOGLE_CONSENT_CORE_FIELDS.filter((field) => !explicitlySet.has(field)),
+        unknown: GOOGLE_CONSENT_CORE_FIELDS.filter((field) => explicitlySet.has(field) && ordered.some((command) => command.state[field] === 'unknown'))
+      },
       network,
       user_choice_timestamp: choiceTimestamp,
       tracking_gated: this.trackingGated,

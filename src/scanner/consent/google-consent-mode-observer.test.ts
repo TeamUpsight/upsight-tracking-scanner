@@ -137,4 +137,38 @@ describe('Google Consent Mode observer', () => {
     expect(Object.isFrozen(observer.result().commands[0].state)).toBe(true);
     expect(Object.isFrozen(observer.result().network[0].parameters)).toBe(true);
   });
+
+  it('requires core signals for Advanced and ignores non-core denied fields', () => {
+    const observer = new GoogleConsentModeObserver();
+    observer.observeGtagCall('consent', 'default', { functionality_storage: 'denied' }, 10);
+    observer.observeMeasurementRequest({ url: googleMeasurementUrl('gcs=G100'), timestamp: 20 });
+    observer.markUserChoice(30);
+    expect(observer.result()).toMatchObject({ classification: 'ambiguous', core_signals: { observed_count: 0, missing: ['ad_storage', 'analytics_storage', 'ad_user_data', 'ad_personalization'] } });
+  });
+
+  it('rejects non-core-only positive updates as Basic evidence', () => {
+    const observer = new GoogleConsentModeObserver();
+    observer.markTrackingGated(); observer.markPreChoiceMeasurementWindowObserved();
+    observer.observeGtagCall('consent', 'default', { ad_storage: 'denied' }, 10);
+    observer.markUserChoice(20);
+    observer.observeGtagCall('consent', 'update', { functionality_storage: 'granted' }, 21);
+    observer.observeMeasurementRequest({ url: googleMeasurementUrl('gcs=G111'), timestamp: 30 });
+    expect(observer.result().classification).toBe('ambiguous');
+  });
+
+  it('inherits omitted fields across partial updates and reports core completeness', () => {
+    const observer = new GoogleConsentModeObserver();
+    observer.observeGtagCall('consent', 'default', { ad_storage: 'denied', analytics_storage: 'denied', ad_user_data: 'denied', ad_personalization: 'denied' }, 10);
+    observer.observeGtagCall('consent', 'update', { analytics_storage: 'granted' }, 20);
+    expect(observer.result()).toMatchObject({ effective_state: { ad_storage: 'denied', analytics_storage: 'granted', ad_user_data: 'denied', ad_personalization: 'denied' }, core_signals: { observed_count: 4, missing: [] } });
+  });
+
+  it('keeps conflicting defaults ambiguous and update-only lifecycle explicit', () => {
+    const observer = new GoogleConsentModeObserver();
+    observer.observeGtagCall('consent', 'default', { ad_storage: 'denied' }, 10);
+    observer.observeGtagCall('consent', 'default', { ad_storage: 'granted' }, 11);
+    observer.observeGtagCall('consent', 'update', { ad_storage: 'granted' }, 20);
+    observer.markUserChoice(30);
+    expect(observer.result()).toMatchObject({ classification: 'ambiguous', lifecycle: 'default_and_update' });
+  });
 });

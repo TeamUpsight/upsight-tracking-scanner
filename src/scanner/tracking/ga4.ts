@@ -54,16 +54,14 @@ function valueFrom(urlParams: URLSearchParams, bodyParams: URLSearchParams, key:
   return bodyParams.get(key) || urlParams.get(key) || '';
 }
 
-/** Convert Consent Mode wire hints into a bounded semantic class. Raw values are never retained. */
+/** Consent Mode wire markers are retained only as opaque presence evidence. */
 function consentMeasurement(urlParams: URLSearchParams, bodyParams: URLSearchParams): ParsedGA4Request['consent_measurement'] {
-  const gcs = valueFrom(urlParams, bodyParams, 'gcs');
-  const gcd = valueFrom(urlParams, bodyParams, 'gcd');
-  if (!gcs && !gcd) return 'unknown';
-  // G111 is the only well-defined full-grant shape we classify positively.
-  if (/^G111$/i.test(gcs)) return 'full_measurement';
-  // A Consent Mode marker which is not a full grant may be a denied/cookieless
-  // ping. Keep it limited rather than treating it as a pre-consent violation.
-  return 'limited_measurement';
+  // Google's stable public guidance describes these parameters' purpose, but
+  // not a stable wire decoder for exact states. Presence cannot establish
+  // full or limited measurement.
+  void valueFrom(urlParams, bodyParams, 'gcs');
+  void valueFrom(urlParams, bodyParams, 'gcd');
+  return 'unknown';
 }
 
 function parseNumber(raw: string): number | undefined {
