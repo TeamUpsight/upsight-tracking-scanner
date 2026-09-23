@@ -1330,6 +1330,7 @@ export async function runStorefrontAudit(
     evidence.consent.preferences_action_available = has('open_preferences');
     evidence.consent.us_privacy = merged.us_privacy;
     evidence.consent.actions_rollout_enabled = !telemetry.observation_only;
+    evidence.consent.rollout_gate_eligible = telemetry.rollout_gate_eligible === true;
     return merged;
   };
 
@@ -1375,6 +1376,7 @@ export async function runStorefrontAudit(
     evidence.consent.reject_action_available = merged.actions.some((action) => (action.action === 'reject_all' || action.action === 'only_necessary') && action.availability !== 'not_present' && action.availability !== 'unknown');
     evidence.consent.preferences_action_available = merged.actions.some((action) => action.action === 'open_preferences' && action.availability !== 'not_present' && action.availability !== 'unknown');
     evidence.consent.actions_rollout_enabled = !result.telemetry.observation_only;
+    evidence.consent.rollout_gate_eligible = result.telemetry.rollout_gate_eligible === true;
     evidence.consent.cookie_names = result.result.storage_changes.map((change) => change.key_name).slice(0, 100);
     if (result.diagnostic_observation) recordConsentDiagnostic(result.diagnostic_observation);
     if (emitTrace) for (const step of compatibility.trace_events) addTrace(step, {}, { module: 'consent', severity: 'info' });

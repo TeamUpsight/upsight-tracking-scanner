@@ -19,12 +19,14 @@ export interface ConsentBooleanSummary {
 
 export interface TcfPingSummary {
   cmp_loaded: boolean | null;
+  cmp_status?: 'stub' | 'loading' | 'loaded' | 'error' | null;
   api_version: string | null;
   gdpr_applies: boolean | null;
 }
 
 export interface TcfSemanticSummary {
   event_status: TcfEventStatus | null;
+  cmp_status?: 'stub' | 'loading' | 'loaded' | 'error' | null;
   gdpr_applies: boolean | null;
   purpose_consents: ConsentBooleanSummary;
   vendor_consents: ConsentBooleanSummary;
@@ -36,6 +38,11 @@ export interface TcfFrameworkObservation {
   ping: TcfPingSummary | null;
   latest_event: TcfSemanticSummary | null;
   event_count: number;
+  /** True only after an addEventListener callback confirms a listener id. */
+  listener_registered?: boolean;
+  /** True when at least one successful listener callback supplied TCData. */
+  listener_event_observed?: boolean;
+  listener_registration_failed?: boolean;
   reason_codes: ConsentAuditCode[];
 }
 
@@ -125,6 +132,9 @@ export function mergeConsentFrameworkObservations(
       ping: later.tcf.ping || earlier.tcf.ping,
       latest_event: later.tcf.latest_event || earlier.tcf.latest_event,
       event_count: earlier.tcf.event_count + later.tcf.event_count,
+      listener_registered: earlier.tcf.listener_registered === true || later.tcf.listener_registered === true,
+      listener_event_observed: earlier.tcf.listener_event_observed === true || later.tcf.listener_event_observed === true,
+      listener_registration_failed: earlier.tcf.listener_registration_failed === true || later.tcf.listener_registration_failed === true,
       reason_codes: mergeCodes(earlier.tcf.reason_codes, later.tcf.reason_codes)
     },
     gpp: {
@@ -258,9 +268,14 @@ function tcfPingSummary(payload: unknown): TcfPingSummary | null {
   if (!source) return null;
   return {
     cmp_loaded: readBoolean(source.cmpLoaded),
+    cmp_status: tcfCmpStatus(source.cmpStatus),
     api_version: safeVersion(source.apiVersion),
     gdpr_applies: readBoolean(source.gdprApplies)
   };
+}
+
+function tcfCmpStatus(value: unknown): 'stub' | 'loading' | 'loaded' | 'error' | null {
+  return value === 'stub' || value === 'loading' || value === 'loaded' || value === 'error' ? value : null;
 }
 
 function tcfSemanticSummary(payload: unknown): TcfSemanticSummary | null {
@@ -270,6 +285,7 @@ function tcfSemanticSummary(payload: unknown): TcfSemanticSummary | null {
   const vendor = recordOf(source.vendor);
   return {
     event_status: tcfEventStatus(source.eventStatus),
+    cmp_status: tcfCmpStatus(source.cmpStatus),
     gdpr_applies: readBoolean(source.gdprApplies),
     purpose_consents: consentSummary(purpose?.consents),
     vendor_consents: consentSummary(vendor?.consents)
@@ -488,6 +504,9 @@ function gppReasonCodes(ping: GppPingSummary | null): ConsentAuditCode[] {
 
 function tcfLifecycleFromPing(ping: TcfPingSummary | null): FrameworkLifecycle {
   if (!ping) return 'stub_present';
+  if (ping.cmp_status === 'error') return 'error';
+  if (ping.cmp_status === 'stub') return 'stub_present';
+  if (ping.cmp_status === 'loading') return 'loading';
   return ping.cmp_loaded === true ? 'ready' : 'loading';
 }
 
@@ -510,6 +529,9 @@ export function observeTcfFramework(runtime: FrameworkApiWindow): FrameworkObser
       ping: null,
       latest_event: null,
       event_count: 0,
+      listener_registered: false,
+      listener_event_observed: false,
+      listener_registration_failed: false,
       reason_codes: []
     };
     return { state: absent, stop() {} };
@@ -524,6 +546,9 @@ export function observeTcfFramework(runtime: FrameworkApiWindow): FrameworkObser
     ping: null,
     latest_event: null,
     event_count: 0,
+    listener_registered: false,
+    listener_event_observed: false,
+    listener_registration_failed: false,
     reason_codes: [ConsentAuditCodes.TCF_PRESENT]
   };
   const fail = () => {
@@ -537,16 +562,26 @@ export function observeTcfFramework(runtime: FrameworkApiWindow): FrameworkObser
       state = { ...state, ping, lifecycle: tcfLifecycleFromPing(ping) };
     });
     api('addEventListener', 2, (payload, success) => {
-      if (stopped || success === false) return fail();
+      if (stopped) return;
+      if (success !== true) {
+        if (success === false) {
+          state = { ...state, listener_registration_failed: true };
+          return fail();
+        }
+        return;
+      }
       listenerId = eventListenerId(payload) ?? listenerId;
       const event = tcfSemanticSummary(payload);
       if (!event) return;
+      const registered = eventListenerId(payload) !== null;
       const ready = event.event_status === 'tcloaded' || event.event_status === 'useractioncomplete';
       state = {
         ...state,
-        lifecycle: ready ? 'ready' : state.lifecycle,
+        lifecycle: state.lifecycle === 'error' || event.cmp_status === 'error' ? 'error' : ready ? 'ready' : state.lifecycle,
         latest_event: event,
-        event_count: state.event_count + 1
+        event_count: state.event_count + 1,
+        listener_registered: state.listener_registered || registered,
+        listener_event_observed: true
       };
     });
   } catch {

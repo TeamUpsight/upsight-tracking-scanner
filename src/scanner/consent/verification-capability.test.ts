@@ -18,6 +18,7 @@ describe('Reject verification capability preflight', () => {
         ...absent,
         tcf: {
           present: true, lifecycle: 'ready', ping: { cmp_loaded: true, api_version: '2.2', gdpr_applies: true },
+          listener_registered: true, listener_event_observed: true, listener_registration_failed: false,
           latest_event: {
             event_status: 'tcloaded', gdpr_applies: true,
             purpose_consents: { known: true, total_count: 2, granted_count: 1, denied_count: 1 },
@@ -77,7 +78,89 @@ describe('Reject verification capability preflight', () => {
   it('leaves a loading TCF observer inconclusive rather than asserting absence', () => {
     expect(assessRejectVerificationCapability({
       providerState: ambiguous,
-      frameworks: { ...absent, tcf: { ...absent.tcf, lifecycle: 'loading' } }
+      frameworks: { ...absent, tcf: { ...absent.tcf, present: true, lifecycle: 'loading' } }
     })).toMatchObject({ status: 'inconclusive', reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_PENDING] });
+  });
+
+  it('accepts a populated cmpuishown callback as capability while lifecycle remains loading', () => {
+    const tcf: ConsentFrameworkObservations['tcf'] = {
+      present: true, lifecycle: 'loading', ping: { cmp_loaded: null, cmp_status: null, api_version: '2.2', gdpr_applies: true },
+      listener_registered: true, listener_event_observed: true, listener_registration_failed: false,
+      latest_event: {
+        event_status: 'cmpuishown', cmp_status: 'loaded', gdpr_applies: true,
+        purpose_consents: { known: true, total_count: 5, granted_count: 0, denied_count: 5 },
+        vendor_consents: { known: true, total_count: 4, granted_count: 0, denied_count: 4 }
+      }, event_count: 1, reason_codes: []
+    };
+    expect(assessRejectVerificationCapability({ providerState: ambiguous, frameworks: { ...absent, tcf } }))
+      .toEqual({ status: 'available', strong_families: ['framework_tcf'], reason_codes: [] });
+    expect(tcf.lifecycle).toBe('loading');
+  });
+
+  it('accepts an operational semantic listener when ping has no reply', () => {
+    const tcf: ConsentFrameworkObservations['tcf'] = {
+      present: true, lifecycle: 'stub_present', ping: null,
+      listener_registered: true, listener_event_observed: true, listener_registration_failed: false,
+      latest_event: {
+        event_status: 'cmpuishown', cmp_status: 'loaded', gdpr_applies: true,
+        purpose_consents: { known: true, total_count: 2, granted_count: 0, denied_count: 2 },
+        vendor_consents: { known: true, total_count: 1, granted_count: 0, denied_count: 1 }
+      }, event_count: 1, reason_codes: []
+    };
+    expect(assessRejectVerificationCapability({ providerState: ambiguous, frameworks: { ...absent, tcf } }))
+      .toMatchObject({ status: 'available', strong_families: ['framework_tcf'] });
+  });
+
+  it('requires the TCF API itself to be present before accepting listener evidence', () => {
+    const tcf: ConsentFrameworkObservations['tcf'] = {
+      present: false, lifecycle: 'loading', ping: null,
+      listener_registered: true, listener_event_observed: true, listener_registration_failed: false,
+      latest_event: {
+        event_status: 'cmpuishown', cmp_status: 'loaded', gdpr_applies: true,
+        purpose_consents: { known: true, total_count: 1, granted_count: 0, denied_count: 1 },
+        vendor_consents: { known: true, total_count: 1, granted_count: 0, denied_count: 1 }
+      }, event_count: 1, reason_codes: []
+    };
+    expect(assessRejectVerificationCapability({ providerState: ambiguous, frameworks: { ...absent, tcf } }).status)
+      .toBe('unavailable');
+  });
+
+  it('keeps cmpuishown capability pending without a listener, semantic aggregate, or recognized state', () => {
+    const event = {
+      event_status: 'cmpuishown' as const, cmp_status: 'loaded' as const, gdpr_applies: true,
+      purpose_consents: { known: true, total_count: 1, granted_count: 0, denied_count: 1 },
+      vendor_consents: { known: false, total_count: 0, granted_count: 0, denied_count: 0 }
+    };
+    const base: ConsentFrameworkObservations['tcf'] = {
+      present: true, lifecycle: 'loading', ping: { cmp_loaded: null, cmp_status: null, api_version: '2.2', gdpr_applies: true },
+      listener_registered: true, listener_event_observed: true, listener_registration_failed: false,
+      latest_event: event, event_count: 1, reason_codes: []
+    };
+    const emptyEvent = { ...event, purpose_consents: { known: false, total_count: 0, granted_count: 0, denied_count: 0 }, vendor_consents: { known: false, total_count: 0, granted_count: 0, denied_count: 0 } };
+    const unknownEvent = { ...event, event_status: 'unknown' as const };
+    const cases: ConsentFrameworkObservations['tcf'][] = [
+      { ...base, listener_registered: false, listener_event_observed: false },
+      { ...base, latest_event: emptyEvent },
+      { ...base, latest_event: unknownEvent }
+    ];
+    for (const tcf of cases) {
+      expect(assessRejectVerificationCapability({ providerState: ambiguous, frameworks: { ...absent, tcf } }))
+        .toMatchObject({ status: 'inconclusive', reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_PENDING] });
+    }
+  });
+
+  it('does not let a cmpuishown callback overrule cmpLoaded false or a TCF error', () => {
+    const goodEvent: NonNullable<ConsentFrameworkObservations['tcf']['latest_event']> = {
+      event_status: 'cmpuishown', cmp_status: 'loaded', gdpr_applies: true,
+      purpose_consents: { known: true, total_count: 1, granted_count: 0, denied_count: 1 },
+      vendor_consents: { known: true, total_count: 1, granted_count: 0, denied_count: 1 }
+    };
+    const base: ConsentFrameworkObservations['tcf'] = {
+      present: true, lifecycle: 'loading', ping: { cmp_loaded: false, cmp_status: 'stub', api_version: '2.2', gdpr_applies: true },
+      listener_registered: true, listener_event_observed: true, listener_registration_failed: false,
+      latest_event: goodEvent, event_count: 1, reason_codes: []
+    };
+    expect(assessRejectVerificationCapability({ providerState: ambiguous, frameworks: { ...absent, tcf: base } }).status).toBe('inconclusive');
+    expect(assessRejectVerificationCapability({ providerState: ambiguous, frameworks: { ...absent, tcf: { ...base, lifecycle: 'error', ping: { ...base.ping!, cmp_loaded: true, cmp_status: 'error' } } } }).status).toBe('unavailable');
   });
 });

@@ -293,6 +293,8 @@ export interface EvidenceBundle {
     reject_action_available?: boolean;
     preferences_action_available?: boolean;
     actions_rollout_enabled?: boolean;
+    /** Raw global/provider/sample gates, separate from effective capability-gated action eligibility. */
+    rollout_gate_eligible?: boolean;
     interaction_attempted: boolean;
     rejection_verified: boolean;
     acceptance_attempted?: boolean;
@@ -463,6 +465,7 @@ export interface EvidenceBundle {
       preferences_opened?: boolean;
       reject_attempted?: boolean;
       reject_outcome?: 'executed' | 'not_executed' | 'timeout' | 'unsupported' | 'aborted' | 'not_attempted';
+      rollout_gate_eligible?: boolean;
       action_execution_eligible?: boolean;
       requested_action?: string | null;
       execution_strategy?: string | null;
@@ -474,6 +477,30 @@ export interface EvidenceBundle {
       verification_supporting_families?: string[];
       verification_contradicting_families?: string[];
       verification_reason_codes?: string[];
+      tcf_diagnostics?: {
+        lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error';
+        cmp_loaded: boolean | null;
+        cmp_status: 'stub' | 'loading' | 'loaded' | 'error' | null;
+        event_status: 'cmpuishown' | 'tcloaded' | 'useractioncomplete' | 'unknown' | null;
+        listener_registered: boolean;
+        listener_event_observed: boolean;
+        listener_registration_failed: boolean;
+        event_count: number;
+        purpose_consents: { known: boolean; total_count: number; granted_count: number; denied_count: number };
+        vendor_consents: { known: boolean; total_count: number; granted_count: number; denied_count: number };
+      };
+      tcf_capability_diagnostics?: {
+        lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error';
+        cmp_loaded: boolean | null;
+        cmp_status: 'stub' | 'loading' | 'loaded' | 'error' | null;
+        event_status: 'cmpuishown' | 'tcloaded' | 'useractioncomplete' | 'unknown' | null;
+        listener_registered: boolean;
+        listener_event_observed: boolean;
+        listener_registration_failed: boolean;
+        event_count: number;
+        purpose_consents: { known: boolean; total_count: number; granted_count: number; denied_count: number };
+        vendor_consents: { known: boolean; total_count: number; granted_count: number; denied_count: number };
+      };
       verification: 'verified' | 'not_verified' | 'inconclusive';
       persistence: 'confirmed' | 'not_confirmed' | 'inconclusive' | 'not_applicable';
       generic_fallback: boolean;

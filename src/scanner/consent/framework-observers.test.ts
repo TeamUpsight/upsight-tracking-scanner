@@ -102,13 +102,37 @@ describe('Consent framework observers', () => {
       event_count: 3,
       latest_event: {
         event_status: 'useractioncomplete',
+        cmp_status: null,
         purpose_consents: { total_count: 2, granted_count: 0, denied_count: 2 },
         vendor_consents: { total_count: 1, granted_count: 0, denied_count: 1 }
       }
     });
     expect(JSON.stringify(observer.state)).not.toContain('raw-tcf-string');
+    expect(observer.state).toMatchObject({ listener_registered: true, listener_event_observed: true, listener_registration_failed: false });
     observer.stop();
     expect(calls.at(-1)).toEqual({ command: 'removeEventListener', parameter: 12 });
+  });
+
+  it('keeps cmpuishown as a loading UI state while recording a usable listener callback', () => {
+    const { runtime } = tcfFixture({
+      ping: { cmpLoaded: null, apiVersion: '2.2', cmpStatus: 'loading' },
+      events: [{ listenerId: 8, eventStatus: 'cmpuishown', cmpStatus: 'loaded', purpose: { consents: { 1: false } }, vendor: { consents: { 2: false } } }]
+    });
+    const state = observeTcfFramework(runtime).state;
+    expect(state).toMatchObject({
+      lifecycle: 'loading', listener_registered: true, listener_event_observed: true, event_count: 1,
+      latest_event: { event_status: 'cmpuishown', cmp_status: 'loaded', purpose_consents: { known: true, total_count: 1, denied_count: 1 }, vendor_consents: { known: true, total_count: 1, denied_count: 1 } }
+    });
+  });
+
+  it('records TCF listener registration failure as an error', () => {
+    const runtime: FrameworkApiWindow = {
+      __tcfapi(command, _version, callback) {
+        if (command === 'ping') callback({ cmpLoaded: true, apiVersion: '2.2', cmpStatus: 'loaded' }, true);
+        if (command === 'addEventListener') callback({ listenerId: 0, eventStatus: 'cmpuishown' }, false);
+      }
+    };
+    expect(observeTcfFramework(runtime).state).toMatchObject({ lifecycle: 'error', listener_registration_failed: true, listener_registered: false });
   });
 
   it.each([

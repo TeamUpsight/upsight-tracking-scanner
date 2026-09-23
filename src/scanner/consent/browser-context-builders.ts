@@ -168,13 +168,14 @@ export async function installConsentCommandBootstrap(page: Page) {
       return { total_count: granted + denied, granted_count: granted, denied_count: denied };
     };
     const framework = w[frameworkKey] && typeof w[frameworkKey] === 'object' ? w[frameworkKey] : {
-      tcf: { present: false, ping: null, latest_event: null, event_count: 0, listener_id: null, registered: false },
+      tcf: { present: false, ping: null, latest_event: null, event_count: 0, listener_id: null, registered: false, listener_registered: false, listener_event_observed: false, listener_registration_failed: false },
       gpp: { present: false, ping: null, latest_event: null, event_count: 0, listener_id: null, registered: false },
       usp_present: false
     };
     w[frameworkKey] = framework;
-    const tcfPing = (value: any) => value && typeof value === 'object' ? { cmpLoaded: value.cmpLoaded === true ? true : value.cmpLoaded === false ? false : null, apiVersion: typeof value.apiVersion === 'string' ? value.apiVersion.slice(0, 16) : null, gdprApplies: value.gdprApplies === true ? true : value.gdprApplies === false ? false : null } : null;
-    const tcfEvent = (value: any) => value && typeof value === 'object' ? { eventStatus: typeof value.eventStatus === 'string' ? value.eventStatus.slice(0, 32) : null, gdprApplies: value.gdprApplies === true ? true : value.gdprApplies === false ? false : null, purpose: { consents: countBooleans(value.purpose?.consents) }, vendor: { consents: countBooleans(value.vendor?.consents) } } : null;
+    const tcfCmpStatus = (value: any) => value === 'stub' || value === 'loading' || value === 'loaded' || value === 'error' ? value : null;
+    const tcfPing = (value: any) => value && typeof value === 'object' ? { cmpLoaded: value.cmpLoaded === true ? true : value.cmpLoaded === false ? false : null, cmpStatus: tcfCmpStatus(value.cmpStatus), apiVersion: typeof value.apiVersion === 'string' ? value.apiVersion.slice(0, 16) : null, gdprApplies: value.gdprApplies === true ? true : value.gdprApplies === false ? false : null } : null;
+    const tcfEvent = (value: any) => value && typeof value === 'object' ? { eventStatus: typeof value.eventStatus === 'string' ? value.eventStatus.slice(0, 32) : null, cmpStatus: tcfCmpStatus(value.cmpStatus), gdprApplies: value.gdprApplies === true ? true : value.gdprApplies === false ? false : null, purpose: { consents: countBooleans(value.purpose?.consents) }, vendor: { consents: countBooleans(value.vendor?.consents) } } : null;
     const gppPing = (value: any) => {
       if (!value || typeof value !== 'object') return null;
       const parsedSections = value.parsedSections && typeof value.parsedSections === 'object' && !Array.isArray(value.parsedSections) ? value.parsedSections : null;
@@ -207,8 +208,11 @@ export async function installConsentCommandBootstrap(page: Page) {
         framework.tcf.present = true;
         try {
           w.__tcfapi('ping', 2, (value: any) => { framework.tcf.ping = tcfPing(value); });
-          w.__tcfapi('addEventListener', 2, (value: any) => {
+          w.__tcfapi('addEventListener', 2, (value: any, success: boolean) => {
+            if (success !== true) { if (success === false) framework.tcf.listener_registration_failed = true; return; }
             if (!value || typeof value !== 'object') return;
+            framework.tcf.listener_event_observed = true;
+            framework.tcf.listener_registered ||= typeof value.listenerId === 'number' || typeof value.listenerId === 'string';
             framework.tcf.listener_id ??= typeof value.listenerId === 'number' || typeof value.listenerId === 'string' ? value.listenerId : null;
             const event = tcfEvent(value); if (!event) return;
             framework.tcf.latest_event = event;
@@ -700,7 +704,7 @@ export async function observeConsentFrameworksInPage(page: Page): Promise<Consen
   const readBridge = () => page.evaluate((frameworkKey) => {
     const w = window as any;
     const state = w[frameworkKey] && typeof w[frameworkKey] === 'object' ? w[frameworkKey] : null;
-    return state ? { tcf: { ...state.tcf, present: state.tcf?.present === true || typeof w.__tcfapi === 'function' }, gpp: { ...state.gpp, present: state.gpp?.present === true || typeof w.__gpp === 'function' }, usp: state.usp_present === true || typeof w.__uspapi === 'function' } : { tcf: { present: typeof w.__tcfapi === 'function', ping: null, latest_event: null, event_count: 0 }, gpp: { present: typeof w.__gpp === 'function', ping: null, latest_event: null, event_count: 0 }, usp: typeof w.__uspapi === 'function' };
+    return state ? { tcf: { ...state.tcf, present: state.tcf?.present === true || typeof w.__tcfapi === 'function' }, gpp: { ...state.gpp, present: state.gpp?.present === true || typeof w.__gpp === 'function' }, usp: state.usp_present === true || typeof w.__uspapi === 'function' } : { tcf: { present: typeof w.__tcfapi === 'function', ping: null, latest_event: null, event_count: 0, listener_registered: false, listener_event_observed: false, listener_registration_failed: false }, gpp: { present: typeof w.__gpp === 'function', ping: null, latest_event: null, event_count: 0 }, usp: typeof w.__uspapi === 'function' };
   }, FRAMEWORK_OBSERVATIONS_KEY);
   let captured = await readBridge();
   // `addInitScript` observes navigations. A same-document fixture or a page
@@ -760,7 +764,7 @@ export async function observeConsentFrameworksInPage(page: Page): Promise<Consen
   }
   const runtime = {
     __tcfapi: captured.tcf.present ? ((command: string, _version: number, callback: (payload: unknown, success?: boolean) => void) => {
-      if (command === 'ping') callback(captured.tcf.ping, Boolean(captured.tcf.ping));
+      if (command === 'ping' && captured.tcf.ping) callback(captured.tcf.ping, true);
       if (command === 'addEventListener' && captured.tcf.latest_event) callback(captured.tcf.latest_event, true);
     }) : undefined,
     __gpp: captured.gpp.present ? ((command: string, callback: (payload: unknown, success?: boolean) => void) => {
@@ -770,7 +774,7 @@ export async function observeConsentFrameworksInPage(page: Page): Promise<Consen
     __uspapi: captured.usp ? (() => undefined) : undefined
   };
   const observers = observeConsentFrameworks(runtime);
-  const result = { tcf: { ...observers.tcf.state, event_count: Math.max(0, Number(captured.tcf?.event_count) || 0) }, gpp: { ...observers.gpp.state, event_count: Math.max(0, Number(captured.gpp?.event_count) || 0) }, usp: observers.usp };
+  const result = { tcf: { ...observers.tcf.state, event_count: Math.max(0, Number(captured.tcf?.event_count) || 0), listener_registered: captured.tcf?.listener_registered === true, listener_event_observed: captured.tcf?.listener_event_observed === true, listener_registration_failed: captured.tcf?.listener_registration_failed === true }, gpp: { ...observers.gpp.state, event_count: Math.max(0, Number(captured.gpp?.event_count) || 0) }, usp: observers.usp };
   observers.tcf.stop(); observers.gpp.stop();
   return result;
 }

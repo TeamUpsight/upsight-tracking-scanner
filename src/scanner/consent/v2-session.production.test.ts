@@ -479,6 +479,78 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.rejection_verification.status).toBe('inconclusive');
     expect(result.result.persistence).toMatchObject({ status: 'not_applicable', reload_attempted: false, post_reload_observation_completed: false });
   }, 20_000);
+
+  it('VER-OT-05 permits a populated cmpuishown listener state as pre-action capability and verifies only useractioncomplete', async () => {
+    const result = await auditNavigation(`<script>
+      let listener; let rejected=false;
+      const state=()=>({listenerId:7,eventStatus:rejected?'useractioncomplete':'cmpuishown',cmpStatus:'loaded',purpose:{consents:{1:!rejected,2:!rejected}},vendor:{consents:{1:!rejected,2:!rejected}}});
+      window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:null,cmpStatus:'loading',apiVersion:'2.2',gdprApplies:true},true);if(command==='addEventListener'){listener=callback;callback(state(),true);}};
+      window.OneTrust={RejectAll(){}};
+      function reject(){rejected=true;listener?.(state(),true);window.dispatchEvent(new Event('OTConsentApplied'));}
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.telemetry).toMatchObject({ rollout_gate_eligible: true, verification_capability: 'available', action_execution_eligible: true, activation_occurred: true });
+    expect(result.telemetry.tcf_capability_diagnostics).toMatchObject({ lifecycle: 'loading', event_status: 'cmpuishown', listener_registered: true, listener_event_observed: true, purpose_consents: { known: true, total_count: 2 }, vendor_consents: { known: true, total_count: 2 } });
+    expect(result.result.rejection_verification.status).toBe('verified');
+  }, 20_000);
+
+  it('VER-OT-06 keeps empty cmpuishown aggregates observation-only', async () => {
+    const result = await auditNavigation(`<script>
+      window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:null,cmpStatus:'loading',apiVersion:'2.2'},true);if(command==='addEventListener')callback({listenerId:3,eventStatus:'cmpuishown',cmpStatus:'loaded',purpose:{consents:{}},vendor:{consents:{}}},true);};
+      window.OneTrust={RejectAll(){window.called=true;}};
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('direct');
+    expect(result.result.interactions).toEqual([]);
+    expect(result.telemetry).toMatchObject({ verification_capability: 'inconclusive', action_execution_eligible: false, tcf_capability_diagnostics: { event_status: 'cmpuishown', listener_registered: true } });
+  }, 20_000);
+
+  it('VER-OT-07 does not activate when a cmpuishown listener remains registered but no callback arrives', async () => {
+    const result = await auditNavigation(`<script>
+      window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:null,cmpStatus:'loading',apiVersion:'2.2'},true);};
+      window.OneTrust={RejectAll(){window.called=true;}};
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.interactions).toEqual([]);
+    expect(result.telemetry).toMatchObject({ verification_capability: 'inconclusive', action_execution_eligible: false, tcf_diagnostics: { listener_registered: false, listener_event_observed: false, event_count: 0 } });
+  }, 20_000);
+
+  it('VER-OT-08 blocks a TCF listener registration failure', async () => {
+    const result = await auditNavigation(`<script>
+      window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:true,cmpStatus:'loaded',apiVersion:'2.2'},true);if(command==='addEventListener')callback({listenerId:0,eventStatus:'cmpuishown'},false);};
+      window.OneTrust={RejectAll(){window.called=true;}};
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.interactions).toEqual([]);
+    expect(result.telemetry).toMatchObject({ verification_capability: 'unavailable', action_execution_eligible: false, tcf_diagnostics: { listener_registration_failed: true } });
+  }, 20_000);
+
+  it('VER-OT-10 keeps a TCF stub without a semantic callback observation-only', async () => {
+    const result = await auditNavigation(`<script>
+      window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:false,cmpStatus:'stub',apiVersion:'2.2'},true);};
+      window.OneTrust={RejectAll(){window.called=true;}};
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.interactions).toEqual([]);
+    expect(result.telemetry).toMatchObject({ verification_capability: 'inconclusive', action_execution_eligible: false, tcf_capability_diagnostics: { cmp_loaded: false, cmp_status: 'stub', listener_event_observed: false } });
+  }, 20_000);
+
+  it('VER-OT-11 does not treat a callback without successful registration status as a verifier', async () => {
+    const result = await auditNavigation(`<script>
+      window.__tcfapi=(command,version,callback)=>{if(command==='addEventListener')callback({listenerId:2,eventStatus:'cmpuishown',cmpStatus:'loaded',purpose:{consents:{1:false}},vendor:{consents:{1:false}}});};
+      window.OneTrust={RejectAll(){window.called=true;}};
+    </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.result.interactions).toEqual([]);
+    expect(result.telemetry).toMatchObject({ verification_capability: 'inconclusive', action_execution_eligible: false, tcf_capability_diagnostics: { listener_registered: false, listener_event_observed: false } });
+  }, 20_000);
+
+  it('VER-OT-09 does not verify a post-action cmpuishown or accepted useractioncomplete state', async () => {
+    for (const postAction of ['cmpuishown', 'accepted'] as const) {
+      const result = await auditNavigation(`<script>
+        let listener;
+        const state=()=>({listenerId:4,eventStatus:${JSON.stringify(postAction === 'cmpuishown' ? 'cmpuishown' : 'useractioncomplete')},cmpStatus:'loaded',purpose:{consents:{1:${postAction === 'accepted'},2:${postAction === 'accepted'}}},vendor:{consents:{1:${postAction === 'accepted'},2:${postAction === 'accepted'}}}});
+        window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:null,cmpStatus:'loading',apiVersion:'2.2'},true);if(command==='addEventListener'){listener=callback;callback({listenerId:4,eventStatus:'cmpuishown',cmpStatus:'loaded',purpose:{consents:{1:true,2:true}},vendor:{consents:{1:true,2:true}}},true);}};
+        window.OneTrust={RejectAll(){}};function reject(){listener?.(state(),true);}
+      </script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler" onclick="reject()">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+      expect(result.telemetry.action_execution_eligible).toBe(true);
+      expect(result.result.rejection_verification.status).toBe(postAction === 'cmpuishown' ? 'inconclusive' : 'not_verified');
+    }
+  }, 30_000);
   it('uses the OneTrust adapter for provider evidence, state, banner, and actions', async () => {
     const result = await audit(`<script>window.OneTrust={RejectAll(){}};</script><script src="https://cdn.cookielaw.org/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`);
     expect(result.result.mechanisms.find((item) => item.mechanism === 'cmp')?.provider?.candidates[0]?.provider_name).toBe('onetrust');

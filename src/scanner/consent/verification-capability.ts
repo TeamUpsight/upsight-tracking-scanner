@@ -30,6 +30,21 @@ function providerCategoryChannelIsAvailable(state: ConsentState) {
   );
 }
 
+function tcfChannelIsAvailable(input: ConsentFrameworkObservations['tcf']) {
+  const event = input.latest_event;
+  const recognizedEvent = event?.event_status === 'cmpuishown' || event?.event_status === 'tcloaded' || event?.event_status === 'useractioncomplete';
+  const hasAggregate = Boolean(event && (
+    (event.purpose_consents.known && event.purpose_consents.total_count > 0) ||
+    (event.vendor_consents.known && event.vendor_consents.total_count > 0)
+  ));
+  const hasOperationalListener = input.listener_registered === true && input.listener_event_observed === true && input.listener_registration_failed !== true;
+  const errored = input.lifecycle === 'error' || input.ping?.cmp_status === 'error' || event?.cmp_status === 'error' || input.listener_registration_failed === true;
+  // `cmpLoaded:false` explicitly means the stub is still serving. A valid
+  // event cannot overrule that contradictory ping state for action preflight.
+  const stubContradiction = input.ping?.cmp_loaded === false;
+  return { available: input.present && !errored && !stubContradiction && hasOperationalListener && recognizedEvent && hasAggregate, errored, stubContradiction };
+}
+
 /**
  * Checks for a semantic verifier before interaction. Events, clicks, banner
  * visibility, persistence keys, and storage metadata intentionally do not
@@ -41,16 +56,15 @@ export function assessRejectVerificationCapability(input: {
 }): VerificationCapability {
   const strongFamilies: VerificationEvidenceFamily[] = [];
   const tcf = input.frameworks.tcf;
-  const tcfStateIsSemantic = tcf.lifecycle === 'ready' && tcf.latest_event !== null && (
-    tcf.latest_event.purpose_consents.known || tcf.latest_event.vendor_consents.known
-  );
-  if (tcfStateIsSemantic) strongFamilies.push('framework_tcf');
+  const tcfCapability = tcfChannelIsAvailable(tcf);
+  if (tcfCapability.available) strongFamilies.push('framework_tcf');
   if (providerStateIsSemantic(input.providerState)) strongFamilies.push('provider_state');
   if (providerCategoriesAreSemantic(input.providerState)) strongFamilies.push('provider_category_state');
   else if (providerCategoryChannelIsAvailable(input.providerState)) strongFamilies.push('provider_category_state');
 
   if (strongFamilies.length) return { status: 'available', strong_families: strongFamilies, reason_codes: [] };
-  if (tcf.lifecycle === 'stub_present' || tcf.lifecycle === 'loading') {
+  if (tcfCapability.errored) return { status: 'unavailable', strong_families: [], reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_UNAVAILABLE] };
+  if (tcfCapability.stubContradiction || tcf.present && !tcfCapability.available && (tcf.lifecycle === 'stub_present' || tcf.lifecycle === 'loading')) {
     return { status: 'inconclusive', strong_families: [], reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_PENDING] };
   }
   return { status: 'unavailable', strong_families: [], reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_UNAVAILABLE] };
