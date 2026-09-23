@@ -42,6 +42,7 @@ describe('fresh Consent V2 context', () => {
     expect(browser.newContext).toHaveBeenCalledTimes(2);
     expect(browser.newContext).toHaveBeenNthCalledWith(1, expect.objectContaining({ serviceWorkers: 'block' }));
     expect(browser.newContext).toHaveBeenNthCalledWith(1, expect.not.objectContaining({ storageState: expect.anything() }));
+    expect(browser.newContext).toHaveBeenNthCalledWith(1, expect.not.objectContaining({ proxy: expect.anything() }));
     expect(first.context.newPage).toHaveBeenCalledTimes(1);
   });
 

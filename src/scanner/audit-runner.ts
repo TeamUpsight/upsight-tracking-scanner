@@ -1254,6 +1254,7 @@ export async function runStorefrontAudit(
   let lastProxyPort: number | null = null;
   let lastProxyRotated = false;
   let currentProxyCountry = countryForGeo(geo, 0);
+  let currentBrowserRoute: 'local' | 'standard' | 'stealth' = 'local';
   let effectiveDomain = normalizedDomain || '';
   const observedContexts = new WeakSet<BrowserContext>();
   const collectorCookieNames = new Set<string>();
@@ -1800,6 +1801,9 @@ export async function runStorefrontAudit(
       const suffix = geo === 'USA' ? '_USA' : `_${geo}`;
       cdpUrl = process.env[`ENV_CDP_URL${suffix}`] || process.env.ENV_CDP_URL || '';
     }
+    currentBrowserRoute = cdpUrl
+      ? (summarizeCdpUrlForTrace(cdpUrl).route === '/stealth' ? 'stealth' : 'standard')
+      : 'local';
     addTrace('proxy_attempt_started', { provider: currentProxyProvider, attempt: attempt + 1, configured_port: lastProxyPort, geo });
     const identity: AccessIdentity = {
       provider: currentProxyProvider,
@@ -2357,6 +2361,7 @@ export async function runStorefrontAudit(
     if (consentSelected && consentV2Enabled && !trackingSelected) {
       currentPhase = 'consent_fresh_initial_load';
       let consentCapture: Awaited<ReturnType<typeof prepareConsentV2Session>> | null = null;
+      let freshConsentFailureStage = 'context_creation';
       try {
         const freshConsent = await (dependencies.createFreshConsentContext || createFreshConsentContext)(browser!, {
           requestedGeo: geo,
@@ -2372,13 +2377,29 @@ export async function runStorefrontAudit(
           geo: freshConsent.geo,
           authorized_access: Boolean(consentAuthorized)
         });
+        addTrace('consent_transport_configuration', {
+          browser_provider: currentBrowserRoute === 'local' ? 'local' : 'browserless',
+          browser_route: currentBrowserRoute,
+          proxy_mode: currentProxyProvider,
+          proxy_country: currentProxyCountry.toLowerCase(),
+          proxy_port: lastProxyPort,
+          proxy_session_strategy: currentProxyProvider === 'decodo' ? 'decodo_session_per_browser_connection' : 'browserless_residential_sticky',
+          browser_reused: true,
+          browser_context_reused: false,
+          fresh_context: true,
+          fresh_browser_session: false,
+          expected_geo: geo
+        });
         consentCapture = await prepareConsentV2Session(consentHomepage);
         consentCapture.markNavigationStarted();
+        freshConsentFailureStage = 'target_navigation';
         const navigation = await navigateFreshConsentContext(consentHomepage, storefrontUrl, { timings: consentTimings });
         if (navigation.dom_content_loaded) consentCapture.markDOMContentLoaded();
         consentCapture.markInitialObservationCompleted();
+        freshConsentFailureStage = 'access_validation';
         const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
         const readiness = consentNavigationReadiness(consentAccess);
+        freshConsentFailureStage = readiness.status === 'ready' ? 'consent_observation' : 'challenge_detection';
         consentV2 = await runConsentV2Session(consentHomepage, {
           geo,
           geo_verified: freshConsent.geo.verified,
@@ -2411,6 +2432,7 @@ export async function runStorefrontAudit(
         evidence.runtime.failed_phase ||= 'consent_fresh_initial_load';
         addTrace('consent_fresh_navigation_inconclusive', {
           reason_code: 'DETECTION_INCONCLUSIVE',
+          failure_stage: freshConsentFailureStage,
           error_family: runtimeErrorFamily(error)
         });
       }

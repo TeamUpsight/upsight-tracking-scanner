@@ -654,6 +654,78 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(JSON.parse(String(buildDebugPackageFiles(result)['consent-summary.json'])).measurement).toEqual(measurement);
   }, 35_000);
 
+  it('WP13A-TRANSPORT-01 classifies a fresh tunnel failure and preserves authoritative shared Consent evidence', async () => {
+    const result = await auditFixture(
+      200,
+      `<script>new Image().src='/g/collect?tid=G-FIXTURE&en=page_view&gcs=G100';</script>${oneTrust}`,
+      true,
+      ['consent'],
+      false,
+      {
+        createFreshConsentContext: async (browser, input) => {
+          const context = await browser.newContext({ serviceWorkers: 'block' });
+          const page = await context.newPage();
+          page.goto = async () => { throw new Error('net::ERR_TUNNEL_CONNECTION_FAILED'); };
+          return {
+            context,
+            page,
+            service_workers: 'blocked',
+            geo: { requested_geo: input.requestedGeo, proxy_region: input.proxyRegion, verified: true, verification_method: 'egress_probe', confidence: 'high', reason_codes: [] }
+          } as any;
+        }
+      }
+    ) as unknown as StorefrontAudit;
+    const evidence = result.evidence_bundle!;
+    const telemetry = result.runtime_metrics?.consent_v2!;
+    const trace = JSON.parse(String(result.trace_steps)) as Array<Record<string, unknown>>;
+
+    expect(result).toMatchObject({ scan_status: 'partial', cmp_provider: 'OneTrust', consent_status: 'inconclusive' });
+    expect(evidence.consent).toMatchObject({ executed: true, banner_visible: true });
+    expect(telemetry).toMatchObject({ session_status: 'unavailable', shared_observation: { provider: 'onetrust', banner_visibility: 'visible' } });
+    expect(trace).toEqual(expect.arrayContaining([
+      expect.objectContaining({ step: 'consent_fresh_navigation_inconclusive', failure_stage: 'target_navigation', error_family: 'PROXY_TUNNEL_FAILED' }),
+      expect.objectContaining({ step: 'consent_transport_configuration', browser_reused: true, browser_context_reused: false, fresh_context: true, fresh_browser_session: false })
+    ]));
+    expect(trace).not.toEqual(expect.arrayContaining([expect.objectContaining({ access_reason_code: expect.stringMatching(/BLOCK|CHALLENGE/) })]));
+  }, 35_000);
+
+  it('WP13A-TRANSPORT-02 classifies a fresh target challenge as access blocking after an HTTP response', async () => {
+    const result = await auditFixture(
+      200,
+      `<script>new Image().src='/g/collect?tid=G-FIXTURE&en=page_view&gcs=G100';</script>${oneTrust}`,
+      true,
+      ['consent'],
+      false,
+      {
+        createFreshConsentContext: async (browser, input) => {
+          const context = await browser.newContext({ serviceWorkers: 'block' });
+          const page = await context.newPage();
+          await page.route('**/*', (route) => route.fulfill({
+            status: 403,
+            headers: { 'cf-ray': 'fixture' },
+            contentType: 'text/html',
+            body: '<title>Just a moment</title><main>Checking your browser</main>'
+          }));
+          return {
+            context,
+            page,
+            service_workers: 'blocked',
+            geo: { requested_geo: input.requestedGeo, proxy_region: input.proxyRegion, verified: true, verification_method: 'egress_probe', confidence: 'high', reason_codes: [] }
+          } as any;
+        }
+      }
+    ) as unknown as StorefrontAudit;
+    const trace = JSON.parse(String(result.trace_steps)) as Array<Record<string, unknown>>;
+
+    expect(result).toMatchObject({ scan_status: 'completed', cmp_provider: 'OneTrust', consent_status: 'inconclusive' });
+    expect(trace).toEqual(expect.arrayContaining([
+      expect.objectContaining({ step: 'consent_fresh_navigation_blocked_or_challenged', access_reason_code: 'CLOUDFLARE_CHALLENGE' })
+    ]));
+    expect(trace).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ step: 'consent_fresh_navigation_inconclusive', error_family: 'PROXY_TUNNEL_FAILED' })
+    ]));
+  }, 35_000);
+
   it('CMP-TELEM-SURVIVE-02 Audit 409 preserves shared telemetry when the fresh PDP context is unavailable', async () => {
     const result = await auditFixture(
       200,

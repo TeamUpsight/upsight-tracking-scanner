@@ -612,7 +612,11 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     const notFound = Object.assign(new Error('not found'), { code: 'ENOTFOUND' });
     const temporary = Object.assign(new Error('temporary resolver failure'), { code: 'EAI_AGAIN' });
     expect(await resolveHostnameStatus('missing.example', {
-      lookupFn: async () => { throw notFound; }
+      lookupFn: async () => { throw notFound; },
+      fetchFn: async () => new Response(JSON.stringify({ Status: 3 }), {
+        status: 200,
+        headers: { 'content-type': 'application/dns-json' }
+      })
     })).toBe('not_resolved');
     expect(await resolveHostnameStatus('temporary.example', {
       lookupFn: async () => { throw temporary; },
