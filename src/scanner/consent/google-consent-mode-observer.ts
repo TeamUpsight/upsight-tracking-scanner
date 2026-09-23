@@ -70,6 +70,8 @@ export interface GoogleConsentModeResult {
   commands: GoogleConsentCommandObservation[];
   effective_state: NormalizedGoogleConsentState;
   core_signals: { observed_count: number; explicitly_set: string[]; missing: string[]; unknown: string[] };
+  default_core_signals: { status: 'complete' | 'partial' | 'none' | 'unknown'; explicitly_set: string[]; missing: string[] };
+  conflicting_defaults: boolean;
   network: GoogleConsentNetworkObservation[];
   user_choice_timestamp: number | null;
   tracking_gated: boolean;
@@ -328,6 +330,10 @@ export class GoogleConsentModeObserver {
     const conflictingDefaults = defaults.some((command, index) => index > 0 && GOOGLE_CONSENT_CORE_FIELDS.some((field) => {
       const first = stateAtDefault[field]; const other = command.state[field]; return other !== 'unset' && first !== 'unset' && other !== first;
     }));
+    const defaultExplicit = new Set<string>(firstDefault ? GOOGLE_CONSENT_CORE_FIELDS.filter((field) => firstDefault.state[field] !== 'unset') : []);
+    const defaultUnknown = firstDefault ? GOOGLE_CONSENT_CORE_FIELDS.some((field) => firstDefault.state[field] === 'unknown') : false;
+    const defaultMissing = GOOGLE_CONSENT_CORE_FIELDS.filter((field) => !defaultExplicit.has(field));
+    const defaultCoreStatus = !firstDefault ? 'none' : defaultUnknown ? 'unknown' : defaultMissing.length ? (defaultExplicit.size ? 'partial' : 'none') : 'complete';
     const lifecycle = defaults.length && updates.length ? 'default_and_update'
       : defaults.length ? 'default_observed'
         : updates.length ? 'update_only'
@@ -376,6 +382,8 @@ export class GoogleConsentModeObserver {
         missing: GOOGLE_CONSENT_CORE_FIELDS.filter((field) => !explicitlySet.has(field)),
         unknown: GOOGLE_CONSENT_CORE_FIELDS.filter((field) => explicitlySet.has(field) && ordered.some((command) => command.state[field] === 'unknown'))
       },
+      default_core_signals: { status: defaultCoreStatus, explicitly_set: GOOGLE_CONSENT_CORE_FIELDS.filter((field) => defaultExplicit.has(field)), missing: defaultMissing },
+      conflicting_defaults: conflictingDefaults,
       network,
       user_choice_timestamp: choiceTimestamp,
       tracking_gated: this.trackingGated,

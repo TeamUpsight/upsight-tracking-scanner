@@ -474,6 +474,15 @@ export interface EvidenceBundle {
       usp_present: boolean;
       action_status: 'not_attempted' | 'unsupported' | 'not_executed' | 'executed' | 'verified' | 'inconclusive';
       consent_mode_classification: string;
+      consent_mode_diagnostics?: {
+        lifecycle: 'not_observed' | 'default_observed' | 'default_and_update' | 'update_only';
+        classification: string;
+        default_core_signals: { status: 'complete' | 'partial' | 'none' | 'unknown'; explicitly_set: string[]; missing: string[] };
+        effective_core_signals: { status: 'complete' | 'partial' | 'none' | 'unknown' };
+        chronology: { default_issued_late: boolean; conflicting_defaults: boolean; update_only: boolean };
+        wait_for_update: { present: boolean; valid: boolean };
+        network_observations: number;
+      };
       tracking_consistency: 'consistent' | 'contradiction' | 'insufficient_evidence' | 'not_applicable';
       unknown_cmp_fingerprint: string | null;
       geo_unverified: boolean;

@@ -198,9 +198,9 @@ describe('runStorefrontAudit production browser wiring', () => {
       .toEqual(expect.arrayContaining([expect.objectContaining({ decision_name: 'consent', status: 'pass' })]));
   }, 30_000);
 
-  it('RUNNER-V2-02 maps pre-choice tracking to the final consent status', async () => {
+  it('RUNNER-V2-02 keeps opaque-only pre-choice consent traffic inconclusive', async () => {
     const result = await auditFixture(200, `<head><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G111';</script></head>${oneTrust}`);
-    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'prior_consent_violation', scan_status: 'completed' });
+    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive', scan_status: 'completed' });
   }, 30_000);
 
   it('CMP-SURVIVE-01 retains completed shared OneTrust observation when fresh V2 setup is unavailable', async () => {
@@ -614,14 +614,14 @@ describe('runStorefrontAudit production browser wiring', () => {
       const tracking = homepageLoads === 1 ? `<script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G111';</script>` : '';
       return `${tracking}${oneTrust}`;
     });
-    expect(result).toMatchObject({ consent_status: 'prior_consent_violation', scan_status: 'completed' });
+    expect(result).toMatchObject({ consent_status: 'inconclusive', scan_status: 'completed' });
     expect((result.evidence_bundle as { consent: { post_reject_observation_completed: boolean } }).consent.post_reject_observation_completed).toBe(true);
   }, 35_000);
 
   it.each([
-    ['CMP-MEASURE-MORPHE-RUNNER', 'G100', 'G100', 'limited_measurement', false],
-    ['CMP-MEASURE-04-RUNNER', 'G111', 'G100', 'unknown', true],
-    ['CMP-MEASURE-05-RUNNER', 'G100', 'G111', 'unknown', true]
+    ['CMP-MEASURE-MORPHE-RUNNER', 'G100', 'G100', 'unknown', false],
+    ['CMP-MEASURE-04-RUNNER', 'G111', 'G100', 'unknown', false],
+    ['CMP-MEASURE-05-RUNNER', 'G100', 'G111', 'unknown', false]
   ])('%s persists coherent measurement and counts from both contexts', async (_id, shared, fresh, state, contradiction) => {
     let homepageLoads = 0;
     const result = await auditFixture(200, (path) => {
@@ -641,7 +641,7 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(summary.pre_choice_measurement).toBe(state);
   }, 35_000);
 
-  it('CMP-TELEM-SURVIVE-01 persists shared limited telemetry after a successful fresh session', async () => {
+  it('CMP-TELEM-SURVIVE-01 persists shared opaque telemetry as unknown after a successful fresh session', async () => {
     let homepageLoads = 0;
     const result = await auditFixture(200, (path) => {
       if (path !== '/') return '';
@@ -649,7 +649,7 @@ describe('runStorefrontAudit production browser wiring', () => {
       return `<script>new Image().src='/g/collect?tid=G-FIXTURE&en=page_view&gcs=${marker}';</script>${oneTrust}`;
     }, true, ['consent'], false) as unknown as StorefrontAudit;
     const measurement = result.runtime_metrics?.consent_v2?.measurement;
-    expect(measurement).toMatchObject({ state: 'limited_measurement', limited_measurement_count: 2 });
+    expect(measurement).toMatchObject({ state: 'unknown', limited_measurement_count: 0, full_measurement_count: 0 });
     expect(result.runtime_metrics?.consent_v2).toMatchObject({ session_status: 'completed', observation_only: true });
     expect(JSON.parse(String(buildDebugPackageFiles(result)['consent-summary.json'])).measurement).toEqual(measurement);
   }, 35_000);
@@ -740,12 +740,12 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(result).toMatchObject({ scan_status: 'partial', cmp_provider: 'OneTrust' });
     // The shared consent baseline executed; session_status distinguishes the
     // unavailable fresh PDP session from that completed shared observation.
-    expect(evidence.consent).toMatchObject({ executed: true, pre_choice_measurement: 'limited_measurement' });
+    expect(evidence.consent).toMatchObject({ executed: true, pre_choice_measurement: 'unknown' });
     expect(telemetry).toMatchObject({
       session_status: 'unavailable', observation_only: true, provider: 'onetrust',
       interaction_outcome: 'not_attempted', verification: 'inconclusive', persistence: 'inconclusive',
       shared_observation: { provider: 'onetrust', banner_visibility: 'visible' },
-      measurement: { state: 'limited_measurement', limited_measurement_count: 1, full_measurement_count: 0, unknown_measurement_count: 0, contradiction: false }
+      measurement: { state: 'unknown', limited_measurement_count: 0, full_measurement_count: 0, unknown_measurement_count: 1, contradiction: false }
     });
     expect(telemetry.measurement?.sources.map((source) => source.context)).toEqual(['shared']);
     expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([

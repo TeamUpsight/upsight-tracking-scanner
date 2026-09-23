@@ -652,6 +652,7 @@ describe('Consent V2 production session wiring', () => {
       function decline(){window.dataLayer.push(['consent','update',{ad_storage:'denied',analytics_storage:'denied'}]);}
     </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false}">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
     expect(result.google_consent_mode).toMatchObject({ classification: 'advanced_candidate', default_issued_late: false, lifecycle: 'default_and_update' });
+    expect(result.telemetry.consent_mode_diagnostics).toMatchObject({ classification: 'advanced_candidate', default_core_signals: { status: 'partial', explicitly_set: ['ad_storage', 'analytics_storage'], missing: ['ad_user_data', 'ad_personalization'] } });
     expect(result.result.mechanisms.map((item) => item.mechanism)).toContain('consent_mode');
   }, 10_000);
 
@@ -662,11 +663,13 @@ describe('Consent V2 production session wiring', () => {
       function decline(){window.dataLayer.push(['consent','update',{ad_storage:'granted',analytics_storage:'granted'}]);new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G111';}
     </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false}">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
     expect(result.google_consent_mode).toMatchObject({ classification: 'basic_candidate', pre_choice_measurement_window_observed: true, tracking_gated: true });
+    expect(result.telemetry.consent_mode_diagnostics).toMatchObject({ classification: 'basic_candidate', chronology: { update_only: false } });
   }, 10_000);
 
   it('GCM-03 keeps gcd-only evidence ambiguous', async () => {
     const result = await auditNavigation(`<head><script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcd=opaque';</script></head><body>fixture</body>`);
     expect(result.google_consent_mode.classification).toBe('ambiguous');
+    expect(result.telemetry.consent_mode_diagnostics).toMatchObject({ classification: 'ambiguous', default_core_signals: { status: 'none' }, effective_core_signals: { status: 'none' }, network_observations: 1 });
   });
 
   it('GCM-04 captures the post-Reject Consent Mode update and surfaces a contradiction', async () => {
@@ -1005,7 +1008,7 @@ describe('Consent V2 production session wiring', () => {
     expect(result.tracking.signals).toEqual(expect.arrayContaining([expect.objectContaining({ vendor: 'google_analytics', kind: 'event_hit', timing: 'pre_choice' })]));
     expect(result.telemetry.timeline?.navigation_started_at).not.toBeNull();
     expect(result.telemetry.timeline?.dom_content_loaded_at).not.toBeNull();
-    expect(result.telemetry.measurement).toMatchObject({ state: 'limited_measurement', pre_choice_event_hits: 1, limited_measurement_count: 1, full_measurement_count: 0, gcm_network_observations: 1 });
+    expect(result.telemetry.measurement).toMatchObject({ state: 'unknown', pre_choice_event_hits: 1, limited_measurement_count: 0, full_measurement_count: 0, unknown_measurement_count: 1, gcm_network_observations: 1 });
   });
 
   it('CMP-MEASURE-MORPHE-BROWSER preserves denied head pings and exact fresh-context counts', async () => {
@@ -1016,9 +1019,9 @@ describe('Consent V2 production session wiring', () => {
       new Image().src='https://www.google-analytics.com/g/collect?en=scroll&gcs=G100';
       new Image().src='https://www.google.com/ccm/collect?gcs=G100';
     </script><script src="https://www.googletagmanager.com/gtag/js?id=G-TEST"></script></head><body>fixture</body>`);
-    expect(result.telemetry.measurement).toMatchObject({ state: 'limited_measurement', contradiction: false,
+    expect(result.telemetry.measurement).toMatchObject({ state: 'unknown', contradiction: false,
       tracking_requests_observed: 3, tracking_signals_classified: 3, pre_choice_event_hits: 2,
-      pre_choice_script_loads: 1, gcm_network_observations: 3, gcm_commands: 1, full_measurement_count: 0 });
+      pre_choice_script_loads: 1, gcm_network_observations: 3, gcm_commands: 1, full_measurement_count: 0, limited_measurement_count: 0 });
     expect(result.telemetry.observation_only).toBe(true);
     expect(result.result.interactions).toEqual([]);
   });

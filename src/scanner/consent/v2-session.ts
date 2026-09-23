@@ -536,7 +536,24 @@ function telemetry(result: FinalConsentAuditResult, tracking: TrackingConsistenc
     generic_fallback: Boolean(custom), selector_or_action_failure: result.interactions.some((item) => item.outcome !== 'executed'),
     tcf_present: frameworkObservations.tcf.present, gpp_present: frameworkObservations.gpp.present,
     tcf_lifecycle: frameworkObservations.tcf.lifecycle, gpp_lifecycle: frameworkObservations.gpp.lifecycle, usp_present: frameworkObservations.usp.present, action_status,
-    consent_mode_classification: result.google_consent_mode.evidence[0] || 'unknown', tracking_consistency: tracking.status,
+    consent_mode_classification: result.google_consent_mode.evidence[0] || 'unknown',
+    consent_mode_diagnostics: (() => {
+      const mode = capture.gcm.result();
+      const coreValues = [mode.effective_state.ad_storage, mode.effective_state.analytics_storage, mode.effective_state.ad_user_data, mode.effective_state.ad_personalization];
+      const effectiveStatus = coreValues.some((value) => value === 'unknown') ? 'unknown'
+        : coreValues.every((value) => value !== 'unset') ? 'complete'
+          : coreValues.every((value) => value === 'unset') ? 'none' : 'partial';
+      const defaultCommand = mode.commands.find((command) => command.command === 'default');
+      return {
+        lifecycle: mode.lifecycle, classification: mode.classification,
+        default_core_signals: mode.default_core_signals,
+        effective_core_signals: { status: effectiveStatus },
+        chronology: { default_issued_late: mode.default_issued_late, conflicting_defaults: mode.conflicting_defaults, update_only: mode.lifecycle === 'update_only' },
+        wait_for_update: { present: defaultCommand?.state.wait_for_update_present || false, valid: typeof defaultCommand?.state.wait_for_update_ms === 'number' },
+        network_observations: mode.network.length
+      };
+    })(),
+    tracking_consistency: tracking.status,
     unknown_cmp_fingerprint: fingerprint?.fingerprint || null, geo_unverified: result.geo_verified.status !== 'verified',
     blocked_or_challenged: blocked, timeline: { ...timeline }
   };

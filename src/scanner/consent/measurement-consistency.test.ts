@@ -26,17 +26,17 @@ const morpheRequest = (phase: string) => ({ ...captureConsentTrackingRequest({
 })!, phase });
 
 describe('CMP-MEASURE Morphe measurement provenance regression', () => {
-  it('CMP-MEASURE-01 denied default plus limited GA4 remains limited', () => {
-    expect(normalizeConsentMeasurement([request()], 'fresh', null, denied().result()).state).toBe('limited_measurement');
+  it('CMP-MEASURE-01 denied command plus opaque GA4 marker remains network-unknown', () => {
+    expect(normalizeConsentMeasurement([request()], 'fresh', null, denied().result()).state).toBe('unknown');
   });
 
-  it('CMP-MEASURE-02 full requires the existing explicit full-grant request semantics', () => {
-    expect(normalizeConsentMeasurement([request('G111')], 'fresh', null).state).toBe('full_measurement');
+  it('CMP-MEASURE-02 opaque gcs shapes do not establish full or limited measurement', () => {
+    expect(normalizeConsentMeasurement([request('G111')], 'fresh', null).state).toBe('unknown');
     expect(normalizeConsentMeasurement([request('')], 'fresh', null).state).toBe('unknown');
   });
 
   it.each([
-    ['CMP-MEASURE-03', 'G100', 'G100', 'limited_measurement'],
+    ['CMP-MEASURE-03', 'G100', 'G100', 'unknown'],
     ['CMP-MEASURE-04', 'G111', 'G100', 'unknown'],
     ['CMP-MEASURE-05', 'G100', 'G111', 'unknown']
   ])('%s reconciles shared and fresh positive facts without ranking', (_id, shared, fresh, expected) => {
@@ -45,7 +45,7 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
       normalizeConsentMeasurement([request(fresh)], 'fresh', null)
     ]);
     expect(result.state).toBe(expected);
-    expect(result.contradiction).toBe(shared !== fresh);
+    expect(result.contradiction).toBe(false);
     expect(result.sources.map((source) => source.records[0])).toEqual([
       expect.objectContaining({ context: 'shared', phase: 'product_pdp_load', timestamp: 20, timing: 'pre_choice', evidence_type: 'collection' }),
       expect.objectContaining({ context: 'fresh', phase: 'consent_v2', timestamp: 20, timing: 'pre_choice', evidence_type: 'collection' })
@@ -57,13 +57,13 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
     expect(normalizeConsentMeasurement([script], 'fresh', null)).toMatchObject({ state: false, pre_choice_script_loads: 1, pre_choice_event_hits: 0 });
   });
 
-  it('CMP-MEASURE-07 observation-only advanced-style pings use request-time denied semantics', () => {
+  it('CMP-MEASURE-07 command and opaque ping remain independent evidence', () => {
     const observer = denied();
     observer.observeMeasurementRequest({ url: 'https://www.google-analytics.com/g/collect?gcs=G100', timestamp: 20 });
     // Mode classification remains ambiguous without a choice; measurement does not depend on that label.
     expect(observer.result().classification).toBe('ambiguous');
-    expect(normalizeConsentMeasurement([request('')], 'fresh', null, observer.result()).state).toBe('limited_measurement');
-    expect(normalizeConsentMeasurement([request('G111')], 'fresh', null, observer.result())).toMatchObject({ state: 'unknown', contradiction: true, full_measurement_count: 1, limited_measurement_count: 1 });
+    expect(normalizeConsentMeasurement([request('')], 'fresh', null, observer.result()).state).toBe('unknown');
+    expect(normalizeConsentMeasurement([request('G111')], 'fresh', null, observer.result())).toMatchObject({ state: 'unknown', contradiction: false, full_measurement_count: 0, limited_measurement_count: 0 });
   });
 
   it('CMP-MEASURE-08 counts the exact normalized event/script/GCM fixture', () => {
@@ -73,7 +73,7 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
     expect(reconcileConsentMeasurement([normalizeConsentMeasurement([request(), request('G100', 'consent_v2', 21), script], 'fresh', null, observer.result())])).toMatchObject({
       tracking_requests_observed: 3, tracking_requests_retained: 3, tracking_signals_classified: 3,
       pre_choice_event_hits: 2, pre_choice_conversion_hits: 0, pre_choice_script_loads: 1,
-      gcm_network_observations: 3, gcm_commands: 1, limited_measurement_count: 2, full_measurement_count: 0
+      gcm_network_observations: 3, gcm_commands: 1, limited_measurement_count: 0, full_measurement_count: 0, unknown_measurement_count: 2
     });
   });
 
@@ -86,9 +86,9 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
     for (let index = 0; index < 120; index++) buffer.append(request('G111'));
     buffer.append(request('G100'));
     const normalized = normalizeConsentMeasurement(buffer.requests, 'fresh', null, undefined, buffer.truncated, buffer.observed);
-    expect(normalized).toMatchObject({ state: 'unknown', contradiction: true, truncated: true, tracking_requests_observed: 121, tracking_requests_retained: 100 });
-    expect(normalized.full_measurement_count).toBeGreaterThan(0);
-    expect(normalized.limited_measurement_count).toBeGreaterThan(0);
+    expect(normalized).toMatchObject({ state: 'unknown', contradiction: false, truncated: true, tracking_requests_observed: 121, tracking_requests_retained: 100 });
+    expect(normalized.full_measurement_count).toBe(0);
+    expect(normalized.limited_measurement_count).toBe(0);
     expect(normalizeConsentMeasurement([], 'shared', null, undefined, true).state).toBe('unknown');
   });
 
@@ -105,24 +105,24 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
     const observer = denied();
     observer.observeGtagCall('consent', 'update', { ad_storage: 'granted' }, 15);
     const hit = { ...request(''), event: undefined };
-    expect(normalizeConsentMeasurement([hit], 'fresh', null, observer.result())).toMatchObject({ state: 'limited_measurement', pre_choice_event_hits: 1 });
+    expect(normalizeConsentMeasurement([hit], 'fresh', null, observer.result())).toMatchObject({ state: 'unknown', pre_choice_event_hits: 1 });
     observer.observeGtagCall('consent', 'update', { analytics_storage: 'granted' }, 16);
     expect(normalizeConsentMeasurement([hit], 'fresh', null, observer.result()).state).toBe('unknown');
     const eventless = captureConsentTrackingRequest({ url: 'https://www.google-analytics.com/g/collect?tid=G-FIXTURE&gcs=G100', resource_type: 'fetch', method: 'GET', timestamp: 20 })!;
     expect(eventless.event).toBeUndefined();
-    expect(normalizeConsentMeasurement([eventless], 'fresh', null)).toMatchObject({ pre_choice_event_hits: 1, state: 'limited_measurement' });
+    expect(normalizeConsentMeasurement([eventless], 'fresh', null)).toMatchObject({ pre_choice_event_hits: 1, state: 'unknown' });
     expect(captureConsentTrackingRequest({ url: 'https://www.google-analytics.com/g/collect?gcs=G100', resource_type: 'fetch', method: 'GET' })).toBeNull();
     expect(normalizeConsentMeasurement([{ ...request(), path: '/unrelated', event: undefined }], 'fresh', null).tracking_signals_classified).toBe(0);
   });
 
-  it('Morphe limited request facts must survive fresh event classification and product-phase summary', () => {
+  it('Morphe opaque request facts survive as unknown through event and product-phase summaries', () => {
     const observer = new GoogleConsentModeObserver();
     observer.observeGtagCall('consent', 'default', { analytics_storage: 'denied' }, 10);
     const shared = normalizeConsentMeasurement([morpheRequest('product_pdp_load')], 'shared', null);
     const fresh = normalizeConsentMeasurement([morpheRequest('consent_v2')], 'fresh', null, observer.result());
     const result = reconcileConsentMeasurement([shared, fresh]);
-    expect(result.state).toBe('limited_measurement');
-    expect(result.limited_measurement_count).toBe(2);
+    expect(result.state).toBe('unknown');
+    expect(result.limited_measurement_count).toBe(0);
     expect(result.pre_choice_event_hits).toBe(2);
     expect(result.full_measurement_count).toBe(0);
   });
@@ -136,18 +136,25 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
     evidence.network.relevant_requests = [morpheRequest('product_pdp_load')];
     const measurement = reconcileConsentMeasurement([normalizeConsentMeasurement(evidence.network.relevant_requests, 'shared', null)]);
     evidence.runtime.consent_v2 = { measurement } as NonNullable<typeof evidence.runtime.consent_v2>;
+    evidence.runtime.consent_v2.consent_mode_diagnostics = {
+      lifecycle: 'default_observed', classification: 'ambiguous',
+      default_core_signals: { status: 'partial', explicitly_set: ['ad_storage', 'analytics_storage'], missing: ['ad_user_data', 'ad_personalization'] },
+      effective_core_signals: { status: 'partial' }, chronology: { default_issued_late: false, conflicting_defaults: false, update_only: false },
+      wait_for_update: { present: false, valid: false }, network_observations: 1
+    };
     // Old scalar must not override the normalized production provenance.
     evidence.consent.pre_choice_measurement = 'full_measurement';
     const audit = replayEvidence(JSON.parse(JSON.stringify(evidence))) as StorefrontAudit;
     expect(audit.consent_status).toBe('inconclusive');
-    expect(audit.evidence_bundle?.consent.pre_choice_measurement).toBe('limited_measurement');
+    expect(audit.evidence_bundle?.consent.pre_choice_measurement).toBe('unknown');
     const summary = JSON.parse(String(buildDebugPackageFiles(audit)['consent-summary.json']));
-    expect(summary).toMatchObject({ pre_choice_measurement: 'limited_measurement', limited_measurement_count: 1, full_measurement_count: 0, measurement: { pre_choice_event_hits: 1 } });
+    expect(summary).toMatchObject({ pre_choice_measurement: 'unknown', limited_measurement_count: 0, full_measurement_count: 0, measurement: { pre_choice_event_hits: 1 } });
+    expect(summary.consent_mode).toMatchObject({ classification: 'ambiguous', default_core_signals: { status: 'partial', missing: ['ad_user_data', 'ad_personalization'] } });
     expect(summary.measurement).toEqual(measurement);
   });
 
   it.each([
-    ['CMP-TELEM-SURVIVE-03', 'G111', 'full_measurement'],
+    ['CMP-TELEM-SURVIVE-03', 'G111', 'unknown'],
     ['CMP-TELEM-SURVIVE-04', '', 'unknown'],
     ['CMP-TELEM-SURVIVE-05', null, false]
   ] as const)('%s retains the shared measurement snapshot when no fresh session is available', (_id, marker, expected) => {
@@ -165,7 +172,7 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
       normalizeConsentMeasurement([request(shared, 'product_pdp_load')], 'shared', null),
       normalizeConsentMeasurement([request(fresh)], 'fresh', null)
     ]);
-    expect(measurement).toMatchObject({ state: 'unknown', contradiction: true });
+    expect(measurement).toMatchObject({ state: 'unknown', contradiction: false });
   });
 
   it('CMP-TELEM-SURVIVE-08 debug summary reads persisted canonical measurement', () => {
@@ -176,7 +183,7 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
     evidence.consent.pre_choice_measurement = 'full_measurement';
     const summary = JSON.parse(String(buildDebugPackageFiles({ evidence_bundle: evidence } as StorefrontAudit)['consent-summary.json']));
     expect(summary.measurement).toEqual(measurement);
-    expect(summary.pre_choice_measurement).toBe('limited_measurement');
+    expect(summary.pre_choice_measurement).toBe('unknown');
   });
 
   it('CMP-TELEM-SURVIVE-09 keeps the bounded legacy debug fallback for bundles without runtime telemetry', () => {
@@ -184,6 +191,6 @@ describe('CMP-MEASURE Morphe measurement provenance regression', () => {
     const evidence = collector.bundle;
     evidence.network.relevant_requests = [request('G100', 'product_pdp_load')];
     const summary = JSON.parse(String(buildDebugPackageFiles({ evidence_bundle: evidence } as StorefrontAudit)['consent-summary.json']));
-    expect(summary.measurement).toMatchObject({ state: 'limited_measurement', limited_measurement_count: 1 });
+    expect(summary.measurement).toMatchObject({ state: 'unknown', limited_measurement_count: 0 });
   });
 });

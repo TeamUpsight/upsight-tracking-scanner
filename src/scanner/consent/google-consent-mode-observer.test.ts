@@ -171,4 +171,13 @@ describe('Google Consent Mode observer', () => {
     observer.markUserChoice(30);
     expect(observer.result()).toMatchObject({ classification: 'ambiguous', lifecycle: 'default_and_update' });
   });
+
+  it('distinguishes incomplete defaults from network-only evidence in bounded diagnostics', () => {
+    const partial = new GoogleConsentModeObserver();
+    partial.observeGtagCall('consent', 'default', { ad_storage: 'denied', analytics_storage: 'denied' }, 10);
+    expect(partial.result().default_core_signals).toEqual({ status: 'partial', explicitly_set: ['ad_storage', 'analytics_storage'], missing: ['ad_user_data', 'ad_personalization'] });
+    const networkOnly = new GoogleConsentModeObserver();
+    networkOnly.observeMeasurementRequest({ url: googleMeasurementUrl('gcd=opaque&gcs=G111'), timestamp: 10 });
+    expect(networkOnly.result()).toMatchObject({ classification: 'ambiguous', default_core_signals: { status: 'none' }, core_signals: { observed_count: 0, missing: ['ad_storage', 'analytics_storage', 'ad_user_data', 'ad_personalization'] } });
+  });
 });
