@@ -139,6 +139,29 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(JSON.parse(String(buildDebugPackageFiles(timedOut)['gpc-experiment.json']))).toMatchObject({
       reason_code: 'TREATMENT_EGRESS_TIMEOUT'
     });
+    const failedControl = structuredClone(experiment?.control);
+    if (!failedControl) throw new Error('GPC control fixture unavailable');
+    failedControl.identity.browser_provider = 'browserless';
+    failedControl.identity.browser_route = 'standard';
+    failedControl.transport.top_level_sec_gpc = '1';
+    failedControl.transport.first_party_requests.value_1 = 1;
+    failedControl.transport.valid = false;
+    const providerLimited = await auditFixture(200, html, true, ['consent'], false, {
+      runGpcExperiment: async () => compareGpcObservations(failedControl, null)
+    }, 'diagnostic', 'USA') as unknown as StorefrontAudit;
+    expect(providerLimited).toMatchObject({
+      consent_status: disabled.consent_status, cmp_provider: disabled.cmp_provider,
+      site_ga4_detected: disabled.site_ga4_detected, site_meta_detected: disabled.site_meta_detected,
+      product_payload_status: disabled.product_payload_status, server_side_status: disabled.server_side_status
+    });
+    expect(providerLimited.evidence_bundle?.diagnostic_observability?.gpc_experiment).toMatchObject({
+      outcome: 'transport_invalid', reason_code: 'BROWSER_PROVIDER_GPC_OFF_UNAVAILABLE',
+      identity_matched: false, access_matched: false, differences: [],
+      control: { identity: { browser_provider: 'browserless', browser_route: 'standard' } }
+    });
+    expect(JSON.parse(String(buildDebugPackageFiles(providerLimited)['gpc-experiment.json']))).toMatchObject({
+      reason_code: 'BROWSER_PROVIDER_GPC_OFF_UNAVAILABLE', control: { identity: { browser_route: 'standard' } }
+    });
   }, 75_000);
 
   const oneTrust = `<script>window.OneTrust={RejectAll(){ window.__rejectCalled = true; }};</script><script src="/otSDKStub.js"></script><div id="onetrust-banner-sdk"><button id="onetrust-reject-all-handler">Reject all</button></div>`;

@@ -3350,6 +3350,8 @@ export async function runStorefrontAudit(
       const minimumPairMs = GPC_ARM_MIN_BUDGET_MS * 2 + GPC_FINALIZATION_MARGIN_MS;
       if (!browser || evidence.page.valid !== true) {
         diagnostics.gpc_experiment = unavailable('CANONICAL_ACCESS_UNAVAILABLE');
+      } else if (process.env.BROWSER_PROVIDER !== 'local' && !gpcExperimentCdpUrl) {
+        diagnostics.gpc_experiment = unavailable('STANDARD_BROWSERLESS_SESSION_UNAVAILABLE');
       } else if (optionalMs < minimumPairMs) {
         diagnostics.gpc_experiment = unavailable('INSUFFICIENT_PAIR_BUDGET');
       } else {
@@ -3358,7 +3360,8 @@ export async function runStorefrontAudit(
         try {
           diagnostics.gpc_experiment = await (dependencies.runGpcExperiment || runGpcExperiment)({
             browser, url: finalUrl, targetHost: effectiveDomain, proxyCountry: currentProxyCountry,
-            ...(gpcExperimentCdpUrl ? { openBrowserSession: (profile: 'off' | 'on') =>
+            ...(gpcExperimentCdpUrl ? { browserEnvironment: { provider: 'browserless' as const, route: 'standard' as const },
+              openBrowserSession: (profile: 'off' | 'on') =>
               openBrowserlessGpcExperimentSession(gpcExperimentCdpUrl!, profile) } : {}),
             controls: consentV2Controls, navigationTimeoutMs: 6_000, armBudgetMs, budgetMs: armBudgetMs * 2,
             inspectAccess: (page, response) => inspectPageAccess(page, response),

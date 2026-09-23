@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import { chromium } from 'playwright-core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { compareGpcObservations, installGpcProfile, openBrowserlessGpcExperimentSession, runGpcExperiment, type GpcObservation } from './gpc-experiment';
 import { buildBrowserlessCdpUrl, buildBrowserlessGpcExperimentUrl } from '../proxy/decodo';
 
@@ -23,18 +23,25 @@ async function closeServer(server: Server) {
 }
 
 describe('WP12B production-boundary GPC profile', () => {
-  it('keeps Browserless route and sticky proxy identity while varying only the OFF process flag', () => {
+  it('keeps canonical stealth while both diagnostic sessions use standard with matched proxy and opposite GPC flags', () => {
     const canonical = buildBrowserlessCdpUrl({ host: 'chrome.browserless.io', token: 'fixture-token', route: 'stealth',
       externalProxyServer: 'http://user:pass@proxy.example:10001', browserLocale: 'en-US', timeoutMs: 180_000 });
     const off = new URL(buildBrowserlessGpcExperimentUrl(canonical, 'off'));
     const on = new URL(buildBrowserlessGpcExperimentUrl(canonical, 'on'));
-    expect(on.toString()).toBe(canonical);
-    expect(off.pathname).toBe(on.pathname);
+    expect(new URL(canonical).pathname).toBe('/stealth');
+    expect(JSON.parse(new URL(canonical).searchParams.get('launch')!).args).toEqual(['--lang=en-US', '--window-size=1280,800']);
+    expect(off.pathname).toBe('/');
+    expect(on.pathname).toBe('/');
+    expect(off.searchParams.get('stealth')).toBe('false');
+    expect(on.searchParams.get('stealth')).toBe('false');
     expect(off.searchParams.get('externalProxyServer')).toBe(on.searchParams.get('externalProxyServer'));
     expect(off.searchParams.get('token')).toBe(on.searchParams.get('token'));
     const offLaunch = JSON.parse(off.searchParams.get('launch')!);
     const onLaunch = JSON.parse(on.searchParams.get('launch')!);
-    expect(offLaunch.args).toEqual([...onLaunch.args, '--disable-features=GlobalPrivacyControlForce,GlobalPrivacyControlTest']);
+    expect(offLaunch.stealth).toBe(false);
+    expect(onLaunch.stealth).toBe(false);
+    expect(offLaunch.args).toEqual(['--lang=en-US', '--window-size=1280,800', '--disable-features=GlobalPrivacyControlForce,GlobalPrivacyControlTest']);
+    expect(onLaunch.args).toEqual(['--lang=en-US', '--window-size=1280,800', '--enable-features=GlobalPrivacyControlForce']);
     expect(() => buildBrowserlessGpcExperimentUrl('wss://host/unknown?token=fixture', 'off')).toThrow();
   });
 
@@ -57,6 +64,8 @@ describe('WP12B production-boundary GPC profile', () => {
     try {
       const result = await runGpcExperiment({ browser: canonical, url, targetHost: '127.0.0.1', proxyCountry: 'us',
         openBrowserSession: (profile) => openBrowserlessGpcExperimentSession(canonicalUrl, profile, async (url) => {
+          const parsed = new URL(url);
+          expect(parsed.pathname).toBe('/');
           opened.push(url.includes('disable-features') ? 'off' : 'on');
           return chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, headless: true });
         }),
@@ -111,13 +120,36 @@ describe('WP12B production-boundary GPC profile', () => {
 
       const nativeMismatchContext = await browser.newContext();
       await nativeMismatchContext.setExtraHTTPHeaders({ 'Sec-GPC': '1' });
+      await nativeMismatchContext.addInitScript(() => Object.defineProperty(navigator, 'globalPrivacyControl', { configurable: true, value: false }));
       const nativeMismatchPage = await nativeMismatchContext.newPage();
+      const routeSpy = vi.spyOn(nativeMismatchContext, 'route');
       const nativeMismatchTransport = await installGpcProfile(nativeMismatchContext, nativeMismatchPage, 'off', '127.0.0.1', undefined, true);
       await nativeMismatchPage.goto(fixture.url);
-      expect(await nativeMismatchTransport()).toMatchObject({ top_level_sec_gpc: '1', dom_global_privacy_control: false, valid: false });
+      const blockedOff = await nativeMismatchTransport();
+      expect(blockedOff).toMatchObject({ top_level_sec_gpc: '1', dom_global_privacy_control: false, valid: false });
+      expect(compareGpcObservations({
+        transport: blockedOff,
+        identity: { same_browser_session: false, browser_configuration_verified: true, browser_provider: 'browserless', browser_route: 'standard',
+          browser_version: '149.0', locale: 'en-US', timezone: 'America/New_York', viewport: '1280x800', usa_egress_verified: true, egress_fingerprint: 'fixture' },
+        access: { page_valid: true, canonical_host: '127.0.0.1', category: 'none', geo_verified: true, observation_complete: true },
+        cmp: null, us_privacy: null, gpp: null, measurement: null
+      }, null)).toMatchObject({ state: 'inconclusive', outcome: 'transport_invalid', reason_code: 'BROWSER_PROVIDER_GPC_OFF_UNAVAILABLE',
+        identity_matched: false, access_matched: false, differences: [] });
+      expect(routeSpy).not.toHaveBeenCalled();
       await nativeMismatchContext.close();
 
-      expect(fixture.received).toEqual([null, '1', null, '1', '1']);
+      const nativeOnContext = await browser.newContext();
+      await nativeOnContext.setExtraHTTPHeaders({ 'Sec-GPC': '1' });
+      await nativeOnContext.addInitScript(() => Object.defineProperty(navigator, 'globalPrivacyControl', { configurable: true, value: true }));
+      const nativeOnPage = await nativeOnContext.newPage();
+      const nativeOnRouteSpy = vi.spyOn(nativeOnContext, 'route');
+      const nativeOnTransport = await installGpcProfile(nativeOnContext, nativeOnPage, 'on', '127.0.0.1', undefined, true);
+      await nativeOnPage.goto(fixture.url);
+      expect(await nativeOnTransport()).toMatchObject({ top_level_sec_gpc: '1', dom_global_privacy_control: true, valid: true });
+      expect(nativeOnRouteSpy).not.toHaveBeenCalled();
+      await nativeOnContext.close();
+
+      expect(fixture.received).toEqual([null, '1', null, '1', '1', '1']);
     } finally {
       await browser.close();
       await closeServer(fixture.server);
@@ -246,6 +278,14 @@ describe('WP12B production-boundary GPC profile', () => {
     const separate = { ...base, identity: { ...base.identity, same_browser_session: false, browser_version: '149.0' } };
     expect(compareGpcObservations(separate, { ...on, identity: { ...on.identity, same_browser_session: false, browser_version: '150.0' } }).outcome).toBe('identity_unmatched');
     expect(compareGpcObservations(separate, { ...on, identity: { ...on.identity, same_browser_session: false, browser_version: '149.0', browser_configuration_verified: false } }).outcome).toBe('identity_unmatched');
+    expect(compareGpcObservations({ ...separate, identity: { ...separate.identity, browser_provider: 'browserless', browser_route: 'standard' } },
+      { ...on, identity: { ...on.identity, same_browser_session: false, browser_version: '149.0' } }).outcome).toBe('identity_unmatched');
+    const providerLimited = compareGpcObservations({ ...separate,
+      identity: { ...separate.identity, browser_provider: 'browserless', browser_route: 'standard' },
+      transport: { ...base.transport, top_level_sec_gpc: '1', first_party_requests: { observed: 1, absent: 0, value_1: 1, other: 0 }, valid: false }
+    }, { ...on, identity: { ...on.identity, same_browser_session: false, browser_version: '149.0', browser_provider: 'browserless', browser_route: 'standard' } });
+    expect(providerLimited).toMatchObject({ state: 'inconclusive', outcome: 'transport_invalid',
+      reason_code: 'BROWSER_PROVIDER_GPC_OFF_UNAVAILABLE', identity_matched: false, access_matched: false, differences: [] });
     expect(compareGpcObservations(base, { ...on, access: { ...on.access, category: 'bot_protection' } }).outcome).toBe('access_inconclusive');
     expect(compareGpcObservations(base, { ...on, us_privacy: { choices: [], gpc_acknowledgement_observed: true } }).outcome).toBe('observable_privacy_state_change');
     expect(compareGpcObservations(base, { ...on, gpp: { lifecycle: 'ready', section_list: [7], applicable_sections: [7, 8], signal_status: 'ready' } }).outcome).toBe('observable_privacy_state_change');
