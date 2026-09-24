@@ -82,3 +82,51 @@ When architecture, commands, domain ownership, invariants, or known risks change
 - Format every commit with a summary (the subject line) and a short description in the body. When the prompt begins with a meaningful heading—such as `Work Package ##...`—use that heading as the summary. Otherwise, use the affected domain(s) or Codex task/chat name followed by a concise description. The body must explain the change and its purpose.
 - Push the new commit to the configured upstream after committing when remote access is available. If a push fails, keep the local commit intact and report the exact blocker plus the command needed to retry.
 - Never amend, rebase, force-push, or commit secrets, generated artifacts, `.env` files, or credentials unless the user explicitly authorizes that action.
+
+<!-- graft:start -->
+## Graft — repo context graph
+
+This repo is indexed in `graft/`: small linked markdown nodes that explain each
+system and carry exact file:line spans, kept in sync with the code through git.
+
+For ANY task here — understanding how something works, finding where code lives,
+or scoping a change — get context from the graph before grepping or opening
+source files. Re-ask freely (it's cheap) and reuse literal identifiers you
+already have (symbol, error string, file name) as the query. New to this repo?
+Run `graft map` first — a token-budgeted orientation (dir clusters, hubs,
+hotspots), no LLM, no key.
+
+- Run `graft ask "<your question>" --source` → ranked nodes with the relevant
+  code spans inlined (each hit's ≤8-line crux by default; `--full` for whole
+  definitions when the crux isn't enough). Match the tool to the task shape:
+  for understanding or editing, the top node IS the answer — cite its
+  `covers:` file:line spans and edit straight from `--source`. For
+  exhaustive tasks ("every occurrence / every caller of this pattern"), ranked
+  results are top-N, not complete — run `graft grep "<literal>"` instead
+  (exhaustive over indexed files, grouped by enclosing symbol), falling back
+  to raw `grep -rn` only for unindexed files.
+- `graft skeleton <file>` → every definition's signature + span, ~10× cheaper
+  than reading the file; use it to skim an API surface.
+- `graft callers <symbol>` gives precomputed, exact edges — who calls this.
+  Add `--direction out` for what it calls, or `--depth N` to walk
+  transitively for the full blast radius. For structural questions, skip
+  ranking and use this directly.
+- Or browse: `graft/INDEX.md` lists every node; follow the links.
+- Monorepos and folders of multiple repos rank fairly across sub-projects —
+  hits carry `[scope/]` labels naming which one they're from. Narrow with
+  `graft ask "<task>" --in <scope>/` once you know where you're working.
+
+If a returned span is truncated ("+N more lines"), open the file at that exact
+range before finalizing. Only open source files when a node genuinely lacks a
+needed detail, and then at the exact file:line the node points to — never
+re-read whole files.
+
+After big code changes, refresh the graph with `graft build` (deterministic,
+no API key, $0).
+<!-- graft:end -->
+
+## Graft guidance for scanner work
+
+- For substantial or cross-module work, use `graft_repo_map` to orient, `graft_find_code` for where/how questions, and `graft_find_all` when every occurrence matters. Use `graft_file_api` before opening a large file only to understand its API, then inspect the exact implementation needed.
+- Before changing shared browser, session, network, or audit orchestration, use `graft_trace_calls` to review dependencies; after meaningful shared changes, run `graft blast --base origin/main` when the base is suitable. Skip Graft for trivial edits when the target is already known.
+- Graft is intentionally pinned to `0.12.1` on Windows. Do not run `graft upgrade` yet; upgrade only after trailhq/Graft issue #323 is resolved in a published release and Windows installation has been verified.
