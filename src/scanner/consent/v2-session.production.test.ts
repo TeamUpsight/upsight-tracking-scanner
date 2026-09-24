@@ -81,12 +81,13 @@ async function auditNavigation(html: string, accessBlocked = false, sessionInput
   }
 }
 
-async function auditQueuedTcfStubTransition(populateAggregates: boolean) {
-  const consentMap = populateAggregates ? '{1:true,2:true}' : '{}';
-  const rejectMap = populateAggregates ? '{1:false,2:false}' : '{}';
+async function auditQueuedTcfStubTransition(populateAggregates: boolean | 'missing') {
+  const consentMap = populateAggregates === true ? '{1:true,2:true}' : '{}';
+  const rejectMap = populateAggregates === true ? '{1:false,2:false}' : '{}';
+  const aggregateFields = populateAggregates === 'missing' ? '' : `purpose:{consents:rejected?${rejectMap}:${consentMap}},vendor:{consents:rejected?${rejectMap}:${consentMap}},`;
   const html = `<script>
     const queued=[]; let listener=null; let rejected=false;
-    const event=()=>({listenerId:9,cmpStatus:'loaded',eventStatus:rejected?'useractioncomplete':'cmpuishown',purpose:{consents:rejected?${rejectMap}:${consentMap}},vendor:{consents:rejected?${rejectMap}:${consentMap}}});
+    const event=()=>({listenerId:9,cmpStatus:'loaded',eventStatus:rejected?'useractioncomplete':'cmpuishown',${aggregateFields}});
     window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:false,cmpStatus:'stub',apiVersion:'2.2',gdprApplies:true},true);else if(command==='addEventListener')queued.push(callback);};
     window.OneTrust={RejectAll(){}};
     window.rejectConsent=()=>{rejected=true;listener?.(event(),true);};
@@ -438,9 +439,57 @@ describe('Consent V2 production session wiring', () => {
     } finally { await page.close(); }
   }, 10_000);
 
+  it('FW-TCF-AGGREGATE-SHAPE-01 distinguishes absent maps from explicit empty maps through the production bridge', async () => {
+    const server = createServer((_request, response) => response.end(`<script>
+      window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:true,cmpStatus:'loaded',apiVersion:'2.2'},true);if(command==='addEventListener'){(window).__fixtureTcfListener=callback;callback({listenerId:1,cmpStatus:'loaded',eventStatus:'cmpuishown'},true);}};
+    </script>`));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('TCF aggregate fixture did not expose a TCP port.');
+    const page = await browser.newPage();
+    try {
+      const capture = await prepareConsentV2Session(page);
+      await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(100);
+      const missing = await observeConsentFrameworksInPage(page);
+      expect(missing.tcf.latest_event).toMatchObject({
+        purpose_consents: { known: false, total_count: 0, granted_count: 0, denied_count: 0 },
+        vendor_consents: { known: false, total_count: 0, granted_count: 0, denied_count: 0 }
+      });
+      const dispatch = async (tcData: unknown, count: number) => {
+        await page.evaluate((data) => (window as any).__fixtureTcfListener?.({ listenerId: 1, cmpStatus: 'loaded', eventStatus: 'cmpuishown', ...data as object }, true), tcData);
+        await page.waitForFunction((expected) => (window as any).__upsightConsentFrameworkObservations?.tcf?.event_count >= expected, count, { timeout: 5_000 });
+        return observeConsentFrameworksInPage(page);
+      };
+      const noPurposeAndVendorObjects = await dispatch({}, 2);
+      expect(noPurposeAndVendorObjects.tcf.latest_event).toMatchObject({ purpose_consents: { known: false }, vendor_consents: { known: false } });
+      const noConsentMaps = await dispatch({ purpose: {}, vendor: {} }, 3);
+      expect(noConsentMaps.tcf.latest_event).toMatchObject({ purpose_consents: { known: false }, vendor_consents: { known: false } });
+      const empty = await dispatch({ purpose: { consents: {} }, vendor: { consents: {} } }, 4);
+      expect(empty.tcf.latest_event).toMatchObject({ purpose_consents: { known: true, total_count: 0 }, vendor_consents: { known: true, total_count: 0 } });
+      const purposeOnly = await dispatch({ purpose: { consents: { 1: true, 2: false } }, vendor: {} }, 5);
+      expect(purposeOnly.tcf.latest_event).toMatchObject({ purpose_consents: { known: true, total_count: 2, granted_count: 1, denied_count: 1 }, vendor_consents: { known: false, total_count: 0 } });
+      const vendorOnly = await dispatch({ purpose: {}, vendor: { consents: { 11: false } } }, 6);
+      expect(vendorOnly.tcf.latest_event).toMatchObject({ purpose_consents: { known: false, total_count: 0 }, vendor_consents: { known: true, total_count: 1, denied_count: 1 } });
+      const bothPopulated = await dispatch({ purpose: { consents: { 1: false } }, vendor: { consents: { 11: false, 12: true } } }, 7);
+      expect(bothPopulated.tcf.latest_event).toMatchObject({ purpose_consents: { known: true, total_count: 1 }, vendor_consents: { known: true, total_count: 2 } });
+      // A valid explicitly-known=false aggregate remains unavailable even when
+      // its zero counters are structurally indistinguishable from an empty map.
+      expect(noPurposeAndVendorObjects.tcf.latest_event?.purpose_consents.known).toBe(false);
+      capture.dispose();
+    } finally { await page.close(); await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+  }, 10_000);
+
   it('FW-ASYNC-TCF-04 reconciles a loaded CMP but keeps empty aggregates non-capable', async () => {
     const result = await auditQueuedTcfStubTransition(false);
     expect(result.telemetry.tcf_capability_diagnostics).toMatchObject({ lifecycle: 'ready', cmp_loaded: false, ping_state: 'stub', latest_semantic_state: 'loaded', lifecycle_reconciled: true, aggregate_availability: 'empty', event_status: 'cmpuishown', listener_registered: true, listener_event_observed: true, purpose_consents: { known: true, total_count: 0 }, vendor_consents: { known: true, total_count: 0 } });
+    expect(result.telemetry).toMatchObject({ verification_capability: 'unavailable', action_execution_eligible: false, activation_occurred: false });
+    expect(result.result.interactions).toEqual([]);
+  }, 20_000);
+
+  it('FW-ASYNC-TCF-06 reports unavailable aggregates and keeps a missing-map TCF session observation-only', async () => {
+    const result = await auditQueuedTcfStubTransition('missing');
+    expect(result.telemetry.tcf_capability_diagnostics).toMatchObject({ lifecycle: 'ready', aggregate_availability: 'unavailable', event_status: 'cmpuishown', purpose_consents: { known: false, total_count: 0 }, vendor_consents: { known: false, total_count: 0 } });
     expect(result.telemetry).toMatchObject({ verification_capability: 'unavailable', action_execution_eligible: false, activation_occurred: false });
     expect(result.result.interactions).toEqual([]);
   }, 20_000);

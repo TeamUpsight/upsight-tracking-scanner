@@ -162,10 +162,11 @@ export async function installConsentCommandBootstrap(page: Page) {
     // aggregates. It is installed before navigation so delayed CMP callbacks
     // are buffered instead of being sampled by a single evaluate call.
     const countBooleans = (value: unknown) => {
-      const entries = value && typeof value === 'object' ? Object.values(value as Record<string, unknown>) : [];
+      const available = value !== null && typeof value === 'object' && !Array.isArray(value);
+      const entries = available ? Object.values(value as Record<string, unknown>) : [];
       const granted = entries.filter((item) => item === true).length;
       const denied = entries.filter((item) => item === false).length;
-      return { total_count: granted + denied, granted_count: granted, denied_count: denied };
+      return { known: available, total_count: granted + denied, granted_count: granted, denied_count: denied };
     };
     const framework = w[frameworkKey] && typeof w[frameworkKey] === 'object' ? w[frameworkKey] : {
       tcf: { present: false, ping: null, latest_event: null, event_count: 0, listener_id: null, registered: false, listener_registered: false, listener_event_observed: false, listener_registration_failed: false },

@@ -113,6 +113,32 @@ describe('Consent framework observers', () => {
     expect(calls.at(-1)).toEqual({ command: 'removeEventListener', parameter: 12 });
   });
 
+  it('preserves unknown sanitized consent aggregates instead of reinterpreting zero counters as an empty map', () => {
+    const unknown = tcfFixture({
+      ping: { cmpLoaded: true, apiVersion: '2.2' },
+      events: [{
+        listenerId: 1,
+        cmpStatus: 'loaded',
+        eventStatus: 'cmpuishown',
+        purpose: { consents: { known: false, total_count: 0, granted_count: 0, denied_count: 0 } },
+        vendor: { consents: { known: false, total_count: 0, granted_count: 0, denied_count: 0 } }
+      }]
+    });
+    const empty = tcfFixture({
+      ping: { cmpLoaded: true, apiVersion: '2.2' },
+      events: [{ listenerId: 1, cmpStatus: 'loaded', eventStatus: 'cmpuishown', purpose: { consents: {} }, vendor: { consents: {} } }]
+    });
+
+    expect(observeTcfFramework(unknown.runtime).state.latest_event).toMatchObject({
+      purpose_consents: { known: false, total_count: 0 },
+      vendor_consents: { known: false, total_count: 0 }
+    });
+    expect(observeTcfFramework(empty.runtime).state.latest_event).toMatchObject({
+      purpose_consents: { known: true, total_count: 0 },
+      vendor_consents: { known: true, total_count: 0 }
+    });
+  });
+
   it('keeps cmpuishown pre-choice while recognizing a loaded CMP and usable listener callback', () => {
     const { runtime } = tcfFixture({
       ping: { cmpLoaded: null, apiVersion: '2.2', cmpStatus: 'loading' },

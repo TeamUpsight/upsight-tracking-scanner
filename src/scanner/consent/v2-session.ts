@@ -499,9 +499,8 @@ function tcfDiagnosticSummary(observation: ConsentFrameworkObservations['tcf']) 
   const vendor = observation.latest_event?.vendor_consents || { known: false, total_count: 0, granted_count: 0, denied_count: 0 };
   const pingState: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown' = observation.ping?.cmp_status || (observation.ping?.cmp_loaded === true ? 'loaded' : observation.ping?.cmp_loaded === false ? 'stub' : 'unknown');
   const semanticState: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown' = observation.latest_event?.cmp_status || 'unknown';
-  const aggregateAvailability: 'populated' | 'empty' | 'incomplete' | 'unknown' = (purpose.known && purpose.total_count > 0) || (vendor.known && vendor.total_count > 0) ? 'populated'
-    : purpose.known && vendor.known ? 'empty'
-      : purpose.known || vendor.known ? 'incomplete' : 'unknown';
+  const aggregateAvailability: 'populated' | 'empty' | 'unavailable' = (purpose.known && purpose.total_count > 0) || (vendor.known && vendor.total_count > 0) ? 'populated'
+    : purpose.known || vendor.known ? 'empty' : 'unavailable';
   return {
     lifecycle: observation.lifecycle,
     cmp_loaded: observation.ping?.cmp_loaded ?? null,

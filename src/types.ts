@@ -484,7 +484,7 @@ export interface EvidenceBundle {
         ping_state: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown';
         latest_semantic_state: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown';
         lifecycle_reconciled: boolean;
-        aggregate_availability: 'populated' | 'empty' | 'incomplete' | 'unknown';
+        aggregate_availability: 'populated' | 'empty' | 'unavailable';
         event_status: 'cmpuishown' | 'tcloaded' | 'useractioncomplete' | 'unknown' | null;
         listener_registered: boolean;
         listener_event_observed: boolean;
@@ -500,7 +500,7 @@ export interface EvidenceBundle {
         ping_state: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown';
         latest_semantic_state: 'stub' | 'loading' | 'loaded' | 'error' | 'unknown';
         lifecycle_reconciled: boolean;
-        aggregate_availability: 'populated' | 'empty' | 'incomplete' | 'unknown';
+        aggregate_availability: 'populated' | 'empty' | 'unavailable';
         event_status: 'cmpuishown' | 'tcloaded' | 'useractioncomplete' | 'unknown' | null;
         listener_registered: boolean;
         listener_event_observed: boolean;

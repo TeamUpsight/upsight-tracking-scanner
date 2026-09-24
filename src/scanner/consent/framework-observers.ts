@@ -243,13 +243,17 @@ function readBoolean(value: unknown): boolean | null {
 function consentSummary(value: unknown): ConsentBooleanSummary {
   const values = recordOf(value);
   if (!values) return EMPTY_CONSENT_SUMMARY;
+  // The bridge marks an absent source map as unknown even though its bounded
+  // counters are all zero. Preserve that distinction instead of interpreting
+  // the transport shape as an explicitly empty consent map.
+  if (values.known === false) return EMPTY_CONSENT_SUMMARY;
   // Persistent browser bridges provide this already-sanitized aggregate. The
   // observer remains responsible for validating its shape before use.
   const total = boundedInteger(values.total_count);
   const grantedAggregate = boundedInteger(values.granted_count);
   const deniedAggregate = boundedInteger(values.denied_count);
   if (total !== null && grantedAggregate !== null && deniedAggregate !== null && total === grantedAggregate + deniedAggregate) {
-    return { known: true, total_count: total, granted_count: grantedAggregate, denied_count: deniedAggregate };
+    return { known: values.known === true || values.known === undefined, total_count: total, granted_count: grantedAggregate, denied_count: deniedAggregate };
   }
   let granted = 0;
   let denied = 0;
