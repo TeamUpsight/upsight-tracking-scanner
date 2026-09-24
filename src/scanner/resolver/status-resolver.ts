@@ -26,6 +26,7 @@ export function resolveConsentStatus(input: {
   rejection_verified: boolean;
   post_reject_observation_completed?: boolean;
   tracking_after_verified_rejection: boolean;
+  tracking_after_verified_rejection_inconclusive?: boolean;
   technical_blocker_reason?: string;
 }): StatusDecision<ConsentStatus> {
   if (input.page_valid !== true) {
@@ -61,6 +62,9 @@ export function resolveConsentStatus(input: {
   }
   if (input.rejection_attempted && !input.rejection_verified) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'CMP_REJECT_NOT_VERIFIED', evidence: ['rejection_attempted'] };
+  }
+  if (input.rejection_verified && input.tracking_after_verified_rejection_inconclusive) {
+    return { status: 'inconclusive', confidence: 'low', reason_code: 'CMP_POST_REJECT_TRACKING_INSUFFICIENT', evidence: ['verified_rejection', 'tracking_observation_insufficient'] };
   }
   if (!input.cmp_provider || input.cmp_provider === 'Unknown') {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'CMP_UNKNOWN', evidence: [] };

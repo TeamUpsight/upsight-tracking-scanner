@@ -148,7 +148,17 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     : preChoiceCollections.some((request) => request.consent_measurement === 'limited_measurement') || evidence.network.observation?.limited_measurement_observed
       ? 'limited_measurement' as const
       : preChoiceCollections.length > 0 ? 'unknown' as const : false);
-  const afterReject = requests.some((request) => request.kind === 'collection' && request.phase.includes('post_reject'));
+  const legacyAfterReject = requests.some((request) => request.kind === 'collection' && request.phase.includes('post_reject'));
+  const v2TrackingConsistency = evidence.runtime.consent_v2?.tracking_consistency;
+  const hasUsableV2TrackingConsistency = v2TrackingConsistency === 'contradiction' ||
+    v2TrackingConsistency === 'consistent' ||
+    v2TrackingConsistency === 'insufficient_evidence' ||
+    v2TrackingConsistency === 'not_applicable';
+  const trackingAfterVerifiedRejection = hasUsableV2TrackingConsistency
+    ? v2TrackingConsistency === 'contradiction' &&
+      evidence.consent.rejection_verified &&
+      evidence.consent.post_reject_observation_completed === true
+    : evidence.consent.rejection_verified && legacyAfterReject;
   const consent = consentSelected ? resolveConsentStatus({
     executed: evidence.consent.executed,
     page_valid: evidence.page.valid,
@@ -158,7 +168,8 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     rejection_attempted: evidence.consent.interaction_attempted,
     rejection_verified: evidence.consent.rejection_verified,
     post_reject_observation_completed: evidence.consent.post_reject_observation_completed,
-    tracking_after_verified_rejection: evidence.consent.rejection_verified && afterReject,
+    tracking_after_verified_rejection: trackingAfterVerifiedRejection,
+    tracking_after_verified_rejection_inconclusive: evidence.consent.rejection_verified && v2TrackingConsistency === 'insufficient_evidence',
     technical_blocker_reason: evidence.consent.technical_blocker_reason
   }) : { status: 'not_tested' as const, confidence: 'low' as const, evidence: [], reason_code: 'CONSENT_NOT_TESTED' };
   const candidateOutcomes = evidence.product.candidate_outcomes || [];

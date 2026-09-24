@@ -1668,6 +1668,11 @@ describe('decision hardening regression pack', () => {
       .toMatchObject({ status: 'inconclusive', reason_code: 'CMP_BEHAVIOR_NOT_VERIFIED' });
   });
 
+  it('keeps completed but insufficient post-Reject tracking evidence inconclusive', () => {
+    expect(resolveConsentStatus({ executed: true, page_valid: true, geo: 'EU', cmp_provider: 'Cookiebot', tracking_before_interaction: false, rejection_attempted: true, rejection_verified: true, post_reject_observation_completed: true, tracking_after_verified_rejection: false, tracking_after_verified_rejection_inconclusive: true }))
+      .toMatchObject({ status: 'inconclusive', reason_code: 'CMP_POST_REJECT_TRACKING_INSUFFICIENT' });
+  });
+
   it('treats denied/cookieless Consent Mode traffic as limited, not a prior-consent violation', () => {
     expect(resolveConsentStatus({ executed: true, page_valid: true, geo: 'EU', cmp_provider: 'OneTrust', tracking_before_interaction: 'limited_measurement', rejection_attempted: false, rejection_verified: false, post_reject_observation_completed: false, tracking_after_verified_rejection: false }).status)
       .not.toBe('prior_consent_violation');
