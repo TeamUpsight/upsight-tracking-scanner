@@ -360,7 +360,21 @@ async function providerOperations(provider: CmpAdapterProviderId | undefined, co
 
 async function freshActionProviderContexts(page: Page, facts: BrowserConsentFacts, frameworks: ConsentFrameworkObservations, provider: CmpAdapterProviderId, geo: ConsentV2SessionInput['geo']) {
   const semanticDiscovery = provider === 'cookiebot' ? await discoverProviderSemanticControls(page, provider) : undefined;
-  return buildProviderContexts(page, facts, frameworks, semanticDiscovery, geo);
+  return { contexts: await buildProviderContexts(page, facts, frameworks, semanticDiscovery, geo), semanticDiscovery };
+}
+
+function targetResolutionDiagnostics(discovery: Awaited<ReturnType<typeof discoverProviderSemanticControls>> | undefined, context: unknown, action: ActionPlan['action'], category: ActionPlan['category'], apiAvailable = false) {
+  const candidates = discovery?.diagnostic.candidate_samples || [];
+  const matching = candidates.filter((candidate) => semanticActionForConsentLabel(candidate.accessible_name) === action);
+  const controls = discovery?.controls.filter((control) => control.action === action) || [];
+  const target = actionTargetFor(context, action, category);
+  const resolved = apiAvailable || Boolean(target?.target_ref && target.attached && target.visible && target.enabled && target.accessible_control && target.frame_path?.length && target.shadow_mode !== 'closed');
+  const rawReason = resolved ? 'resolved'
+    : target && !target.visible ? 'not_visible'
+      : target && !target.enabled ? 'disabled'
+        : matching.find((candidate) => candidate.rejection_reason)?.rejection_reason || (matching.length ? 'not_direct_actionable_target' : 'label_not_found');
+  const reason = ['resolved', 'label_not_found', 'not_visible', 'disabled', 'not_direct_actionable_target', 'outside_verified_consent_context', 'frame_unavailable'].includes(rawReason) ? rawReason : 'other_bounded_reason';
+  return { semantic_discovery_attempted: discovery?.diagnostic.attempted === true, semantic_candidate_count: Math.min(80, matching.length), semantic_actionable_count: Math.min(20, controls.length), requested_action_target_resolved: resolved, target_resolution_reason: reason as NonNullable<ConsentV2Telemetry['target_resolution_reason']> };
 }
 
 function usPrivacyObservation(
@@ -465,6 +479,7 @@ function actionPlanFor(provider: CmpAdapterProviderId, actions: AvailableAction[
   const candidate = actions.find((item) => item.action === action && item.category === category && (item.availability === 'direct' || item.availability === 'api_only'));
   if (!candidate) return null;
   const target = actionTargetFor(context, action, category);
+  if (provider === 'cookiebot' && candidate.availability === 'direct' && (!target?.target_ref || !target.attached || !target.visible || !target.enabled || !target.accessible_control || !target.frame_path?.length || target.shadow_mode === 'closed')) return null;
   const surface = target?.surface_type || (banner.surface === 'none' || banner.surface === 'unknown' ? 'banner' : banner.surface);
   return planFromAvailableAction(candidate, {
     provider_or_mechanism: provider,
@@ -524,7 +539,7 @@ function tcfDiagnosticSummary(observation: ConsentFrameworkObservations['tcf']) 
   };
 }
 
-function telemetry(result: FinalConsentAuditResult, tracking: TrackingConsistencyResult, facts: BrowserConsentFacts, generic: GenericConsentDetectionResult, frameworkObservations: ConsentFrameworkObservations, controls: ConsentV2RolloutControls, provider: CmpAdapterProviderId | undefined, conflict: boolean, blocked: boolean, actionsEnabled: boolean, rolloutGateEligible: boolean, timeline: ConsentV2Timeline, geo: ConsentV2SessionInput['geo'], capture: PreparedConsentV2Session, actionDiagnostics?: { action_execution_eligible: boolean; requested_action: string | null; execution_strategy: string | null; activation_occurred: boolean; verification_capability: VerificationCapability; verification_strong_families: string[]; verification_supporting_families: string[]; verification_contradicting_families: string[]; verification_independence_groups: string[]; verification_reason_codes: string[]; tcf_capability_observation: ConsentFrameworkObservations['tcf'] }): ConsentV2Telemetry {
+function telemetry(result: FinalConsentAuditResult, tracking: TrackingConsistencyResult, facts: BrowserConsentFacts, generic: GenericConsentDetectionResult, frameworkObservations: ConsentFrameworkObservations, controls: ConsentV2RolloutControls, provider: CmpAdapterProviderId | undefined, conflict: boolean, blocked: boolean, actionsEnabled: boolean, rolloutGateEligible: boolean, timeline: ConsentV2Timeline, geo: ConsentV2SessionInput['geo'], capture: PreparedConsentV2Session, actionDiagnostics?: { action_execution_eligible: boolean; requested_action: string | null; execution_strategy: string | null; activation_occurred: boolean; semantic_discovery_attempted: boolean; semantic_candidate_count: number; semantic_actionable_count: number; requested_action_target_resolved: boolean; target_resolution_reason: NonNullable<ConsentV2Telemetry['target_resolution_reason']>; verification_capability: VerificationCapability; verification_strong_families: string[]; verification_supporting_families: string[]; verification_contradicting_families: string[]; verification_independence_groups: string[]; verification_reason_codes: string[]; tcf_capability_observation: ConsentFrameworkObservations['tcf'] }): ConsentV2Telemetry {
   const custom = result.mechanisms.find((item) => item.mechanism === 'custom');
   const fingerprint = custom ? buildUnknownCmpFingerprint({
     mechanism_score: generic.score,
@@ -573,6 +588,11 @@ function telemetry(result: FinalConsentAuditResult, tracking: TrackingConsistenc
     ...(actionDiagnostics ? {
       action_execution_eligible: actionDiagnostics.action_execution_eligible,
       requested_action: actionDiagnostics.requested_action,
+      semantic_discovery_attempted: actionDiagnostics.semantic_discovery_attempted,
+      semantic_candidate_count: actionDiagnostics.semantic_candidate_count,
+      semantic_actionable_count: actionDiagnostics.semantic_actionable_count,
+      requested_action_target_resolved: actionDiagnostics.requested_action_target_resolved,
+      target_resolution_reason: actionDiagnostics.target_resolution_reason,
       runtime_variant: provider === 'cookiebot' ? (facts.observations.some((item) => item.selector === '#CybotCookiebotDialog' && item.visible) ? 'standard_dialog' : 'custom_template') : null,
       reject_semantic: provider === 'cookiebot' && (interaction?.action === 'reject_all' || interaction?.action === 'only_necessary') ? interaction.action : null,
       execution_strategy: actionDiagnostics.execution_strategy,
@@ -674,8 +694,8 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
       ? assessRejectVerificationCapability({ providerState: provider.state, frameworks: frameworkObservations })
       : { status: 'unavailable', strong_families: [], reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_UNAVAILABLE] } as VerificationCapability;
     let tcfCapabilityObservation = frameworkObservations.tcf;
-    let actionExecutionEligible = !blocked && providerActionGate && actionAvailable && verificationCapability.status === 'available';
-    const actionEnabled = actionExecutionEligible;
+    let actionExecutionEligible = false;
+    let actionBoundaryDiagnostics = { semantic_discovery_attempted: false, semantic_candidate_count: 0, semantic_actionable_count: 0, requested_action_target_resolved: false, target_resolution_reason: 'label_not_found' as NonNullable<ConsentV2Telemetry['target_resolution_reason']> };
     const requestedAction = actions.some((item) => item.action === 'reject_all' && ['direct', 'api_only'].includes(item.availability)) ? 'reject_all'
       : actions.some((item) => item.action === 'only_necessary' && item.availability === 'direct') ? 'only_necessary'
         : actionAvailable ? 'reject_all' : null;
@@ -689,8 +709,9 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
       for (let transition = 0; transition < 2 && !attempt; transition += 1) {
         // Each state transition rebuilds facts, provider context, action inventory,
         // and target topology. No control reference survives a previous action.
-        after = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, after, observedGoogleCommands); const observed = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, observed); frameworks = frameworkStateFromObservations(frameworkObservations); const liveContexts = await freshActionProviderContexts(page, after, frameworkObservations, selection.provider, input.geo); const liveProvider = await providerOperations(selection.provider, liveContexts); verificationCapability = assessRejectVerificationCapability({ providerState: liveProvider.state, frameworks: frameworkObservations }); tcfCapabilityObservation = frameworkObservations.tcf; if (verificationCapability.status !== 'available') { actionExecutionEligible = false; verification = { status: 'inconclusive', evidence: [], reason_codes: verificationCapability.reason_codes }; break; } const machine = rejectStateMachineFor(selection.provider, liveProvider, liveContexts.get(selection.provider), timings);
+        after = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, after, observedGoogleCommands); const observed = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, observed); frameworks = frameworkStateFromObservations(frameworkObservations); const live = await freshActionProviderContexts(page, after, frameworkObservations, selection.provider, input.geo); const liveContexts = live.contexts; const liveProvider = await providerOperations(selection.provider, liveContexts); actionBoundaryDiagnostics = targetResolutionDiagnostics(live.semanticDiscovery, liveContexts.get(selection.provider), requestedAction || 'reject_all', null, liveProvider.actions.some((item) => item.action === (requestedAction || 'reject_all') && item.availability === 'api_only')); verificationCapability = assessRejectVerificationCapability({ providerState: liveProvider.state, frameworks: frameworkObservations }); tcfCapabilityObservation = frameworkObservations.tcf; if (verificationCapability.status !== 'available') { actionExecutionEligible = false; verification = { status: 'inconclusive', evidence: [], reason_codes: verificationCapability.reason_codes }; break; } const machine = rejectStateMachineFor(selection.provider, liveProvider, liveContexts.get(selection.provider), timings);
         if (machine.status !== 'ready') {
+          actionExecutionEligible = false;
           // Opening preferences is not a successful Reject. Record the missing
           // requested action explicitly so telemetry cannot report a false win.
           if (attempts.some((item) => item.action === 'open_preferences' && item.outcome === 'executed')) {
@@ -700,14 +721,16 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
           break;
         }
         if (transition > 0 && machine.steps.length === 1 && machine.steps[0].action === 'open_preferences') {
+          actionExecutionEligible = false;
           attempt = { action: 'reject_all', origin: 'generic_ui', outcome: 'unsupported', category: null, reason_codes: [ConsentAuditCodes.INTERACTION_UNSUPPORTED, ConsentAuditCodes.ACTION_NOT_EXPOSED] };
           attempts.push(attempt);
           break;
         }
         for (const step of machine.steps) {
-          const freshFacts = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, freshFacts, observedGoogleCommands); const freshFrameworks = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, freshFrameworks); frameworks = frameworkStateFromObservations(frameworkObservations); const freshContexts = await freshActionProviderContexts(page, freshFacts, frameworkObservations, selection.provider, input.geo); const freshProvider = await providerOperations(selection.provider, freshContexts); verificationCapability = assessRejectVerificationCapability({ providerState: freshProvider.state, frameworks: frameworkObservations }); tcfCapabilityObservation = frameworkObservations.tcf; if (verificationCapability.status !== 'available') { actionExecutionEligible = false; verification = { status: 'inconclusive', evidence: [], reason_codes: verificationCapability.reason_codes }; break; } const plan = actionPlanFor(selection.provider, freshProvider.actions, freshProvider.banner, freshContexts.get(selection.provider), step.action, step.category, timings);
-          if (!plan) { attempt = { action: step.action, origin: 'generic_ui', outcome: 'unsupported', category: step.category, reason_codes: [ConsentAuditCodes.INTERACTION_UNSUPPORTED, ConsentAuditCodes.ACTION_NOT_EXPOSED] }; attempts.push(attempt); break; }
-          const executed = await executeActionPlan(plan, adapterActionBridge(page, selection.provider, ledger, timings, freshProvider.state, input.geo)); attempts.push(executed.attempt); if (step.action !== 'open_preferences' && executed.activated_at !== null) executionStrategy = executed.strategy;
+          const freshFacts = await captureBrowserConsentFacts(page); observeNewGoogleConsentCommands(gcm, freshFacts, observedGoogleCommands); const freshFrameworks = await observeConsentFrameworksInPage(page); frameworkObservations = mergeConsentFrameworkObservations(frameworkObservations, freshFrameworks); frameworks = frameworkStateFromObservations(frameworkObservations); const fresh = await freshActionProviderContexts(page, freshFacts, frameworkObservations, selection.provider, input.geo); const freshContexts = fresh.contexts; const freshProvider = await providerOperations(selection.provider, freshContexts); verificationCapability = assessRejectVerificationCapability({ providerState: freshProvider.state, frameworks: frameworkObservations }); tcfCapabilityObservation = frameworkObservations.tcf; if (verificationCapability.status !== 'available') { actionExecutionEligible = false; verification = { status: 'inconclusive', evidence: [], reason_codes: verificationCapability.reason_codes }; break; } actionBoundaryDiagnostics = targetResolutionDiagnostics(fresh.semanticDiscovery, freshContexts.get(selection.provider), requestedAction || step.action, null, freshProvider.actions.some((item) => item.action === (requestedAction || step.action) && item.availability === 'api_only')); const plan = actionPlanFor(selection.provider, freshProvider.actions, freshProvider.banner, freshContexts.get(selection.provider), step.action, step.category, timings);
+          if (!plan) { actionExecutionEligible = false; attempt = { action: step.action, origin: 'generic_ui', outcome: 'unsupported', category: step.category, reason_codes: [ConsentAuditCodes.INTERACTION_UNSUPPORTED, ConsentAuditCodes.ACTION_NOT_EXPOSED] }; attempts.push(attempt); break; }
+          actionExecutionEligible = step.action !== 'open_preferences';
+          const executed = await executeActionPlan(plan, adapterActionBridge(page, selection.provider, ledger, timings, freshProvider.state, input.geo)); attempts.push(executed.attempt); if (step.action !== 'open_preferences' && executed.activated_at !== null) executionStrategy = executed.strategy; if (executed.attempt.outcome !== 'executed' && executed.activated_at === null) actionExecutionEligible = false;
           if (executed.attempt.outcome !== 'executed' && executed.attempt.outcome !== 'aborted') { attempt = executed.attempt; break; }
           if (step.action !== 'open_preferences') { attempt = executed.attempt; timestamp = executed.activated_at; break; }
         }
@@ -735,6 +758,7 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
     const telemetryResult = telemetry(result, tracking, before, generic, frameworkObservations, rollout, selection.provider, selection.conflict, false, actionExecutionEligible, providerActionGate, timeline, input.geo, capture, {
       action_execution_eligible: actionExecutionEligible,
       requested_action: requestedAction,
+      ...actionBoundaryDiagnostics,
       execution_strategy: executionStrategy,
       activation_occurred: timestamp !== null,
       verification_capability: verificationCapability,
@@ -751,7 +775,7 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
 
 function adapterActionBridge(page: Page, provider: CmpAdapterProviderId, ledger: ConsentEvidenceLedger, timings: ConsentTimingValues, initial: ConsentState, geo: ConsentV2SessionInput['geo']): InteractionExecutionBridge {
   const refreshed = async () => {
-    const facts = await captureBrowserConsentFacts(page); const frameworks = await observeConsentFrameworksInPage(page); const contexts = await freshActionProviderContexts(page, facts, frameworks, provider, geo);
+    const facts = await captureBrowserConsentFacts(page); const frameworks = await observeConsentFrameworksInPage(page); const fresh = await freshActionProviderContexts(page, facts, frameworks, provider, geo); const contexts = fresh.contexts;
     return { contexts, operations: await providerOperations(provider, contexts) };
   };
   return {

@@ -59,6 +59,19 @@ const labels: Record<Extract<CmpAdapterProviderId, 'cookiebot' | 'didomi' | 'use
 
 const supported = (provider: CmpAdapterProviderId): provider is keyof typeof labels => provider in labels;
 
+function normalizeSemanticLabel(value: string) {
+  return value.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function semanticLabelEquals(candidate: string, expected: string) {
+  return normalizeSemanticLabel(candidate) === normalizeSemanticLabel(expected);
+}
+
+function semanticLabelPattern(label: string) {
+  const words = normalizeSemanticLabel(label).split(' ').map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return new RegExp(`^\\s*${words.join('\\s+')}\\s*$`, 'i');
+}
+
 function emptyDiagnostic(provider: ProviderSemanticDiscoveryDiagnostic['provider'], attempted: boolean): ProviderSemanticDiscoveryDiagnostic {
   return {
     attempted,
@@ -93,11 +106,12 @@ export async function discoverProviderSemanticControls(page: Page, provider: Cmp
   for (const [frameIndex, frame] of frames.entries()) {
     for (const label of labels[provider]) {
       if (controls.some((control) => control.accessible_name === label)) continue;
-      const buttonCandidates = await frame.getByRole('button', { name: label, exact: true }).all().catch(() => []);
-      const linkCandidates = await frame.getByRole('link', { name: label, exact: true }).all().catch(() => []);
-      const openShadowCandidates = (await Promise.all((await frame.locator('button, input[type="button"], input[type="submit"], a[href], [role="button"], [role="link"]').all().catch(() => [])).slice(0, 40).map(async (candidate) => ({ candidate, name: await candidate.evaluate((element) => String(element.getAttribute('aria-label') || (element instanceof HTMLInputElement ? element.value : '') || element.textContent || '').replace(/\s+/g, ' ').trim()).catch(() => '') })))).filter((item) => item.name === label).map((item) => item.candidate);
-      const directActionCandidates = (await Promise.all((await frame.locator('[onclick]').all().catch(() => [])).slice(0, 40).map(async (candidate) => ({ candidate, name: await candidate.evaluate((element) => String(element.getAttribute('aria-label') || (element instanceof HTMLInputElement ? element.value : '') || element.textContent || '').replace(/\s+/g, ' ').trim()).catch(() => '') })))).filter((item) => item.name === label).map((item) => item.candidate);
-      const textCandidates = await frame.getByText(label, { exact: true }).all().catch(() => []);
+      const labelPattern = semanticLabelPattern(label);
+      const buttonCandidates = await frame.getByRole('button', { name: labelPattern }).all().catch(() => []);
+      const linkCandidates = await frame.getByRole('link', { name: labelPattern }).all().catch(() => []);
+      const openShadowCandidates = (await Promise.all((await frame.locator('button, input[type="button"], input[type="submit"], a[href], [role="button"], [role="link"]').all().catch(() => [])).slice(0, 40).map(async (candidate) => ({ candidate, name: await candidate.evaluate((element) => String(element.getAttribute('aria-label') || (element instanceof HTMLInputElement ? element.value : '') || element.textContent || '').replace(/\s+/g, ' ').trim()).catch(() => '') })))).filter((item) => semanticLabelEquals(item.name, label)).map((item) => item.candidate);
+      const directActionCandidates = (await Promise.all((await frame.locator('[onclick]').all().catch(() => [])).slice(0, 40).map(async (candidate) => ({ candidate, name: await candidate.evaluate((element) => String(element.getAttribute('aria-label') || (element instanceof HTMLInputElement ? element.value : '') || element.textContent || '').replace(/\s+/g, ' ').trim()).catch(() => '') })))).filter((item) => semanticLabelEquals(item.name, label)).map((item) => item.candidate);
+      const textCandidates = await frame.getByText(labelPattern).all().catch(() => []);
       diagnostic.role_candidate_count = Math.min(80, diagnostic.role_candidate_count + buttonCandidates.length);
       diagnostic.link_candidate_count = Math.min(80, diagnostic.link_candidate_count + linkCandidates.length);
       diagnostic.open_shadow_candidate_count = Math.min(80, diagnostic.open_shadow_candidate_count + openShadowCandidates.length);

@@ -468,6 +468,11 @@ export interface EvidenceBundle {
       rollout_gate_eligible?: boolean;
       action_execution_eligible?: boolean;
       requested_action?: string | null;
+      semantic_discovery_attempted?: boolean;
+      semantic_candidate_count?: number;
+      semantic_actionable_count?: number;
+      requested_action_target_resolved?: boolean;
+      target_resolution_reason?: 'resolved' | 'label_not_found' | 'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'frame_unavailable' | 'other_bounded_reason';
       runtime_variant?: string | null;
       reject_semantic?: 'reject_all' | 'only_necessary' | null;
       execution_strategy?: string | null;

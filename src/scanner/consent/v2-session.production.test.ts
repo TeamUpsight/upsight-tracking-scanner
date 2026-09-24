@@ -275,6 +275,38 @@ describe('Consent V2 production session wiring', () => {
     } finally { await page.close(); }
   });
 
+  it.each(['NUR NOTWENDIGE', 'Nur notwendige', 'nur notwendige', '  Nur   notwendige  '])('WP16B3-SEMANTIC-CASE resolves exact Cookiebot phrase %j', async (label) => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<section role="dialog" class="cookie-consent" style="position:fixed;width:320px;height:120px">Cookie privacy settings<button style="width:140px;height:32px" onclick="window.__clicked=(window.__clicked||0)+1">${label}</button></section>`);
+      const discovery = await discoverProviderSemanticControls(page, 'cookiebot');
+      expect(discovery.controls).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'only_necessary', accessible_name: 'NUR NOTWENDIGE', actionable: true })]));
+      await discovery.invoke(discovery.controls.find((control) => control.action === 'only_necessary')!.id);
+      expect(await page.evaluate(() => (window as any).__clicked || 0)).toBe(1);
+    } finally { await page.close(); }
+  });
+
+  it('WP16B3-SEMANTIC-NEAR-MATCH rejects longer phrases and text descendants', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<section role="dialog" class="cookie-consent" style="position:fixed;width:360px;height:160px">Cookie privacy settings<button onclick="window.__clicked=1">Nur notwendige Informationen</button><button aria-label="Weiter" onclick="window.__clicked=2"><span>Nur notwendige</span></button></section>`);
+      const discovery = await discoverProviderSemanticControls(page, 'cookiebot');
+      expect(discovery.controls.filter((control) => control.action === 'only_necessary')).toEqual([]);
+      expect(discovery.diagnostic.rejection_counts.not_direct_actionable_target).toBeGreaterThan(0);
+    } finally { await page.close(); }
+  });
+
+  it('WP16B3-SEMANTIC-SCOPE rejects an exact phrase outside a verified consent context', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<main><button style="width:140px;height:32px" onclick="window.__clicked=1">Nur notwendige</button></main>`);
+      const discovery = await discoverProviderSemanticControls(page, 'cookiebot');
+      expect(discovery.controls).toEqual([]);
+      expect(discovery.diagnostic.rejection_counts.outside_verified_consent_context).toBeGreaterThan(0);
+      expect(await page.evaluate(() => (window as any).__clicked || 0)).toBe(0);
+    } finally { await page.close(); }
+  });
+
   it('WP11.6-SEMANTIC-DIAGNOSTIC-01 exposes bounded unrecognized control names from verified Consent scopes without changing matching', async () => {
     const result = await audit(`<script>window.Cookiebot={};</script><script src="https://consent.cookiebot.com/uc.js"></script>
       <section id="CybotCookiebotDialog" role="dialog" style="position:fixed;width:360px;height:180px">Cookie privacy settings
@@ -1160,6 +1192,18 @@ describe('Consent V2 production session wiring', () => {
     expect(result.telemetry).toMatchObject({ provider: 'cookiebot', runtime_variant: 'custom_template', reject_semantic: 'only_necessary', requested_action: 'only_necessary', execution_strategy: 'provider_selector', activation_occurred: true, verification: 'verified' });
     expect(result.result.interactions).toEqual([expect.objectContaining({ action: 'only_necessary', outcome: 'executed' })]);
     expect(result.result.rejection_verification.status).toBe('verified');
+    expect(result.result.persistence).toMatchObject({ status: 'confirmed', post_reload_observation_completed: true, semantic_channels: { provider: 'persisted' } });
+  }, 20_000);
+
+  it('CB-CERT-03 resolves Audit 540 title-case Only Necessary controls through verification and persistence', async () => {
+    const result = await auditNavigation(`<script>
+      let rejected=localStorage.getItem('cb-necessary-titlecase')==='true';
+      window.Cookiebot={get hasResponse(){return rejected;},get declined(){return rejected;},get consented(){return false;},get consent(){return {preferences:!rejected,statistics:!rejected,marketing:!rejected};}};
+    </script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div id="mount"></div><script>setTimeout(()=>{document.querySelector('#mount').innerHTML='<section style="position:fixed;width:360px;height:180px"><div class="cookie-copy" role="dialog" style="position:sticky">Cookie privacy settings</div><div class="actions"><div onclick="window.rejectCookiebot()"><span>Nur notwendige</span></div><div onclick="void 0"><span>Alle akzeptieren</span></div></div></section>'},3200);window.rejectCookiebot=()=>{localStorage.setItem('cb-necessary-titlecase','true');rejected=true;dispatchEvent(new Event('CookiebotOnDecline'))}</script>`, false, { ...input, diagnostic: true, rollout: actionRollout });
+    expect(result.telemetry).toMatchObject({ provider: 'cookiebot', runtime_variant: 'custom_template', reject_semantic: 'only_necessary', requested_action: 'only_necessary', verification_capability: 'available', action_execution_eligible: true, semantic_discovery_attempted: true, semantic_candidate_count: expect.any(Number), semantic_actionable_count: expect.any(Number), requested_action_target_resolved: true, target_resolution_reason: 'resolved', activation_occurred: true, verification: 'verified', verification_strong_families: expect.arrayContaining(['provider_state', 'provider_category_state']), verification_supporting_families: expect.arrayContaining(['provider_event']), verification_independence_groups: ['cookiebot_runtime'] });
+    expect(result.result.available_actions).toContainEqual(expect.objectContaining({ action: 'only_necessary', availability: 'direct' }));
+    expect(result.result.interactions).toEqual([expect.objectContaining({ action: 'only_necessary', outcome: 'executed' })]);
+    expect(result.result.rejection_verification).toMatchObject({ status: 'verified' });
     expect(result.result.persistence).toMatchObject({ status: 'confirmed', post_reload_observation_completed: true, semantic_channels: { provider: 'persisted' } });
   }, 20_000);
 
