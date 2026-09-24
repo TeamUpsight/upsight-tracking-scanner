@@ -84,6 +84,7 @@ export interface AdapterDetectionResult {
 
 export interface AdapterOperationInput {
   timestamp?: number;
+  requested_action?: import('./domain-types').ConsentActionType;
   /** Provider adapters may define a runtime bridge without widening persisted contracts. */
   context?: unknown;
 }

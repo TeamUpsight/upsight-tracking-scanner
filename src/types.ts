@@ -190,7 +190,7 @@ export interface EvidenceBundle {
         text_candidate_count: number;
         actionable_control_count: number;
         rejection_counts: Record<'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'unsupported_semantic_action', number>;
-        candidate_samples: Array<{ lookup_class: 'role' | 'link' | 'open_shadow' | 'text'; accessible_name: string; role: 'button' | 'link' | 'input' | 'other'; accepted: boolean; rejection_reason: 'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'unsupported_semantic_action' | null }>;
+        candidate_samples: Array<{ lookup_class: 'role' | 'link' | 'open_shadow' | 'text' | 'direct_action'; accessible_name: string; role: 'button' | 'link' | 'input' | 'other'; accepted: boolean; rejection_reason: 'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'unsupported_semantic_action' | null }>;
         nearby_actionable_controls?: Array<{ role: 'button' | 'link' | 'input' | 'other'; accessible_name: string; location: 'main_frame' | 'iframe' | 'shadow_dom'; shadow_depth: number; visible: boolean; enabled: boolean; direct_actionable_target: boolean; consent_scope_corroborated: true }>;
       };
       frameworks: {
@@ -468,6 +468,8 @@ export interface EvidenceBundle {
       rollout_gate_eligible?: boolean;
       action_execution_eligible?: boolean;
       requested_action?: string | null;
+      runtime_variant?: string | null;
+      reject_semantic?: 'reject_all' | 'only_necessary' | null;
       execution_strategy?: string | null;
       activation_occurred?: boolean;
       verification_capability?: 'available' | 'unavailable' | 'inconclusive';
@@ -476,7 +478,9 @@ export interface EvidenceBundle {
       verification_strong_families?: string[];
       verification_supporting_families?: string[];
       verification_contradicting_families?: string[];
+      verification_independence_groups?: string[];
       verification_reason_codes?: string[];
+      post_reject_observation_complete?: boolean;
       tcf_diagnostics?: {
         lifecycle: 'absent' | 'stub_present' | 'loading' | 'ready' | 'error';
         cmp_loaded: boolean | null;

@@ -130,7 +130,8 @@ function standardControl(context: CookiebotAdapterContext, id: CookiebotControlI
 }
 
 function semanticControl(context: CookiebotAdapterContext, action: CookiebotSemanticAction) {
-  return context.controls?.find((control) => control.semantic_action === action && isActionable(control));
+  const candidates = context.controls?.filter((control) => control.semantic_action === action && isActionable(control)) || [];
+  return candidates.find((control) => control.id.startsWith('provider-semantic:')) || candidates[0];
 }
 
 function validStandardCookieAction(
@@ -402,8 +403,9 @@ export const cookiebotAdapter: ConsentProviderAdapter<'cookiebot'> = {
   },
   reject(input) {
     const context = contextFrom(input);
-    const control = context && actionControl(context, 'reject');
-    return context && control ? invokeCookiebotControl(context, control, 'reject_all') : unsupported<InteractionAttempt>();
+    const requestedAction = input.requested_action === 'only_necessary' ? 'only_necessary' : 'reject_all';
+    const control = context && (requestedAction === 'only_necessary' ? semanticControl(context, 'only_necessary') : actionControl(context, 'reject'));
+    return context && control ? invokeCookiebotControl(context, control, requestedAction) : unsupported<InteractionAttempt>();
   },
   openPreferences(input) {
     const context = contextFrom(input);

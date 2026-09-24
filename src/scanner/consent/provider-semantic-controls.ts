@@ -31,7 +31,7 @@ export type DiagnosticConsentControlCensusRecord = {
   consent_scope_corroborated: true;
 };
 
-type ProviderSemanticLookupClass = 'role' | 'link' | 'open_shadow' | 'text';
+type ProviderSemanticLookupClass = 'role' | 'link' | 'open_shadow' | 'text' | 'direct_action';
 type ProviderSemanticRejectionReason = 'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'unsupported_semantic_action';
 export type ProviderSemanticDiscoveryDiagnostic = {
   attempted: boolean;
@@ -96,6 +96,7 @@ export async function discoverProviderSemanticControls(page: Page, provider: Cmp
       const buttonCandidates = await frame.getByRole('button', { name: label, exact: true }).all().catch(() => []);
       const linkCandidates = await frame.getByRole('link', { name: label, exact: true }).all().catch(() => []);
       const openShadowCandidates = (await Promise.all((await frame.locator('button, input[type="button"], input[type="submit"], a[href], [role="button"], [role="link"]').all().catch(() => [])).slice(0, 40).map(async (candidate) => ({ candidate, name: await candidate.evaluate((element) => String(element.getAttribute('aria-label') || (element instanceof HTMLInputElement ? element.value : '') || element.textContent || '').replace(/\s+/g, ' ').trim()).catch(() => '') })))).filter((item) => item.name === label).map((item) => item.candidate);
+      const directActionCandidates = (await Promise.all((await frame.locator('[onclick]').all().catch(() => [])).slice(0, 40).map(async (candidate) => ({ candidate, name: await candidate.evaluate((element) => String(element.getAttribute('aria-label') || (element instanceof HTMLInputElement ? element.value : '') || element.textContent || '').replace(/\s+/g, ' ').trim()).catch(() => '') })))).filter((item) => item.name === label).map((item) => item.candidate);
       const textCandidates = await frame.getByText(label, { exact: true }).all().catch(() => []);
       diagnostic.role_candidate_count = Math.min(80, diagnostic.role_candidate_count + buttonCandidates.length);
       diagnostic.link_candidate_count = Math.min(80, diagnostic.link_candidate_count + linkCandidates.length);
@@ -108,6 +109,7 @@ export async function discoverProviderSemanticControls(page: Page, provider: Cmp
         ...buttonCandidates.map((candidate) => ({ candidate, lookup_class: 'role' as const })),
         ...linkCandidates.map((candidate) => ({ candidate, lookup_class: 'link' as const })),
         ...openShadowCandidates.map((candidate) => ({ candidate, lookup_class: 'open_shadow' as const })),
+        ...directActionCandidates.map((candidate) => ({ candidate, lookup_class: 'direct_action' as const })),
         ...textCandidates.map((candidate) => ({ candidate, lookup_class: 'text' as const }))
       ].slice(0, 8);
       for (const { candidate, lookup_class } of candidates) {

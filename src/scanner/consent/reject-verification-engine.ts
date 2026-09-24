@@ -39,6 +39,8 @@ export interface RejectVerificationSignal {
   observed_at: number;
   /** Only authoritative semantic state can turn a contradiction into NOT_VERIFIED. */
   authoritative?: boolean;
+  /** Signals derived from one normalized observation share a group and cannot corroborate each other. */
+  independence_group?: string;
 }
 
 export interface RejectVerificationInput {
@@ -60,6 +62,11 @@ function isPostAction(signal: RejectVerificationSignal, actionTimestamp: number)
 
 function uniqueFamilies(signals: readonly RejectVerificationSignal[]) {
   return [...new Set(signals.map((signal) => signal.family))].sort();
+}
+
+function independentSources(left: RejectVerificationSignal, right: RejectVerificationSignal) {
+  if (left.family === right.family) return false;
+  return !left.independence_group || !right.independence_group || left.independence_group !== right.independence_group;
 }
 
 function evidenceLabels(signals: readonly RejectVerificationSignal[]) {
@@ -124,20 +131,30 @@ export function verifyRequestedConsentAction(input: RejectVerificationInput): Re
     );
   }
 
+  const supportingContradictions = postActionSignals.filter(
+    (signal) => signal.rank === 'supporting' && signal.relation === 'contradicts_requested'
+  );
+  if (supportingContradictions.length) {
+    return result('inconclusive', postActionSignals,
+      [ConsentAuditCodes.STATE_CONTRADICTION, ConsentAuditCodes.ACTION_INCONCLUSIVE], [], supportingContradictions);
+  }
+
   const matchingStrong = postActionSignals.filter(
     (signal) => signal.rank === 'strong' && signal.relation === 'matches_requested'
   );
   const matchingCorroboration = postActionSignals.filter(
     (signal) => (signal.rank === 'strong' || signal.rank === 'supporting') && signal.relation === 'matches_requested'
   );
-  const strongFamilies = new Set(matchingStrong.map((signal) => signal.family));
+  const independentStrongSources = new Set(matchingStrong.map((signal) =>
+    signal.independence_group ? `source:${signal.independence_group}` : `family:${signal.family}`
+  ));
   const independentlyCorroborated = matchingStrong.filter((signal) =>
-    matchingCorroboration.some((other) => other !== signal && other.family !== signal.family)
+    matchingCorroboration.some((other) => other !== signal && independentSources(signal, other))
   );
 
-  if (strongFamilies.size >= 2 || independentlyCorroborated.length) {
+  if (independentStrongSources.size >= 2 || independentlyCorroborated.length) {
     const corroboration = matchingCorroboration.filter((signal) =>
-      matchingStrong.some((strong) => strong.family !== signal.family)
+      matchingStrong.some((strong) => independentSources(strong, signal))
     );
     return result(
       'verified',

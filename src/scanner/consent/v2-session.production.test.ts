@@ -533,7 +533,7 @@ describe('Consent V2 production session wiring', () => {
     const result = await auditNavigation(`<script>
       const rejected=document.cookie.includes('CookieConsent=present');
       window.Cookiebot={hasResponse:rejected,consented:false,declined:rejected,consent:{preferences:rejected?false:null,statistics:rejected?false:null,marketing:rejected?false:null}};
-      function decline(){localStorage.setItem('cookiebot-rejected','true');document.cookie='CookieConsent=present; path=/';Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consented=false;Cookiebot.consent={preferences:false,statistics:false,marketing:false};}
+      function decline(){localStorage.setItem('cookiebot-rejected','true');document.cookie='CookieConsent=present; path=/';Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consented=false;Cookiebot.consent={preferences:false,statistics:false,marketing:false};window.dispatchEvent(new Event('CookiebotOnDecline'));}
     </script><script type="application/json" src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline()">Decline</button></div>`, false, { ...input, rollout: actionRollout });
     expect(result.result.interactions[0]).toMatchObject({ origin: 'provider_selector', outcome: 'executed' });
     expect(result.result.rejection_verification.status).toBe('verified');
@@ -853,7 +853,7 @@ describe('Consent V2 production session wiring', () => {
       gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied'});
       new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G100';
       function decline(){window.dataLayer.push(['consent','update',{ad_storage:'denied',analytics_storage:'denied'}]);}
-    </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false}">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
+    </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false};window.dispatchEvent(new Event('CookiebotOnDecline'))">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
     expect(result.google_consent_mode).toMatchObject({ classification: 'advanced_candidate', default_issued_late: false, lifecycle: 'default_and_update' });
     expect(result.telemetry.consent_mode_diagnostics).toMatchObject({ classification: 'advanced_candidate', default_core_signals: { status: 'partial', explicitly_set: ['ad_storage', 'analytics_storage'], missing: ['ad_user_data', 'ad_personalization'] } });
     expect(result.result.mechanisms.map((item) => item.mechanism)).toContain('consent_mode');
@@ -864,7 +864,7 @@ describe('Consent V2 production session wiring', () => {
       window.dataLayer=[]; function gtag(){window.dataLayer.push(arguments);}
       gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied'});
       function decline(){window.dataLayer.push(['consent','update',{ad_storage:'granted',analytics_storage:'granted'}]);new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G111';}
-    </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false}">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
+    </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false};window.dispatchEvent(new Event('CookiebotOnDecline'))">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
     expect(result.google_consent_mode).toMatchObject({ classification: 'basic_candidate', pre_choice_measurement_window_observed: true, tracking_gated: true });
     expect(result.telemetry.consent_mode_diagnostics).toMatchObject({ classification: 'basic_candidate', chronology: { update_only: false } });
   }, 10_000);
@@ -880,7 +880,7 @@ describe('Consent V2 production session wiring', () => {
       window.dataLayer=[]; function gtag(){window.dataLayer.push(arguments);}
       gtag('consent','default',{ad_storage:'denied',analytics_storage:'denied'});
       function decline(){window.dataLayer.push(['consent','update',{ad_storage:'granted',analytics_storage:'granted'}]);}
-    </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false}">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
+    </script></head><body><script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="decline();Cookiebot.hasResponse=true;Cookiebot.declined=true;Cookiebot.consent={preferences:false,statistics:false,marketing:false};window.dispatchEvent(new Event('CookiebotOnDecline'))">Decline</button></div></body>`, false, { ...input, rollout: actionRollout });
     expect(result.result.google_consent_mode.updates_observed).toBe(true);
     expect(result.google_consent_mode.commands.some((command) => command.command === 'update')).toBe(true);
     expect(result.result.reason_codes).toContain('STATE_CONTRADICTION');
@@ -1130,6 +1130,38 @@ describe('Consent V2 production session wiring', () => {
     ]));
     expect(result.diagnostic_observation?.readiness).toMatchObject({ triggered: true, completion: 'positive_ui_ready' });
   }, 10_000);
+
+  it('CB-CERT-01 executes standard direct Reject once and verifies with synchronous CookiebotOnDecline', async () => {
+    const result = await auditNavigation(`<script>
+      let rejected=localStorage.getItem('cb-rejected')==='true';
+      window.Cookiebot={get hasResponse(){return rejected;},get declined(){return rejected;},get consented(){return false;},get consent(){return {preferences:!rejected,statistics:!rejected,marketing:!rejected};}};
+    </script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:block;width:320px;height:120px"><button id="CybotCookiebotDialogBodyButtonDecline" onclick="localStorage.setItem('cb-rejected','true');rejected=true;window.dispatchEvent(new Event('CookiebotOnDecline'))">Reject all</button></div>`, false, { ...input, rollout: actionRollout });
+    expect(result.telemetry).toMatchObject({ provider: 'cookiebot', runtime_variant: 'standard_dialog', reject_semantic: 'reject_all', activation_occurred: true, verification: 'verified' });
+    expect(result.result.interactions.filter((item) => item.outcome === 'executed')).toHaveLength(1);
+    expect(result.result.rejection_verification.evidence).toContain('supporting:provider_event:matches_requested');
+    expect(result.result.persistence).toMatchObject({ status: 'confirmed', post_reload_observation_completed: true, semantic_channels: { provider: 'persisted' } });
+  }, 20_000);
+
+  it('CB-CERT-EVENT-01 captures repeated Cookiebot events in the pre-navigation browser bridge', async () => {
+    const page = await browser.newPage();
+    try {
+      await installConsentCommandBootstrap(page);
+      await page.goto('data:text/html,<button>fixture</button>');
+      await page.evaluate(() => { window.dispatchEvent(new Event('CookiebotOnDecline')); window.dispatchEvent(new Event('CookiebotOnDecline')); });
+      expect(await captureBrowserConsentFacts(page)).toMatchObject({ cookiebot_events: ['CookiebotOnDecline', 'CookiebotOnDecline'] });
+    } finally { await page.close(); }
+  });
+
+  it('CB-CERT-02 executes the delayed Velux Only Necessary semantic target through verification and persistence', async () => {
+    const result = await auditNavigation(`<script>
+      let rejected=localStorage.getItem('cb-necessary')==='true';
+      window.Cookiebot={get hasResponse(){return rejected;},get declined(){return rejected;},get consented(){return false;},get consent(){return {preferences:!rejected,statistics:!rejected,marketing:!rejected};}};
+    </script><script src="https://consent.cookiebot.com/uc.js"></script><div id="CybotCookiebotDialog" style="display:none"></div><div id="mount"></div><script>setTimeout(()=>{document.querySelector('#mount').innerHTML='<section style="position:fixed;width:360px;height:180px"><div class="cookie-copy" role="dialog" style="position:sticky">Cookie privacy settings</div><div class="actions"><div onclick="window.rejectCookiebot()"><span>NUR NOTWENDIGE</span></div><div onclick="void 0"><span>ALLE AKZEPTIEREN</span></div></div></section>'},3200);window.rejectCookiebot=()=>{localStorage.setItem('cb-necessary','true');rejected=true;dispatchEvent(new Event('CookiebotOnDecline'))}</script>`, false, { ...input, diagnostic: true, rollout: actionRollout });
+    expect(result.telemetry).toMatchObject({ provider: 'cookiebot', runtime_variant: 'custom_template', reject_semantic: 'only_necessary', requested_action: 'only_necessary', execution_strategy: 'provider_selector', activation_occurred: true, verification: 'verified' });
+    expect(result.result.interactions).toEqual([expect.objectContaining({ action: 'only_necessary', outcome: 'executed' })]);
+    expect(result.result.rejection_verification.status).toBe('verified');
+    expect(result.result.persistence).toMatchObject({ status: 'confirmed', post_reload_observation_completed: true, semantic_channels: { provider: 'persisted' } });
+  }, 20_000);
 
   it('UI-SCOPE-01 resolves a fixed consent wrapper around sibling non-standard controls without document-wide scanning', async () => {
     const page = await browser.newPage();

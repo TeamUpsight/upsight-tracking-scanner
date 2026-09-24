@@ -19,8 +19,12 @@ export function collectRejectVerificationSignals(input: {
   interactionExecuted: boolean;
   navigationInterrupted: boolean;
   providerState: ConsentState;
+  /** Optional provenance shared by provider-level and category projections. */
+  providerStateIndependenceGroup?: string;
   /** Captured browser event, not an inferred adapter contribution. */
   providerEventObserved: boolean;
+  /** A normalized semantic provider event; unknown/neutral events are omitted. */
+  providerEventRelation?: 'matches_requested' | 'contradicts_requested' | 'unknown';
   /** Provider API explicitly reports that the user action completed. */
   providerActionCompleted: boolean;
   frameworks: ConsentFrameworkObservations;
@@ -30,14 +34,17 @@ export function collectRejectVerificationSignals(input: {
   }];
   const providerRelation = relationForDecision(input.providerState.decision);
   if (providerRelation !== 'unknown') signals.push({
-    family: 'provider_state', rank: 'strong', relation: providerRelation, authoritative: true, observed_at: input.timestamp
+    family: 'provider_state', rank: 'strong', relation: providerRelation, authoritative: true, observed_at: input.timestamp,
+    independence_group: input.providerStateIndependenceGroup
   });
   const categoryDecisions = input.providerState.categories.map((category) => category.decision);
   if (categoryDecisions.length && categoryDecisions.every((decision) => decision === 'rejected')) signals.push({
-    family: 'provider_category_state', rank: 'strong', relation: 'matches_requested', authoritative: true, observed_at: input.timestamp
+    family: 'provider_category_state', rank: 'strong', relation: 'matches_requested', authoritative: true, observed_at: input.timestamp,
+    independence_group: input.providerStateIndependenceGroup
   });
   if (categoryDecisions.length && categoryDecisions.every((decision) => decision === 'accepted')) signals.push({
-    family: 'provider_category_state', rank: 'strong', relation: 'contradicts_requested', authoritative: true, observed_at: input.timestamp
+    family: 'provider_category_state', rank: 'strong', relation: 'contradicts_requested', authoritative: true, observed_at: input.timestamp,
+    independence_group: input.providerStateIndependenceGroup
   });
 
   const tcf = input.frameworks.tcf.latest_event;
@@ -53,7 +60,8 @@ export function collectRejectVerificationSignals(input: {
     else signals.push({ family: 'framework_tcf', rank: 'supporting', relation: 'unknown', observed_at: input.timestamp });
   }
   if (input.frameworks.gpp.lifecycle === 'ready') signals.push({ family: 'framework_gpp', rank: 'supporting', relation: 'unknown', observed_at: input.timestamp });
-  if (input.providerEventObserved) signals.push({ family: 'provider_event', rank: 'supporting', relation: 'matches_requested', observed_at: input.timestamp });
+  if (input.providerEventRelation && input.providerEventRelation !== 'unknown') signals.push({ family: 'provider_event', rank: 'supporting', relation: input.providerEventRelation, observed_at: input.timestamp });
+  else if (input.providerEventObserved) signals.push({ family: 'provider_event', rank: 'supporting', relation: 'matches_requested', observed_at: input.timestamp });
   if (input.providerActionCompleted) signals.push({ family: 'consent_submission', rank: 'supporting', relation: 'matches_requested', observed_at: input.timestamp });
   return signals;
 }

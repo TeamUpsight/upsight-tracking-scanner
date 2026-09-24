@@ -73,6 +73,30 @@ describe('reject verification engine', () => {
     expect(result).toMatchObject({ status: 'verified', strong_evidence: ['framework_tcf', 'provider_state'] });
   });
 
+  it('does not count provider decision and category projections from one runtime as independent', () => {
+    const result = verify([
+      signal({ family: 'provider_state', independence_group: 'cookiebot_runtime' }),
+      signal({ family: 'provider_category_state', independence_group: 'cookiebot_runtime' })
+    ]);
+    expect(result).toMatchObject({ status: 'inconclusive', strong_evidence: ['provider_category_state', 'provider_state'] });
+  });
+
+  it('allows an independent Cookiebot decline event to corroborate rejected runtime state', () => {
+    expect(verify([
+      signal({ family: 'provider_state', independence_group: 'cookiebot_runtime' }),
+      signal({ family: 'provider_category_state', independence_group: 'cookiebot_runtime' }),
+      signal({ family: 'provider_event', rank: 'supporting', authoritative: false })
+    ]).status).toBe('verified');
+  });
+
+  it('does not verify when an authoritative runtime is rejected but a provider event says accept', () => {
+    expect(verify([
+      signal({ family: 'provider_state', independence_group: 'cookiebot_runtime' }),
+      signal({ family: 'provider_category_state', independence_group: 'cookiebot_runtime' }),
+      signal({ family: 'provider_event', rank: 'supporting', relation: 'contradicts_requested', authoritative: false })
+    ])).toMatchObject({ status: 'inconclusive', reason_codes: [ConsentAuditCodes.STATE_CONTRADICTION, ConsentAuditCodes.ACTION_INCONCLUSIVE] });
+  });
+
   it('does not use framework evidence captured before the action', () => {
     const result = verify([signal({ family: 'framework_tcf', observed_at: actionTimestamp - 1 })]);
     expect(result).toMatchObject({ status: 'inconclusive', evidence: [] });

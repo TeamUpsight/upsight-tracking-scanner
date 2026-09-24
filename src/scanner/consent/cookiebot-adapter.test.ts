@@ -48,6 +48,19 @@ describe('Cookiebot adapter fixtures', () => {
     expect(calls).toEqual(['#CybotCookiebotDialogBodyButtonDecline']);
   });
 
+  it('routes a semantic Only Necessary plan to its own Cookiebot control', async () => {
+    const calls: string[] = [];
+    const context = {
+      geo: 'EU' as const,
+      controls: [{ id: 'only-necessary', visible: true, enabled: true, actionable: true, within_confirmed_cookiebot_surface: true, semantic_action: 'only_necessary' as const }],
+      invoke_control: async (id: string) => { calls.push(id); return true; }
+    };
+    expect(await cookiebotAdapter.reject?.({ context, requested_action: 'only_necessary' })).toMatchObject({
+      status: 'completed', value: { action: 'only_necessary', origin: 'semantic_ui', outcome: 'executed' }
+    });
+    expect(calls).toEqual(['only-necessary']);
+  });
+
   it('US-COOKIEBOT-01 does not treat a USA sale/share opt-out label as reject all from the decline selector alone', () => {
     const context = {
       geo: 'USA' as const,
