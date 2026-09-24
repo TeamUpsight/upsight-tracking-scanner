@@ -410,6 +410,9 @@ export interface EvidenceBundle {
     proxy_port: number | null;
     proxy_country: string | null;
     proxy_country_verified: boolean;
+    requested_geo?: 'USA' | 'EU' | 'UK';
+    actual_egress_country?: string | null;
+    country_matches_requested_geo?: boolean | null;
     proxy_egress_reachable: boolean;
     proxy_ip_hash: string | null;
     proxy_retry_recovered: boolean;
@@ -421,6 +424,8 @@ export interface EvidenceBundle {
     proxy_attempts?: Array<{ provider: 'decodo' | 'browserless_residential'; attempt: number; configured_port: number | null; connection_ms?: number; failure_reason?: string; egress_reachable?: boolean; target_result?: string }>;
     browser_locale: string | null;
     browser_timezone: string | null;
+    browser_profile_country?: string | null;
+    browser_profile_match?: 'exact' | 'regional_fallback' | null;
     captcha_attempted: boolean;
     captcha_found: boolean;
     captcha_solved: boolean;

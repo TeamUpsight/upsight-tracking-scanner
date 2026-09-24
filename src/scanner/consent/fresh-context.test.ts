@@ -19,6 +19,7 @@ function fakeContext() {
   };
   return {
     page,
+    cdp,
     context: {
       setDefaultTimeout: vi.fn(),
       setDefaultNavigationTimeout: vi.fn(),
@@ -65,5 +66,25 @@ describe('fresh Consent V2 context', () => {
     expect(consentNavigationReadiness({ category: 'bot_protection' })).toEqual({
       status: 'blocked_or_challenged', reason_codes: ['BLOCKED_OR_CHALLENGED']
     });
+  });
+
+  it('records EU Bulgaria egress as verified only when the egress probe independently confirms it', () => {
+    expect(createConsentGeoEvidence({ requestedGeo: 'EU', proxyRegion: 'bg' })).toMatchObject({
+      requested_geo: 'EU', proxy_region: 'bg', verified: null, verification_method: 'proxy_metadata', confidence: 'low', reason_codes: ['GEO_UNVERIFIED']
+    });
+    expect(createConsentGeoEvidence({ requestedGeo: 'EU', proxyRegion: 'bg', independentlyVerified: true })).toMatchObject({
+      requested_geo: 'EU', proxy_region: 'bg', verified: true, verification_method: 'egress_probe', confidence: 'high', reason_codes: []
+    });
+  });
+
+  it('applies the confirmed Bulgarian profile to the fresh Consent context', async () => {
+    const { context, page, cdp } = fakeContext();
+    const browser = { newContext: vi.fn().mockResolvedValue(context) };
+    const session = await createFreshConsentContext(browser as any, { requestedGeo: 'EU', proxyRegion: 'bg', independentlyVerified: true });
+
+    expect(session.geo).toMatchObject({ requested_geo: 'EU', proxy_region: 'bg', verified: true, verification_method: 'egress_probe', confidence: 'high' });
+    expect(context.setExtraHTTPHeaders).toHaveBeenCalledWith({ 'Accept-Language': expect.stringMatching(/^bg-BG,bg/) });
+    expect(cdp.send).toHaveBeenCalledWith('Emulation.setLocaleOverride', { locale: 'bg-BG' });
+    expect(cdp.send).toHaveBeenCalledWith('Emulation.setTimezoneOverride', { timezoneId: 'Europe/Sofia' });
   });
 });

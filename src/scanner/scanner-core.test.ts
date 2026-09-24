@@ -12,7 +12,7 @@ import { buildDebugPackageFiles } from './quality/debug-package';
 import { buildQualityMetrics } from './quality/metrics';
 import { buildLatestReviewQueue } from './quality/review-queue';
 import { calculateQaPriority, generateFailureFingerprints, qaPrioritySignals } from './quality/fingerprints';
-import { buildBrowserlessCdpUrl, buildRotatingFallbackProxy, getExternalProxyForGeo, rotateDecodoSessionUsername } from './proxy/decodo';
+import { buildBrowserlessCdpUrl, buildRotatingFallbackProxy, countryForGeo, getExternalProxyForGeo, rotateDecodoSessionUsername } from './proxy/decodo';
 import { buildProxyAttemptPlan, classifyConfirmedTunnelFailure, shouldRetryBrowserlessResidential, shouldUseBrowserlessResidentialFallback } from './proxy/provider';
 import { decideAccessTransition } from './access-state-machine';
 import { FinalizeOnce } from './resolver/lifecycle';
@@ -29,6 +29,7 @@ import { AuditRuntimeBudget } from './audit-runtime-budget';
 import { parseRetryAfterMs, resolveAccessDecision, resolveHostnameEvidence, resolveHostnameStatus } from './navigation';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
 import { browserGeoProfile } from './browser-session';
+import { countryMatchesRequestedGeo, EU_MEMBER_COUNTRIES } from './geo-jurisdiction';
 import { createBrowserQlHandoff } from './browserless-bql';
 import { verifyConsentAcceptance, verifyConsentRejection } from './consent/consent-state';
 import { AUDIT_MODULE_ORDER, normalizeAuditModules } from '../audit-modules';
@@ -723,6 +724,28 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
 
   it('aligns browser locale/timezone and Browserless session configuration with geo', () => {
     expect(browserGeoProfile('gb')).toMatchObject({ locale: 'en-GB', timezoneId: 'Europe/London' });
+    for (const [country, locale, timezone] of [
+      ['bg', 'bg-BG', 'Europe/Sofia'], ['pl', 'pl-PL', 'Europe/Warsaw'], ['ro', 'ro-RO', 'Europe/Bucharest'], ['se', 'sv-SE', 'Europe/Stockholm'],
+      ['de', 'de-DE', 'Europe/Berlin'], ['fr', 'fr-FR', 'Europe/Paris'], ['us', 'en-US', 'America/New_York'], ['gb', 'en-GB', 'Europe/London']
+    ]) {
+      const profile = browserGeoProfile(country);
+      expect(profile).toMatchObject({ locale, timezoneId: timezone, match: 'exact', profile_country: country });
+      expect(profile.acceptLanguage.startsWith(locale)).toBe(true);
+      expect(() => new Intl.Locale(profile.locale)).not.toThrow();
+      expect(() => new Intl.DateTimeFormat('en-US', { timeZone: profile.timezoneId })).not.toThrow();
+    }
+    expect(browserGeoProfile('bg')).toMatchObject({ locale: 'bg-BG', timezoneId: 'Europe/Sofia', acceptLanguage: expect.stringMatching(/^bg-BG,bg/) });
+    expect(browserGeoProfile('unknown-xx')).toMatchObject({ profile_country: null, match: 'regional_fallback', locale: 'en-GB', timezoneId: 'UTC' });
+    expect(browserGeoProfile('unknown-xx').locale).not.toBe('en-US');
+    for (const country of EU_MEMBER_COUNTRIES) {
+      const profile = browserGeoProfile(country);
+      expect(profile).toMatchObject({ country, profile_country: country, match: 'exact' });
+      expect(profile.locale).not.toBe('en-US');
+      expect(profile.timezoneId).not.toBe('America/New_York');
+      expect(profile.acceptLanguage.startsWith(profile.locale)).toBe(true);
+      expect(() => new Intl.Locale(profile.locale)).not.toThrow();
+      expect(() => new Intl.DateTimeFormat('en-US', { timeZone: profile.timezoneId })).not.toThrow();
+    }
     const cdp = new URL(buildBrowserlessCdpUrl({
       host: 'production-lon.browserless.io',
       token: 'secret-test-token',
@@ -740,6 +763,22 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     expect(cdp.searchParams.get('proxyCountry')).toBe('gb');
     expect(cdp.searchParams.get('proxyLocaleMatch')).toBe('true');
     expect(JSON.parse(cdp.searchParams.get('launch') || '{}').args).toContain('--lang=en-GB');
+  });
+
+  it('validates independently observed country against the requested jurisdiction, not proxy fallback preferences', () => {
+    expect(EU_MEMBER_COUNTRIES.size).toBe(27);
+    for (const country of ['at', 'be', 'bg', 'hr', 'cy', 'cz', 'dk', 'ee', 'fi', 'fr', 'de', 'gr', 'hu', 'ie', 'it', 'lv', 'lt', 'lu', 'mt', 'nl', 'pl', 'pt', 'ro', 'sk', 'si', 'es', 'se', 'BG', 'DE']) {
+      expect(countryMatchesRequestedGeo('EU', country), `EU + ${country}`).toBe(true);
+    }
+    expect(countryMatchesRequestedGeo('EU', 'us')).toBe(false);
+    expect(countryMatchesRequestedGeo('EU', 'gb')).toBe(false);
+    expect(countryMatchesRequestedGeo('USA', 'us')).toBe(true);
+    expect(countryMatchesRequestedGeo('USA', 'bg')).toBe(false);
+    expect(countryMatchesRequestedGeo('UK', 'gb')).toBe(true);
+    expect(countryMatchesRequestedGeo('UK', 'uk')).toBe(true);
+    expect(countryMatchesRequestedGeo('UK', 'bg')).toBe(false);
+    expect(countryMatchesRequestedGeo('UK', 'us')).toBe(false);
+    expect(countryMatchesRequestedGeo('EU', parseEgressCountry({ country_code: 'BG' }) || '')).toBe(true);
   });
 
   it('builds a sanitized Decodo attempt and a fresh Browserless Residential fallback without an external proxy', () => {
@@ -877,9 +916,14 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
   it('uses real EU countries and valid integer duration on backconnect gateways', () => {
     const beforeProxy = process.env.DECODO_PROXY_EU;
     const beforePorts = process.env.DECODO_PROXY_EU_PORTS;
+    const beforeFallbacks = process.env.DECODO_PROXY_EU_COUNTRY_FALLBACKS;
     try {
       process.env.DECODO_PROXY_EU = 'http://proxy-user:password@gate.decodo.com:7000';
       process.env.DECODO_PROXY_EU_PORTS = '7000';
+      process.env.DECODO_PROXY_EU_COUNTRY_FALLBACKS = 'de,nl,fr,it,es';
+      expect(countryForGeo('EU', 0)).toBe('de');
+      expect(countryForGeo('EU', 1)).toBe('nl');
+      expect(countryForGeo('EU', 5)).toBe('de');
       const proxy = new URL(getExternalProxyForGeo('EU', 0));
       expect(decodeURIComponent(proxy.username)).toMatch(/^user-proxy-user-country-de-session-[a-z0-9]+-sessionduration-60$/i);
     } finally {
@@ -887,6 +931,8 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
       else process.env.DECODO_PROXY_EU = beforeProxy;
       if (beforePorts === undefined) delete process.env.DECODO_PROXY_EU_PORTS;
       else process.env.DECODO_PROXY_EU_PORTS = beforePorts;
+      if (beforeFallbacks === undefined) delete process.env.DECODO_PROXY_EU_COUNTRY_FALLBACKS;
+      else process.env.DECODO_PROXY_EU_COUNTRY_FALLBACKS = beforeFallbacks;
     }
   });
 

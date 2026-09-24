@@ -20,6 +20,7 @@ import { classifyAuditTermination } from '../audit-lifecycle';
 import { boundedInteger, bulkProxyRetryLimit, consentTimingValues, globalScanTimeoutMs, singleProxyRetryLimit } from '../shared/config';
 import { buildMetadata } from '../build-metadata';
 import { browserGeoProfile, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
+import { countryMatchesRequestedGeo } from './geo-jurisdiction';
 import { createBrowserQlHandoff } from './browserless-bql';
 import { GPC_ARM_MAX_BUDGET_MS, GPC_ARM_MIN_BUDGET_MS, GPC_FINALIZATION_MARGIN_MS, openBrowserlessGpcExperimentSession, runGpcExperiment, type GpcExperimentEvidence } from './consent/gpc-experiment';
 import { attachAuthorizedAccessHeader } from './authorized-access';
@@ -1673,6 +1674,8 @@ export async function runStorefrontAudit(
     const appliedGeo = await configureBrowserGeo(context, homepage, currentProxyCountry);
     evidence.runtime.browser_locale = appliedGeo.profile.locale;
     evidence.runtime.browser_timezone = appliedGeo.profile.timezoneId;
+    evidence.runtime.browser_profile_country = appliedGeo.profile.profile_country;
+    evidence.runtime.browser_profile_match = appliedGeo.profile.match;
     attachContextObservers(context);
     const authorizedSession = await attachAuthorizedAccessHeader(context, homepage, normalizedDomain || '');
     if (process.env.BROWSER_PROVIDER !== 'local') {
@@ -1718,7 +1721,6 @@ export async function runStorefrontAudit(
       if (!response || !response.ok()) throw new Error('Egress probe returned a non-success status');
       const payload = neutral ? {} : await response.json() as Record<string, unknown>;
       const actualCountry = parseEgressCountry(payload);
-      const expectedCountries = geo === 'USA' ? ['us'] : geo === 'UK' ? ['gb', 'uk'] : ['de', 'nl', 'fr', 'it', 'es'];
       evidence.runtime.proxy_egress_reachable = true;
       evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, neutral
         ? { neutral_https_result: 'reachable' }
@@ -1726,10 +1728,16 @@ export async function runStorefrontAudit(
       if (actualCountry) {
         currentProxyCountry = actualCountry;
         evidence.runtime.proxy_country = currentProxyCountry;
-        evidence.runtime.proxy_country_verified = expectedCountries.includes(actualCountry);
-        const reapplied = await configureBrowserGeo(context, probePage, currentProxyCountry);
+        evidence.runtime.actual_egress_country = actualCountry;
+        evidence.runtime.country_matches_requested_geo = countryMatchesRequestedGeo(geo, actualCountry);
+        evidence.runtime.proxy_country_verified = evidence.runtime.country_matches_requested_geo;
+        // Apply the independently observed country to the real audit page as
+        // well as the context headers before target navigation begins.
+        const reapplied = await configureBrowserGeo(context, homepage, currentProxyCountry);
         evidence.runtime.browser_locale = reapplied.profile.locale;
         evidence.runtime.browser_timezone = reapplied.profile.timezoneId;
+        evidence.runtime.browser_profile_country = reapplied.profile.profile_country;
+        evidence.runtime.browser_profile_match = reapplied.profile.match;
       }
       const ip = String(payload.ip || payload.proxy || '').trim();
       const salt = process.env.PROXY_IP_HASH_SALT || '';
@@ -1739,9 +1747,14 @@ export async function runStorefrontAudit(
         addTrace('proxy_neutral_probe_completed', { reachable: true, provider: currentProxyProvider });
       }
       addTrace('proxy_egress_verified', {
-        expected_geo: geo,
+        requested_geo: geo,
         actual_country: actualCountry,
+        country_matches_requested_geo: evidence.runtime.country_matches_requested_geo,
         country_verified: evidence.runtime.proxy_country_verified,
+        browser_profile_country: evidence.runtime.browser_profile_country,
+        browser_profile_locale: evidence.runtime.browser_locale,
+        browser_profile_timezone: evidence.runtime.browser_timezone,
+        browser_profile_match: evidence.runtime.browser_profile_match,
         ip_fingerprint_stored: Boolean(evidence.runtime.proxy_ip_hash)
       });
     } catch {
@@ -1790,6 +1803,10 @@ export async function runStorefrontAudit(
       evidence.runtime.browserless_host = browserlessHost;
       evidence.runtime.browserless_session_timeout_ms = browserlessSessionTimeoutMs;
       evidence.runtime.proxy_country = currentProxyCountry;
+      evidence.runtime.browser_locale = profile.locale;
+      evidence.runtime.browser_timezone = profile.timezoneId;
+      evidence.runtime.browser_profile_country = profile.profile_country;
+      evidence.runtime.browser_profile_match = profile.match;
       if (currentProxyProvider === 'decodo') cdpUrl = buildBrowserlessCdpUrl({
         host: browserlessHost,
         token: process.env.BROWSERLESS_TOKEN,

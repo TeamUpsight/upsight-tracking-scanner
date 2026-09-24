@@ -1,4 +1,4 @@
-const VALID_EU_COUNTRIES = new Set(['de', 'nl', 'fr', 'it', 'es']);
+const EU_PROXY_FALLBACK_COUNTRIES = new Set(['de', 'nl', 'fr', 'it', 'es']);
 
 export interface ProxyMetrics {
   total_connects_by_geo: Record<string, number>;
@@ -119,7 +119,7 @@ export function countryForGeo(geo: string, attempt = 0) {
   if (normalized === 'UK') return 'gb';
   const configured = (process.env.DECODO_PROXY_EU_COUNTRY_FALLBACKS || 'de,nl,fr,it,es')
     .split(',').map((country) => country.trim().toLowerCase())
-    .filter((country) => VALID_EU_COUNTRIES.has(country));
+    .filter((country) => EU_PROXY_FALLBACK_COUNTRIES.has(country));
   const countries = configured.length ? configured : ['de', 'nl', 'fr', 'it', 'es'];
   return countries[attempt % countries.length];
 }
