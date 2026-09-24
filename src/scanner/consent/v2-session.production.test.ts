@@ -6,6 +6,7 @@ import { captureSharedConsentObservation, mergeSharedConsentObservation, prepare
 import { mapConsentV2ToExisting } from './compatibility-mapper';
 import { captureBrowserConsentFacts, installConsentCommandBootstrap, observeConsentFrameworksInPage } from './browser-context-builders';
 import { discoverProviderSemanticControls } from './provider-semantic-controls';
+import { discoverUsercentricsSemanticControls } from './usercentrics-semantic-controls';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
 
 const rollout: ConsentV2RolloutControls = {
@@ -717,7 +718,7 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.rejection_verification.status).toBe('inconclusive');
   });
 
-  it('UC-04 executes localized Usercentrics Reject, observes reload storage, and remains inconclusive', async () => {
+  it('UC-04 blocks localized Usercentrics Reject and reload without semantic verification capability', async () => {
     const result = await auditNavigation(`<script>window.UC_UI={};</script><script type="application/json" src="https://web.cmp.usercentrics.eu/ui/loader.js"></script><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>
       function reject(){localStorage.setItem('ucData','present');localStorage.setItem('ucString','present');}
       const root=document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'open'});
@@ -728,7 +729,9 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.banner).toMatchObject({ visibility: 'visible' });
     expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('direct');
     expect(result.result.interactions).toEqual([]);
-    expect(result.telemetry).toMatchObject({ verification_capability: 'unavailable', action_execution_eligible: false });
+    expect(result.telemetry).toMatchObject({ runtime_variant: 'standard_open_shadow', verification_capability: 'unavailable', action_execution_eligible: false,
+      semantic_discovery_attempted: true, semantic_candidate_count: 1, semantic_actionable_count: 1,
+      requested_action_target_resolved: true, target_resolution_reason: 'resolved', activation_occurred: false });
     expect(result.result.rejection_verification.status).toBe('inconclusive');
     expect(result.result.persistence).toMatchObject({ status: 'not_applicable', reload_attempted: false, post_reload_observation_completed: false });
   }, 20_000);
@@ -977,7 +980,8 @@ describe('Consent V2 production session wiring', () => {
     try {
       await page.setContent(`<aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'open'}).innerHTML='<button>Reject all</button>';</script>`);
       const { buildProviderContexts, actionTargetFor } = await import('./browser-context-builders');
-      const contexts = await buildProviderContexts(page, await captureBrowserConsentFacts(page), await observeConsentFrameworksInPage(page));
+      const discovery = await discoverUsercentricsSemanticControls(page);
+      const contexts = await buildProviderContexts(page, await captureBrowserConsentFacts(page), await observeConsentFrameworksInPage(page), discovery);
       expect(actionTargetFor(contexts.get('usercentrics'), 'reject_all')).toMatchObject({ frame_path: ['top'], shadow_mode: 'open', accessible_control: true });
       await page.setContent(`<aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'closed'});</script>`);
       expect((await captureBrowserConsentFacts(page)).usercentrics.shadow_mode).toBe('closed');
@@ -1114,11 +1118,13 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'reject_all', availability: 'direct' }), expect.objectContaining({ action: 'open_preferences', availability: 'direct' })]));
   });
 
-  it('Congstar live-shape fixture identifies the Usercentrics v2 loader and open-shadow controls without UC_UI', async () => {
+  it('Congstar live-shape fixture identifies the loader and observes unowned open-shadow controls without executing them', async () => {
     const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><div id="host"></div><script>const root=document.querySelector("#host").attachShadow({mode:"open"});root.innerHTML="<section role=dialog class=cookie-consent><div role=button><span>Einstellungen verwalten</span></div><div role=button><span>Alles ablehnen</span></div><div role=button><span>Alles akzeptieren</span></div></section>";</script>');
     expect(result.telemetry).toMatchObject({ provider: 'usercentrics', provider_confidence: 'high' });
     expect(result.result.banner.visibility).toBe('visible');
-    expect(result.result.available_actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'accept_all', availability: 'direct' }), expect.objectContaining({ action: 'reject_all', availability: 'direct' }), expect.objectContaining({ action: 'open_preferences', availability: 'direct' })]));
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('not_present');
+    expect(result.result.interactions).toEqual([]);
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
   });
 
   it('UI-BRIDGE-06 does not promote exact plain text without an actionable ancestor', async () => {
@@ -1184,6 +1190,57 @@ describe('Consent V2 production session wiring', () => {
     } finally { await page.close(); }
   });
 
+  it('UC-SAFE-01 resolves exact German controls only in the known open shadow root', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<button id="outside">Alles ablehnen</button><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"><button>Alles ablehnen</button></aside><script>
+        window.activations=0;
+        const root=document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'open'});
+        root.innerHTML='<button id="accept"> Alles   akzeptieren </button><div role="button" id="reject"><span> Alles   ablehnen </span></div><button id="preferences">Einstellungen verwalten</button><button>Alles ablehnen bitte</button>';
+        root.querySelector('#reject').addEventListener('click',()=>window.activations++);
+        document.querySelector('#outside').addEventListener('click',()=>window.activations+=10);
+      </script>`);
+      const discovery = await discoverUsercentricsSemanticControls(page);
+      expect(discovery.controls.map((item) => item.action)).toEqual(['accept_all', 'reject_all', 'open_preferences']);
+      expect(await discovery.invoke('usercentrics-semantic:reject_all')).toBe(true);
+      expect(await page.evaluate(() => (window as any).activations)).toBe(1);
+    } finally { await page.close(); }
+  });
+
+  it('UC-SAFE-02 refuses duplicate and closed-root targets', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'open'}).innerHTML='<button>Alles ablehnen</button><button>Alles ablehnen</button>';</script>`);
+      expect((await discoverUsercentricsSemanticControls(page)).controls.some((item) => item.action === 'reject_all')).toBe(false);
+      await page.setContent(`<aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>document.querySelector('#usercentrics-cmp-ui').attachShadow({mode:'closed'});</script>`);
+      expect((await discoverUsercentricsSemanticControls(page)).controls).toEqual([]);
+    } finally { await page.close(); }
+  });
+
+  it('UC-IDENTITY-01 does not attribute generic German controls to Usercentrics', async () => {
+    const result = await audit('<section role="dialog" style="position:fixed;width:320px;height:120px">Cookie settings<button>Alles ablehnen</button><button>Alles akzeptieren</button></section>');
+    expect(result.telemetry.provider).not.toBe('usercentrics');
+  });
+
+  it('UC-IDENTITY-02 blocks action when Usercentrics conflicts with another active CMP', async () => {
+    const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><script src="https://consent.cookiebot.com/uc.js"></script><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><div id="CybotCookiebotDialog" style="display:block;width:320px;height:120px"><button id="CybotCookiebotDialogBodyButtonDecline">Decline</button></div><script>document.querySelector("#usercentrics-cmp-ui").attachShadow({mode:"open"}).innerHTML="<button>Alles ablehnen</button>";</script>', { ...input, rollout: actionRollout });
+    expect(result.telemetry.provider_conflict).toBe(true);
+    expect(result.result.interactions).toEqual([]);
+  });
+
+  it('UC-IDENTITY-03 preserves the conflict gate when only Usercentrics has visible controls', async () => {
+    const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><script src="https://consent.cookiebot.com/uc.js"></script><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><div id="CybotCookiebotDialog" style="display:none"></div><script>document.querySelector("#usercentrics-cmp-ui").attachShadow({mode:"open"}).innerHTML="<button>Alles ablehnen</button>";</script>', { ...input, rollout: actionRollout });
+    expect(result.telemetry).toMatchObject({ provider: 'usercentrics', provider_conflict: true, rollout_gate_eligible: false, activation_occurred: false });
+    expect(result.result.interactions).toEqual([]);
+  });
+
+  it('UC-PREFERENCES-01 records preferences-only without treating opening as Reject', async () => {
+    const result = await auditNavigation('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><script>window.preferenceOpens=0;const root=document.querySelector("#usercentrics-cmp-ui").attachShadow({mode:"open"});root.innerHTML="<button>Einstellungen verwalten</button>";root.querySelector("button").addEventListener("click",()=>window.preferenceOpens++);</script>', false, { ...input, rollout: actionRollout });
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('preferences_only');
+    expect(result.telemetry).toMatchObject({ verification_capability: 'unavailable', activation_occurred: false, verification: 'inconclusive' });
+    expect(result.result.interactions).toEqual([]);
+  });
+
   it('CB-CERT-02 executes the delayed Velux Only Necessary semantic target through verification and persistence', async () => {
     const result = await auditNavigation(`<script>
       let rejected=localStorage.getItem('cb-necessary')==='true';
@@ -1228,14 +1285,13 @@ describe('Consent V2 production session wiring', () => {
   }, 10_000);
 
   it('CMP-READINESS-LATE-03 / Congstar live shape waits for delayed open-shadow Usercentrics controls without UC_UI', async () => {
-    const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><div id="host"></div><script>setTimeout(()=>{const root=document.querySelector("#host").attachShadow({mode:"open"});root.innerHTML="<section role=dialog style=position:fixed;width:360px;height:180px>Cookie settings<div role=button>Einstellungen verwalten</div><div role=button>Alles ablehnen</div><div role=button>Alles akzeptieren</div></section>"},1500)</script>', { ...input, diagnostic: true });
+    const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><div id="host"></div><script>setTimeout(()=>{const root=document.querySelector("#host").attachShadow({mode:"open"});root.innerHTML="<section role=dialog style=position:fixed;width:360px;height:180px>Cookie settings<div role=button>Einstellungen verwalten</div><div role=button>Alles ablehnen</div><div role=button>Alles akzeptieren</div></section>"},1500)</script>', { ...input, diagnostic: true, rollout: actionRollout });
     expect(result.telemetry).toMatchObject({ provider: 'usercentrics', provider_confidence: 'high' });
     expect(result.result.banner.visibility).toBe('visible');
-    expect(result.result.available_actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: 'accept_all', availability: 'direct' }),
-      expect.objectContaining({ action: 'reject_all', availability: 'direct' }),
-      expect.objectContaining({ action: 'open_preferences', availability: 'direct' })
-    ]));
+    expect(result.result.available_actions.find((item) => item.action === 'reject_all')?.availability).toBe('not_present');
+    expect(result.diagnostic_observation?.visible_controls.map((item) => item.semantic_action)).toEqual(expect.arrayContaining(['accept_all', 'reject_all', 'open_preferences']));
+    expect(result.telemetry).toMatchObject({ runtime_variant: 'delayed_open_shadow_web_cmp', action_execution_eligible: false, activation_occurred: false, verification: 'inconclusive', persistence: 'not_applicable' });
+    expect(result.result.interactions).toEqual([]);
     expect(result.diagnostic_observation?.readiness?.final.open_shadow_roots).toBeGreaterThan(0);
   }, 10_000);
 

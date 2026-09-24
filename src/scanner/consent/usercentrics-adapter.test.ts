@@ -9,7 +9,8 @@ import {
   usercentricsPersistenceEvidence,
   usercentricsProviderEvidence,
   usercentricsStateContribution,
-  usercentricsVerificationContribution
+  usercentricsVerificationContribution,
+  usercentricsVerificationCapability
 } from './usercentrics-adapter';
 import { ConsentAuditCodes } from './domain-types';
 
@@ -27,6 +28,13 @@ describe('Usercentrics adapter fixtures', () => {
       reason_codes: [ConsentAuditCodes.CMP_DETECTED, ConsentAuditCodes.CMP_PROVIDER_IDENTIFIED]
     });
     expect(cmpAdapterRegistry.get('usercentrics')).toBe(usercentricsAdapter);
+  });
+
+  it('UC-DETECTION-01 separates asset/runtime and asset/root identity from generic UI', () => {
+    const asset_urls = ['https://app.usercentrics.eu/browser-ui/latest/loader.js'];
+    expect(detectUsercentrics({ asset_urls, uc_ui_type: 'object' }).status).toBe('detected');
+    expect(detectUsercentrics({ asset_urls, surfaces: [{ selector: 'aside#usercentrics-cmp-ui', present: true, visible: true, shadow_mode: 'open' }] }).status).toBe('detected');
+    expect(detectUsercentrics({ generic_surfaces: [{ visible: true, privacy_or_cookie_semantics: true, intent: 'consent', strong_presentation: true }] }).status).toBe('not_detected');
   });
 
   it('UC-02 represents the verified open shadow-root UI without custom shadow traversal', () => {
@@ -71,13 +79,13 @@ describe('Usercentrics adapter fixtures', () => {
     });
   });
 
-  it('UC-07 confirms persistence only from metadata continuity across reload', () => {
+  it('UC-07 keeps metadata continuity supporting until semantic persistence is proven', () => {
     const persistence = usercentricsPersistenceEvidence({
       storage: [{ key_name: 'ucData', changed: true, post_reload_exists: true, post_reload_matches_after: true }]
     });
 
     expect(persistence).toEqual({
-      status: 'confirmed', evidence: ['usercentrics_uc_data_changed', 'usercentrics_uc_data_present_after_reload'], reason_codes: [ConsentAuditCodes.PERSISTENCE_CONFIRMED]
+      status: 'inconclusive', evidence: ['usercentrics_uc_data_changed', 'usercentrics_uc_data_present_after_reload'], reason_codes: [ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE]
     });
   });
 
@@ -109,6 +117,16 @@ describe('Usercentrics adapter fixtures', () => {
     expect(usercentricsBannerState(context)).toMatchObject({ surface: 'none', visibility: 'not_visible', reason_codes: [ConsentAuditCodes.BANNER_NOT_VISIBLE] });
   });
 
+  it('UC-LIFECYCLE-01 treats initialization and view transitions as readiness, not consent', () => {
+    const base = { asset_urls: ['https://app.usercentrics.eu/browser-ui/latest/loader.js'],
+      lifecycle: { initialized: true, latest_view: 'FIRST_LAYER' as const, latest_view_at_ms: 20, cmp_shown_observed: true, cmp_shown_at_ms: 10, event_count: 3 } };
+    expect(usercentricsBannerState(base).visibility).toBe('visible');
+    expect(usercentricsConsentState(base).decision).toBe('ambiguous');
+    const afterViewChange = { ...base, lifecycle: { ...base.lifecycle, latest_view: 'NONE' as const, latest_view_at_ms: 30 } };
+    expect(usercentricsBannerState(afterViewChange).visibility).toBe('not_visible');
+    expect(usercentricsConsentState(afterViewChange).decision).toBe('ambiguous');
+  });
+
   it('DET-PROVIDER-06 through DET-PROVIDER-08 preserve exact latest, versioned, and v3 Usercentrics loader signatures', () => {
     for (const loader of ['https://app.usercentrics.eu/browser-ui/latest/loader.js', 'https://app.usercentrics.eu/browser-ui/3.108.0/loader.js', 'https://web.cmp.usercentrics.eu/ui/loader.js']) {
       const candidate = usercentricsProviderEvidence({ asset_urls: [loader] });
@@ -137,5 +155,12 @@ describe('Usercentrics adapter fixtures', () => {
 
     expect(usercentricsStateContribution(context)).toMatchObject({ provider_state: { decision: 'rejected' }, framework_context: ['tcf_framework_active'] });
     expect(usercentricsVerificationContribution(context)).toEqual({ strong: ['usercentrics_safe_provider_state'], supporting: ['usercentrics_uc_string_changed'] });
+  });
+
+  it('UC-CAPABILITY-01 requires two independent future semantic sources before a live action', () => {
+    const runtimeOnly = { status: 'available' as const, strong_families: ['provider_state', 'provider_category_state'] as const, reason_codes: [] };
+    expect(usercentricsVerificationCapability({ ...runtimeOnly, strong_families: [...runtimeOnly.strong_families] })).toMatchObject({ status: 'unavailable' });
+    expect(usercentricsVerificationCapability({ status: 'available', strong_families: ['framework_tcf'], reason_codes: [] })).toMatchObject({ status: 'unavailable' });
+    expect(usercentricsVerificationCapability({ status: 'available', strong_families: ['provider_state', 'provider_category_state', 'framework_tcf'], reason_codes: [] })).toMatchObject({ status: 'available' });
   });
 });

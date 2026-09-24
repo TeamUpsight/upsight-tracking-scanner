@@ -19,6 +19,7 @@ import {
   type VerificationResult
 } from './domain-types';
 import type { ShadowMode } from './surface-utils';
+import type { VerificationCapability } from './verification-capability';
 
 export const USERCENTRICS_STANDARD_ROOT = 'aside#usercentrics-cmp-ui';
 
@@ -100,6 +101,18 @@ export interface UsercentricsStateContribution {
 export interface UsercentricsVerificationContribution {
   strong: string[];
   supporting: string[];
+}
+
+/** A single UC runtime projection or TCF listener cannot by itself verify Reject. */
+export function usercentricsVerificationCapability(base: VerificationCapability): VerificationCapability {
+  if (base.status !== 'available') return base;
+  const sources = new Set(base.strong_families.map((family) =>
+    family === 'provider_state' || family === 'provider_category_state' ? 'usercentrics_runtime' : family
+  ));
+  return sources.size >= 2 ? base : {
+    status: 'unavailable', strong_families: base.strong_families,
+    reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_UNAVAILABLE]
+  };
 }
 
 function hasCurrentLoader(values: readonly string[] | undefined) {
@@ -233,7 +246,7 @@ export function usercentricsActionInventory(context: UsercentricsAdapterContext)
   };
 }
 
-/** Metadata descriptors can confirm persistence across reload, but never semantic rejection. */
+/** Storage descriptors support persistence; they cannot confirm semantic Reject. */
 export function usercentricsPersistenceEvidence(context: UsercentricsAdapterContext): PersistenceResult {
   const descriptors = context.storage || [];
   const evidence = descriptors.flatMap((descriptor) => {
@@ -243,10 +256,9 @@ export function usercentricsPersistenceEvidence(context: UsercentricsAdapterCont
       ...(descriptor.post_reload_exists ? [`${prefix}_present_after_reload`] : [])
     ];
   });
-  const confirmed = descriptors.some((descriptor) => descriptor.changed && descriptor.post_reload_exists && descriptor.post_reload_matches_after);
   return {
-    status: confirmed ? 'confirmed' : 'inconclusive', evidence,
-    reason_codes: [confirmed ? ConsentAuditCodes.PERSISTENCE_CONFIRMED : ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE]
+    status: 'inconclusive', evidence,
+    reason_codes: [ConsentAuditCodes.PERSISTENCE_INCONCLUSIVE]
   };
 }
 
