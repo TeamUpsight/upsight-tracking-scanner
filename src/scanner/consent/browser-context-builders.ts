@@ -3,6 +3,7 @@ import type { CmpAdapterProviderId } from './adapter-registry';
 import { ONETRUST_DOCUMENTED_CONTROLS, ONETRUST_STANDARD_ROOTS } from './onetrust-adapter';
 import { COOKIEBOT_STANDARD_CONTROLS, COOKIEBOT_STANDARD_ROOT } from './cookiebot-adapter';
 import { USERCENTRICS_STANDARD_ROOT } from './usercentrics-adapter';
+import { usercentricsRuntimeVersion, usercentricsV2Decision, type UsercentricsV2ServiceAggregate } from './usercentrics-v2-state';
 import { DIDOMI_STANDARD_ROOTS } from './didomi-adapter';
 import { COOKIEYES_STANDARD_ROOT, COOKIEYES_STABLE_CONTROLS } from './cookieyes-adapter';
 import { observeConsentFrameworks, tcfAggregateDecision, type ConsentFrameworkObservations } from './framework-observers';
@@ -63,6 +64,11 @@ export interface BrowserConsentFacts {
     shadow_mode: 'open' | 'closed' | 'none';
     controls: Array<{ id: string; accessible_name: string; visible: boolean; enabled: boolean }>;
     lifecycle: { initialized: boolean; latest_view: 'FIRST_LAYER' | 'SECOND_LAYER' | 'NONE' | 'PRIVACY_BUTTON' | null; latest_view_at_ms: number | null; cmp_shown_observed: boolean; cmp_shown_at_ms: number | null; event_count: number };
+    runtime_version: 'v2_uc_ui' | 'v3' | 'unknown';
+    service_state: UsercentricsV2ServiceAggregate;
+    cmp_event_listener_installed: boolean;
+    cmp_events: Array<{ event_name: 'CMP_SHOWN' | 'ACCEPT_ALL' | 'DENY_ALL' | 'SAVE'; observed_at_ms: number }>;
+    tcf_last_event_at_ms: number | null;
   };
 }
 
@@ -117,8 +123,9 @@ export async function installConsentCommandBootstrap(page: Page) {
     w[providerKey] = providerEvents;
     const cookiebotEvents: string[] = Array.isArray(w.__upsightCookiebotEvents) ? w.__upsightCookiebotEvents : [];
     w.__upsightCookiebotEvents = cookiebotEvents;
-    const lifecycle = w[usercentricsKey] && typeof w[usercentricsKey] === 'object' ? w[usercentricsKey] : { initialized: false, latest_view: null, latest_view_at_ms: null, cmp_shown_observed: false, cmp_shown_at_ms: null, event_count: 0 };
+    const lifecycle = w[usercentricsKey] && typeof w[usercentricsKey] === 'object' ? w[usercentricsKey] : { initialized: false, latest_view: null, latest_view_at_ms: null, cmp_shown_observed: false, cmp_shown_at_ms: null, event_count: 0, cmp_event_listener_installed: false, cmp_events: [] };
     w[usercentricsKey] = lifecycle;
+    lifecycle.cmp_events = Array.isArray(lifecycle.cmp_events) ? lifecycle.cmp_events : [];
     const countLifecycle = () => { lifecycle.event_count = Math.min(20, (Number(lifecycle.event_count) || 0) + 1); };
     window.addEventListener('UC_UI_INITIALIZED', () => { lifecycle.initialized = true; countLifecycle(); });
     window.addEventListener('UC_UI_VIEW_CHANGED', (event: Event) => {
@@ -129,8 +136,16 @@ export async function installConsentCommandBootstrap(page: Page) {
     });
     window.addEventListener('UC_UI_CMP_EVENT', (event: Event) => {
       const detail = (event as CustomEvent<Record<string, unknown>>).detail;
-      if (detail && typeof detail === 'object' && detail.type === 'CMP_SHOWN') { lifecycle.cmp_shown_observed = true; lifecycle.cmp_shown_at_ms = Date.now(); countLifecycle(); }
+      if (!detail || typeof detail !== 'object') return;
+      const name = detail.type;
+      if (name !== 'CMP_SHOWN' && name !== 'ACCEPT_ALL' && name !== 'DENY_ALL' && name !== 'SAVE') return;
+      const at = Date.now();
+      if (lifecycle.cmp_events.length >= 20) lifecycle.cmp_events.shift();
+      lifecycle.cmp_events.push({ event_name: name, observed_at_ms: at });
+      if (name === 'CMP_SHOWN') { lifecycle.cmp_shown_observed = true; lifecycle.cmp_shown_at_ms = at; }
+      countLifecycle();
     });
+    lifecycle.cmp_event_listener_installed = true;
     for (const eventName of ['OneTrustGroupsUpdated', 'OTConsentApplied', 'consent.changed', 'preferences.clickdisagreetoall', 'notice.clickdisagree', 'CookiebotOnAccept', 'CookiebotOnDecline', 'CookiebotOnDialogDisplay']) {
       window.addEventListener(eventName, () => { if (!providerEvents.includes(eventName) && providerEvents.length < 20) providerEvents.push(eventName); });
     }
@@ -223,6 +238,7 @@ export async function installConsentCommandBootstrap(page: Page) {
             framework.tcf.listener_id ??= typeof value.listenerId === 'number' || typeof value.listenerId === 'string' ? value.listenerId : null;
             const event = tcfEvent(value); if (!event) return;
             framework.tcf.latest_event = event;
+            framework.tcf.latest_event_at_ms = Date.now();
             framework.tcf.event_count = Math.min(100, framework.tcf.event_count + 1);
           });
           framework.tcf.registered = true;
@@ -489,21 +505,65 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     } catch { /* Browser privacy signal is optional. */ }
     return { globals: globals.filter((name) => Boolean(w[name])), assets: Array.from(document.scripts).map((script) => script.src).filter(Boolean).slice(0, 200), cookie_names: cookieNames, cookiebot_data_cbid_present: Boolean(document.querySelector('[data-cbid]')), storage_keys: storageKeys, observations: selectors.map((selector) => { const element = document.querySelector(selector) as HTMLButtonElement | null; return element ? { selector, visible: visible(element), enabled: !element.disabled, text: String(element.getAttribute('aria-label') || element.textContent || '').slice(0, 120) } : null; }).filter(Boolean), cookiebot, cookieyes, onetrust, onetrust_public_methods, cookieyes_runtime_functions, didomi, didomi_controls, provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => typeof value === 'string').slice(0, 20) : [], cookiebot_events: Array.isArray(w.__upsightCookiebotEvents) ? w.__upsightCookiebotEvents.filter((value: unknown) => value === 'CookiebotOnAccept' || value === 'CookiebotOnDecline' || value === 'CookiebotOnDialogDisplay').slice(0, 20) : [], shopify, consent_commands: commands, gpc_signal: gpcSignal, gpc_acknowledgement_observed: gpcAcknowledgementObserved, generic };
   }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS, consentCommandKey: CONSENT_COMMAND_OBSERVATIONS_KEY, providerEventKey: PROVIDER_EVENT_OBSERVATIONS_KEY }) as Omit<BrowserConsentFacts, 'usercentrics'>;
-  const usercentrics = await page.evaluate(({ rootSelector, lifecycleKey }) => {
+  const usercentrics = await page.evaluate(({ rootSelector, lifecycleKey, frameworkKey }) => {
     const w = window as any;
     const raw = w[lifecycleKey] && typeof w[lifecycleKey] === 'object' ? w[lifecycleKey] : {};
     const view = raw.latest_view === 'FIRST_LAYER' || raw.latest_view === 'SECOND_LAYER' || raw.latest_view === 'NONE' || raw.latest_view === 'PRIVACY_BUTTON' ? raw.latest_view : null;
     const lifecycle = { initialized: raw.initialized === true || (() => { try { return typeof w.UC_UI?.isInitialized === 'function' && w.UC_UI.isInitialized() === true; } catch { return false; } })(), latest_view: view, latest_view_at_ms: typeof raw.latest_view_at_ms === 'number' ? raw.latest_view_at_ms : null, cmp_shown_observed: raw.cmp_shown_observed === true, cmp_shown_at_ms: typeof raw.cmp_shown_at_ms === 'number' ? raw.cmp_shown_at_ms : null, event_count: Math.max(0, Math.min(20, Number(raw.event_count) || 0)) };
+    const emptyState = (read_status: UsercentricsV2ServiceAggregate['read_status']): UsercentricsV2ServiceAggregate => ({ read_status, essential_total: 0, essential_granted: 0, nonessential_total: 0, nonessential_granted: 0, nonessential_denied: 0, nonessential_unknown: 0, explicit_decision_present: false });
+    const assets = Array.from(document.scripts).map((script) => script.src).filter(Boolean);
+    const v2Loader = assets.some((url) => /app\.usercentrics\.eu\/browser-ui\/(?:latest|\d+(?:\.\d+){1,3})\/loader\.js(?:[?#]|$)/i.test(url));
+    const v3Loader = assets.some((url) => /web\.cmp\.usercentrics\.eu\/ui\/loader\.js(?:[?#]|$)/i.test(url));
+    const runtime_version = v3Loader ? 'v3' as const : v2Loader && w.UC_UI ? 'v2_uc_ui' as const : 'unknown' as const;
+    let service_state = emptyState(runtime_version === 'v2_uc_ui' ? 'not_initialized' : 'not_v2');
+    if (runtime_version === 'v2_uc_ui') {
+      try {
+        if (!w.UC_UI || typeof w.UC_UI.isInitialized !== 'function' || w.UC_UI.isInitialized() !== true) service_state = emptyState('not_initialized');
+        else if (typeof w.UC_UI.getServicesBaseInfo !== 'function') service_state = emptyState('missing_api');
+        else {
+          const services: unknown = w.UC_UI.getServicesBaseInfo();
+          if (!Array.isArray(services) || services.length === 0 || services.length > 200) service_state = emptyState('malformed');
+          else {
+            const aggregate = emptyState('readable');
+            let explicit = true;
+            for (const value of services) {
+              if (!value || typeof value !== 'object' || typeof value.isEssential !== 'boolean' || !value.consent || typeof value.consent !== 'object' || typeof value.consent.status !== 'boolean' || !Array.isArray(value.consent.history)) { aggregate.read_status = 'malformed'; break; }
+              const granted = value.consent.status === true;
+              if (value.isEssential) { aggregate.essential_total++; if (granted) aggregate.essential_granted++; continue; }
+              aggregate.nonessential_total++;
+              if (granted) aggregate.nonessential_granted++; else aggregate.nonessential_denied++;
+              const history = value.consent.history;
+              if (history.length > 200) { aggregate.read_status = 'malformed'; break; }
+              // The documented timestamp determines the current entry; array order is not assumed.
+              let latest: { timestamp: number; type: unknown; status: unknown } | null = null;
+              let ambiguousLatest = false;
+              for (const entry of history) {
+                if (!entry || typeof entry !== 'object' || !Number.isFinite(entry.timestamp)) { ambiguousLatest = true; break; }
+                if (latest && entry.timestamp === latest.timestamp) ambiguousLatest = true;
+                if (!latest || entry.timestamp > latest.timestamp) latest = entry;
+              }
+              if (ambiguousLatest || !latest || latest.type !== 'explicit' || latest.status !== value.consent.status) explicit = false;
+            }
+            aggregate.explicit_decision_present = aggregate.read_status === 'readable' && aggregate.nonessential_total > 0 && explicit;
+            service_state = aggregate.read_status === 'readable' ? aggregate : emptyState('malformed');
+          }
+        }
+      } catch { service_state = emptyState('read_error'); }
+    }
+    const cmp_events = Array.isArray(raw.cmp_events) ? raw.cmp_events.slice(0, 20).filter((entry: any) => entry && (entry.event_name === 'CMP_SHOWN' || entry.event_name === 'ACCEPT_ALL' || entry.event_name === 'DENY_ALL' || entry.event_name === 'SAVE') && Number.isFinite(entry.observed_at_ms)).map((entry: any) => ({ event_name: entry.event_name, observed_at_ms: entry.observed_at_ms })) : [];
+    const tcfEventAt = w[frameworkKey]?.tcf?.latest_event_at_ms;
+    const semantic = { lifecycle, runtime_version, service_state, cmp_event_listener_installed: raw.cmp_event_listener_installed === true,
+      cmp_events, tcf_last_event_at_ms: Number.isFinite(tcfEventAt) ? tcfEventAt as number : null };
     const root = document.querySelector(rootSelector) as HTMLElement | null;
-    if (!root) return { present: false, visible: false, shadow_mode: 'none' as const, controls: [], lifecycle };
+    if (!root) return { present: false, visible: false, shadow_mode: 'none' as const, controls: [], ...semantic };
     const style = getComputedStyle(root); const box = root.getBoundingClientRect();
     const visible = style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
     const shadow = root.shadowRoot;
-    if (!shadow) return { present: true, visible, shadow_mode: 'closed' as const, controls: [], lifecycle };
+    if (!shadow) return { present: true, visible, shadow_mode: 'closed' as const, controls: [], ...semantic };
     return {
       present: true,
       visible,
-      shadow_mode: 'open' as const, lifecycle,
+      shadow_mode: 'open' as const, ...semantic,
       controls: Array.from(shadow.querySelectorAll('button, [role="button"], a')).slice(0, 30).map((element, index) => ({
         id: `${rootSelector} button:nth-of-type(${index + 1})`,
         accessible_name: String((element as HTMLElement).getAttribute('aria-label') || element.textContent || '').slice(0, 120),
@@ -511,7 +571,8 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         enabled: !(element as HTMLButtonElement).disabled
       }))
     };
-  }, { rootSelector: USERCENTRICS_STANDARD_ROOT, lifecycleKey: USERCENTRICS_LIFECYCLE_KEY });
+  }, { rootSelector: USERCENTRICS_STANDARD_ROOT, lifecycleKey: USERCENTRICS_LIFECYCLE_KEY, frameworkKey: FRAMEWORK_OBSERVATIONS_KEY });
+  usercentrics.runtime_version = usercentricsRuntimeVersion(facts.assets, facts.globals.includes('UC_UI'));
   return { ...facts, usercentrics };
 }
 
@@ -699,6 +760,11 @@ export async function buildProviderContexts(page: Page, facts: BrowserConsentFac
       uc_ui_type: facts.globals.includes('UC_UI') ? 'object' : 'undefined',
       surfaces: [{ selector: USERCENTRICS_STANDARD_ROOT, present: facts.usercentrics.present, visible: facts.usercentrics.visible, shadow_mode: facts.usercentrics.shadow_mode }],
       lifecycle: facts.usercentrics.lifecycle,
+      runtime_version: facts.usercentrics.runtime_version,
+      service_state: facts.usercentrics.service_state,
+      cmp_event_listener_installed: facts.usercentrics.cmp_event_listener_installed,
+      safe_provider_state: facts.usercentrics.runtime_version === 'v2_uc_ui' && facts.usercentrics.service_state.read_status === 'readable'
+        ? { decision: usercentricsV2Decision(facts.usercentrics.service_state) } : null,
       generic_surfaces: facts.generic.surfaces,
       // Generic controls and raw root text are observations, never executable
       // UC targets. The dedicated discovery proves open-root ownership.

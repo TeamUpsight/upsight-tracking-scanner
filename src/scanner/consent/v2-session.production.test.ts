@@ -62,7 +62,7 @@ async function audit(html: string, sessionInput = input) {
 }
 
 /** Local page navigation → prepared production capture → session evaluation. */
-async function auditNavigation(html: string, accessBlocked = false, sessionInput = input) {
+async function auditNavigation(html: string, accessBlocked = false, sessionInput = input, inspect?: (page: Page) => Promise<void>) {
   const server = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); response.end(html);
   });
@@ -76,10 +76,42 @@ async function auditNavigation(html: string, accessBlocked = false, sessionInput
     capture.markNavigationStarted();
     await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'domcontentloaded' });
     capture.markDOMContentLoaded(); capture.markInitialObservationCompleted();
-    return await runConsentV2Session(page, { ...sessionInput, access_blocked: accessBlocked }, capture);
+    const result = await runConsentV2Session(page, { ...sessionInput, access_blocked: accessBlocked }, capture);
+    await inspect?.(page);
+    return result;
   } finally {
     await page.close(); await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+/** Local Congstar-shaped v2 fixture. No public website or Usercentrics CDN is contacted. */
+function usercentricsV2Fixture(options: { event?: 'DENY_ALL' | 'ACCEPT_ALL' | 'SAVE' | 'CMP_SHOWN' | null; preActionEvent?: boolean; tcf?: 'pre' | 'post'; after?: 'rejected' | 'accepted' | 'partial'; resetOnReload?: boolean; missingApi?: boolean; throwOnRead?: boolean; malformed?: boolean; v3?: boolean } = {}) {
+  const { event = 'DENY_ALL', preActionEvent = false, tcf, after = 'rejected', resetOnReload = false, missingApi = false, throwOnRead = false, malformed = false, v3 = false } = options;
+  const loader = v3 ? 'https://web.cmp.usercentrics.eu/ui/loader.js' : 'https://app.usercentrics.eu/browser-ui/latest/loader.js';
+  return `<script type="application/json" src="${loader}"></script><script>
+    ${tcf ? `let tcfListener;
+      const tcfData=(status,granted)=>({listenerId:7,eventStatus:status,cmpStatus:'loaded',gdprApplies:true,purpose:{consents:{1:granted,2:granted}},vendor:{consents:{1:granted,2:granted}}});
+      window.__tcfapi=(command,version,callback)=>{if(command==='ping')callback({cmpLoaded:true,cmpStatus:'loaded',apiVersion:'2.2',gdprApplies:true},true);
+        if(command==='addEventListener'){tcfListener=callback;callback(tcfData('${tcf === 'pre' ? 'useractioncomplete' : 'cmpuishown'}',${tcf !== 'pre'}),true);}};` : ''}
+    const stored=localStorage.getItem('uc-v2-choice');
+    let choice=${resetOnReload ? "'unanswered'" : "stored || 'unanswered'"};
+    let clicks=Number(localStorage.getItem('uc-v2-clicks')||0);
+    const service=(essential,index)=>{const status=essential || (choice==='accepted') || (choice==='partial' && index===1);
+      const history=choice==='unanswered'?[]:[{status,type:'explicit',timestamp:Date.now(),action:choice==='rejected'?'onDenyAllServices':choice==='accepted'?'onAcceptAllServices':'onUpdateServices'}];
+      return {isEssential:essential,consent:{status,history},categorySlug:essential?'essential':'marketing'};};
+    window.UC_UI={isInitialized:()=>true${missingApi ? '' : `,getServicesBaseInfo(){${throwOnRead ? "throw new Error('read unavailable')" : malformed ? 'return [{consent:{status:false}}]' : 'return [service(true,0),service(false,1),service(false,2)]'}}`}};
+    setTimeout(()=>{const host=document.createElement('aside');host.id='usercentrics-cmp-ui';host.style='display:block;width:360px;height:160px;position:fixed';document.body.appendChild(host);
+      const root=host.attachShadow({mode:'open'});root.innerHTML='<section role="dialog"><button id="reject">Alles ablehnen</button><button>Alles akzeptieren</button><button>Einstellungen verwalten</button></section>';
+      root.querySelector('#reject').addEventListener('click',()=>{clicks++;localStorage.setItem('uc-v2-clicks',String(clicks));choice='${after}';${resetOnReload ? '' : "localStorage.setItem('uc-v2-choice',choice);"}
+        ${event ? `window.dispatchEvent(new CustomEvent('UC_UI_CMP_EVENT',{detail:{type:'${event}'}}));` : ''}
+        ${tcf === 'post' ? "tcfListener?.(tcfData('useractioncomplete',false),true);" : ''}
+        host.remove();});
+      window.dispatchEvent(new Event('UC_UI_INITIALIZED'));
+      window.dispatchEvent(new CustomEvent('UC_UI_VIEW_CHANGED',{detail:{view:'FIRST_LAYER'}}));
+      window.dispatchEvent(new CustomEvent('UC_UI_CMP_EVENT',{detail:{type:'CMP_SHOWN'}}));
+      ${preActionEvent ? "window.dispatchEvent(new CustomEvent('UC_UI_CMP_EVENT',{detail:{type:'DENY_ALL'}}));" : ''}
+    },180);
+  </script>`;
 }
 
 async function auditQueuedTcfStubTransition(populateAggregates: boolean | 'missing') {
@@ -863,6 +895,69 @@ describe('Consent V2 production session wiring', () => {
     expect(serialized).not.toContain('raw-gpp-secret');
     expect(serialized).not.toContain('publisher-secret');
     expect(serialized).not.toMatch(/SaleOptOut|SharingOptOut|CmpId|PublisherId/);
+  }, 20_000);
+
+  it('UC-V2-ACTION-01 / UC-V2-EVENT-01 / UC-V2-PERSISTENCE-01 verifies one delayed open-shadow Reject and persisted v2 service state', async () => {
+    const result = await auditNavigation(usercentricsV2Fixture(), false, { ...input, rollout: actionRollout, diagnostic: true }, async (page) => {
+      expect(await page.evaluate(() => Number(localStorage.getItem('uc-v2-clicks') || 0))).toBe(1);
+    });
+    expect(result.telemetry).toMatchObject({ provider: 'usercentrics', usercentrics_runtime_version: 'v2_uc_ui',
+      verification_capability: 'available', action_execution_eligible: true, requested_action_target_resolved: true,
+      activation_occurred: true, verification: 'verified', persistence: 'confirmed',
+      verification_strong_families: ['provider_state'], verification_supporting_families: ['provider_event'],
+      verification_independence_groups: expect.arrayContaining(['usercentrics_runtime', 'usercentrics_event']) });
+    expect(result.result.initial_state.decision).toBe('unanswered');
+    expect(result.result.resulting_state?.decision).toBe('rejected');
+    expect(result.result.interactions).toEqual([expect.objectContaining({ action: 'reject_all', outcome: 'executed' })]);
+    expect(result.result.persistence).toMatchObject({ status: 'confirmed', reload_attempted: true });
+    expect(result.result.available_actions.map((item) => item.action)).toEqual(expect.arrayContaining(['accept_all', 'reject_all', 'open_preferences']));
+  }, 20_000);
+
+  it('UC-V2-EVENT-02 treats ACCEPT_ALL after requested Reject as an authoritative contradiction', async () => {
+    const result = await auditNavigation(usercentricsV2Fixture({ event: 'ACCEPT_ALL' }), false, { ...input, rollout: actionRollout });
+    expect(result.result.rejection_verification).toMatchObject({ status: 'not_verified', reason_codes: expect.arrayContaining(['STATE_CONTRADICTION']) });
+    expect(result.result.persistence).toMatchObject({ status: 'not_applicable', reload_attempted: false });
+  }, 20_000);
+
+  it.each([{ event: 'CMP_SHOWN' as const, after: 'rejected' as const }, { event: 'SAVE' as const, after: 'partial' as const }, { event: null, after: 'rejected' as const }])('UC-V2-EVENT-03/04 keeps $event with $after state inconclusive', async (scenario) => {
+    const result = await auditNavigation(usercentricsV2Fixture(scenario), false, { ...input, rollout: actionRollout });
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+    expect(result.result.persistence).toMatchObject({ status: 'not_applicable', reload_attempted: false });
+  }, 20_000);
+
+  it('UC-V2-CHRONOLOGY-01 excludes a DENY_ALL event emitted before activation', async () => {
+    const result = await auditNavigation(usercentricsV2Fixture({ event: null, preActionEvent: true }), false, { ...input, rollout: actionRollout });
+    expect(result.result.resulting_state?.decision).toBe('rejected');
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+  }, 20_000);
+
+  it('UC-V2-TCF-01 accepts a new post-activation rejected TCF useractioncomplete as optional corroboration', async () => {
+    const result = await auditNavigation(usercentricsV2Fixture({ event: null, tcf: 'post' }), false, { ...input, rollout: actionRollout });
+    expect(result.result.rejection_verification.status).toBe('verified');
+    expect(result.telemetry.verification_strong_families).toEqual(expect.arrayContaining(['provider_state', 'framework_tcf']));
+  }, 20_000);
+
+  it('UC-V2-TCF-02 excludes a TCF rejection observed before activation', async () => {
+    const result = await auditNavigation(usercentricsV2Fixture({ event: null, tcf: 'pre' }), false, { ...input, rollout: actionRollout });
+    expect(result.result.resulting_state?.decision).toBe('rejected');
+    expect(result.result.rejection_verification.status).toBe('inconclusive');
+  }, 20_000);
+
+  it('UC-V2-CONTRADICTION-02 rejects a DENY_ALL event when services are granted', async () => {
+    const result = await auditNavigation(usercentricsV2Fixture({ after: 'accepted' }), false, { ...input, rollout: actionRollout });
+    expect(result.result.rejection_verification).toMatchObject({ status: 'not_verified', reason_codes: expect.arrayContaining(['STATE_CONTRADICTION']) });
+  }, 20_000);
+
+  it('UC-V2-PERSISTENCE-02 does not confirm a reset runtime after verified Reject', async () => {
+    const result = await auditNavigation(usercentricsV2Fixture({ resetOnReload: true }), false, { ...input, rollout: actionRollout });
+    expect(result.result.rejection_verification.status).toBe('verified');
+    expect(result.result.persistence).toMatchObject({ status: 'not_confirmed', reload_attempted: true });
+  }, 20_000);
+
+  it.each([{ missingApi: true }, { throwOnRead: true }, { malformed: true }, { v3: true }])('UC-V2-CAPABILITY-02 blocks an unreadable or non-v2 runtime %o', async (scenario) => {
+    const result = await auditNavigation(usercentricsV2Fixture(scenario), false, { ...input, rollout: actionRollout });
+    expect(result.telemetry).toMatchObject({ verification_capability: 'unavailable', action_execution_eligible: false, activation_occurred: false });
+    expect(result.result.interactions).toEqual([]);
   }, 20_000);
 
   it('MM-01 preserves Shopify, OneTrust, GPP, and GCM as independent mechanisms', async () => {

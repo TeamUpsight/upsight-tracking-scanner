@@ -479,6 +479,7 @@ export interface EvidenceBundle {
       requested_action_target_resolved?: boolean;
       target_resolution_reason?: 'resolved' | 'label_not_found' | 'not_visible' | 'disabled' | 'not_direct_actionable_target' | 'outside_verified_consent_context' | 'frame_unavailable' | 'other_bounded_reason';
       runtime_variant?: string | null;
+      usercentrics_runtime_version?: 'v2_uc_ui' | 'v3' | 'unknown';
       reject_semantic?: 'reject_all' | 'only_necessary' | null;
       execution_strategy?: string | null;
       activation_occurred?: boolean;

@@ -157,10 +157,14 @@ describe('Usercentrics adapter fixtures', () => {
     expect(usercentricsVerificationContribution(context)).toEqual({ strong: ['usercentrics_safe_provider_state'], supporting: ['usercentrics_uc_string_changed'] });
   });
 
-  it('UC-CAPABILITY-01 requires two independent future semantic sources before a live action', () => {
-    const runtimeOnly = { status: 'available' as const, strong_families: ['provider_state', 'provider_category_state'] as const, reason_codes: [] };
-    expect(usercentricsVerificationCapability({ ...runtimeOnly, strong_families: [...runtimeOnly.strong_families] })).toMatchObject({ status: 'unavailable' });
-    expect(usercentricsVerificationCapability({ status: 'available', strong_families: ['framework_tcf'], reason_codes: [] })).toMatchObject({ status: 'unavailable' });
-    expect(usercentricsVerificationCapability({ status: 'available', strong_families: ['provider_state', 'provider_category_state', 'framework_tcf'], reason_codes: [] })).toMatchObject({ status: 'available' });
+  it('UC-V2-CAPABILITY-01 accepts an unanswered but readable service channel with an installed event listener', () => {
+    const unavailable = { status: 'unavailable' as const, strong_families: [] as [], reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_UNAVAILABLE] };
+    const context = { runtime_version: 'v2_uc_ui' as const, cmp_event_listener_installed: true,
+      service_state: { read_status: 'readable' as const, essential_total: 1, essential_granted: 1, nonessential_total: 2,
+        nonessential_granted: 0, nonessential_denied: 2, nonessential_unknown: 0, explicit_decision_present: false } };
+    expect(usercentricsVerificationCapability(unavailable, context)).toMatchObject({ status: 'available', strong_families: ['provider_state'] });
+    expect(usercentricsVerificationCapability(unavailable, { ...context, cmp_event_listener_installed: false }).status).toBe('unavailable');
+    expect(usercentricsVerificationCapability(unavailable, { ...context, runtime_version: 'v3' }).status).toBe('unavailable');
+    expect(usercentricsVerificationCapability(unavailable, { ...context, service_state: { ...context.service_state, read_status: 'missing_api' } }).status).toBe('unavailable');
   });
 });

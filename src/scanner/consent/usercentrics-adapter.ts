@@ -20,6 +20,7 @@ import {
 } from './domain-types';
 import type { ShadowMode } from './surface-utils';
 import type { VerificationCapability } from './verification-capability';
+import { usercentricsV2ChannelAvailable, type UsercentricsRuntimeVersion, type UsercentricsV2ServiceAggregate } from './usercentrics-v2-state';
 
 export const USERCENTRICS_STANDARD_ROOT = 'aside#usercentrics-cmp-ui';
 
@@ -76,6 +77,9 @@ export interface UsercentricsAdapterContext {
   controls?: readonly UsercentricsControlObservation[];
   storage?: readonly UsercentricsStorageDescriptor[];
   safe_provider_state?: UsercentricsSemanticState | null;
+  runtime_version?: UsercentricsRuntimeVersion;
+  service_state?: UsercentricsV2ServiceAggregate;
+  cmp_event_listener_installed?: boolean;
   lifecycle?: { initialized: boolean; latest_view: 'FIRST_LAYER' | 'SECOND_LAYER' | 'NONE' | 'PRIVACY_BUTTON' | null; latest_view_at_ms: number | null; cmp_shown_observed: boolean; cmp_shown_at_ms: number | null; event_count: number };
   /** Observational only; the adapter never invokes these methods. */
   observed_uc_ui_methods?: readonly string[];
@@ -103,16 +107,13 @@ export interface UsercentricsVerificationContribution {
   supporting: string[];
 }
 
-/** A single UC runtime projection or TCF listener cannot by itself verify Reject. */
-export function usercentricsVerificationCapability(base: VerificationCapability): VerificationCapability {
-  if (base.status !== 'available') return base;
-  const sources = new Set(base.strong_families.map((family) =>
-    family === 'provider_state' || family === 'provider_category_state' ? 'usercentrics_runtime' : family
-  ));
-  return sources.size >= 2 ? base : {
-    status: 'unavailable', strong_families: base.strong_families,
-    reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_UNAVAILABLE]
+/** Unanswered services can still expose a future semantic channel. The event bridge supplies independent chronology. */
+export function usercentricsVerificationCapability(base: VerificationCapability, context?: UsercentricsAdapterContext): VerificationCapability {
+  const runtimeReady = context?.runtime_version === 'v2_uc_ui' && usercentricsV2ChannelAvailable(context.service_state);
+  if (!runtimeReady || context?.cmp_event_listener_installed !== true) return {
+    status: 'unavailable', strong_families: [], reason_codes: [ConsentAuditCodes.CMP_VERIFICATION_CAPABILITY_UNAVAILABLE]
   };
+  return { status: 'available', strong_families: ['provider_state', ...(base.strong_families.includes('framework_tcf') ? ['framework_tcf' as const] : [])], reason_codes: [] };
 }
 
 function hasCurrentLoader(values: readonly string[] | undefined) {
@@ -297,7 +298,7 @@ export const usercentricsAdapter: ConsentProviderAdapter<'usercentrics'> = {
   metadata: {
     provider_id: 'usercentrics',
     adapter_version: '1.0.0',
-    supported_runtime_variants: ['current_web_cmp_ui'],
+    supported_runtime_variants: ['v2_uc_ui'],
     supported_template_variants: ['open_shadow_root'],
     regions: null,
     tcf_capable: true,
@@ -310,14 +311,14 @@ export const usercentricsAdapter: ConsentProviderAdapter<'usercentrics'> = {
     preferences_flow_support: true,
     capability_maturity: {
       detection: 'fixture_only',
-      state_read: 'supporting_only',
+      state_read: 'fixture_only',
       banner_state: 'fixture_only',
       available_actions: 'fixture_only',
       accept: 'fixture_only',
       reject: 'fixture_only',
       open_preferences: 'fixture_only',
       save_preferences: 'unsupported',
-      verify_action: 'supporting_only',
+      verify_action: 'fixture_only',
       persistence_evidence: 'supporting_only'
     }
   },
