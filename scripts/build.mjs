@@ -25,25 +25,25 @@ function gitCommit() {
 
 function gitDirty() {
   try {
-    execFileSync('git', ['diff', '--quiet'], { stdio: 'ignore' });
-    return false;
+    return execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().length > 0;
   } catch {
     return true;
   }
 }
 
 const buildCommit = firstValue(
+  gitCommit(),
   process.env.BUILD_COMMIT,
   process.env.CF_PAGES_COMMIT_SHA,
-  process.env.GITHUB_SHA,
-  gitCommit()
+  process.env.GITHUB_SHA
 );
 const buildTimestamp = firstValue(process.env.BUILD_TIMESTAMP) ?? new Date().toISOString();
 const buildDirty = gitDirty();
 const define = {
   __BUILD_COMMIT__: JSON.stringify(buildCommit ?? ''),
   __BUILD_TIMESTAMP__: JSON.stringify(buildTimestamp),
-  __BUILD_DIRTY__: JSON.stringify(String(buildDirty))
+  __BUILD_DIRTY__: JSON.stringify(String(buildDirty)),
+  __SCANNER_COMPILED_BUNDLE__: 'true'
 };
 
 rmSync(distDirectory, { recursive: true, force: true });
@@ -61,6 +61,16 @@ await bundleServer({
   packages: 'external',
   sourcemap: true,
   outfile: resolve(distDirectory, 'server.cjs'),
+  define
+});
+await bundleServer({
+  absWorkingDir: projectRoot,
+  entryPoints: [resolve(projectRoot, 'scripts/compiled-browser-facts-entry.ts')],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  packages: 'external',
+  outfile: resolve(distDirectory, 'browser-facts-smoke.cjs'),
   define
 });
 

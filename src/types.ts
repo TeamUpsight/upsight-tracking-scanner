@@ -153,10 +153,13 @@ export interface ProxyAccessAttemptEvidence {
 export interface EvidenceBundle {
   audit_id: string;
   scanner_version: string;
+  scanner_execution_mode: 'compiled_bundle' | 'direct_source' | 'unknown';
   build_commit: string | null;
   /** Build-time Git diff state. Production audits require this to be false. */
   build_dirty: boolean;
   build_timestamp: string;
+  certification_eligible: boolean;
+  execution_diagnostic: 'non_certifiable_execution_mode' | null;
   rule_pack_version: string;
   domain: string;
   geo: 'USA' | 'EU' | 'UK';

@@ -6,6 +6,22 @@ import type { StorefrontAudit } from '../types';
 import { buildDebugPackageFiles } from './quality/debug-package';
 import { compareGpcObservations } from './consent/gpc-experiment';
 
+// Most runner fixtures exercise compiled-production action wiring with a local
+// browser. One focused case switches to direct source provenance to prove the
+// runtime gate; the actual compiled callback is covered by the build smoke test.
+const provenanceFixture = vi.hoisted(() => ({ certified: true }));
+vi.mock('../build-metadata', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../build-metadata')>();
+  return { buildMetadata: {
+    ...actual.buildMetadata,
+    get scanner_execution_mode() { return provenanceFixture.certified ? 'compiled_bundle' : 'direct_source'; },
+    get build_commit() { return provenanceFixture.certified ? 'a'.repeat(40) : null; },
+    get build_dirty() { return !provenanceFixture.certified; },
+    get certification_eligible() { return provenanceFixture.certified; },
+    get execution_diagnostic() { return provenanceFixture.certified ? null : 'non_certifiable_execution_mode'; }
+  } };
+});
+
 // Full-runner fixtures validate orchestration, not wall-clock dwell time. Keep
 // the production constants intact while making each bounded observation short
 // enough for the local browser test process.
@@ -79,7 +95,7 @@ async function auditFixture(
   return updates.at(-1) || {};
 }
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { provenanceFixture.certified = true; vi.unstubAllEnvs(); });
 
 describe('runStorefrontAudit production browser wiring', () => {
   it('WP12B-RUNNER-01 adds clean USA GPC evidence without changing canonical decisions', async () => {
@@ -196,6 +212,18 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'pass', overall_status: 'pass', scan_status: 'completed' });
     expect((result.evidence_bundle as { decision_summary: Array<{ decision_name: string; status: string }> }).decision_summary)
       .toEqual(expect.arrayContaining([expect.objectContaining({ decision_name: 'consent', status: 'pass' })]));
+  }, 30_000);
+
+  it('RUNNER-PROVENANCE-01 keeps direct-source Consent observation noncertifiable with actions configured', async () => {
+    provenanceFixture.certified = false;
+    const result = await auditFixture(200, verifiedOneTrust);
+    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive', scan_status: 'completed' });
+    expect((result.evidence_bundle as { scanner_execution_mode: string; certification_eligible: boolean; execution_diagnostic: string; consent: { interaction_attempted: boolean }; runtime: { consent_v2: { action_execution_eligible: boolean; activation_occurred: boolean } } })).toMatchObject({
+      scanner_execution_mode: 'direct_source', certification_eligible: false,
+      execution_diagnostic: 'non_certifiable_execution_mode',
+      consent: { interaction_attempted: false },
+      runtime: { consent_v2: { action_execution_eligible: false, activation_occurred: false } }
+    });
   }, 30_000);
 
   it('RUNNER-V2-02 keeps opaque-only pre-choice consent traffic inconclusive', async () => {

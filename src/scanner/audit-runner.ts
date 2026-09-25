@@ -34,7 +34,7 @@ import {
 } from './consent/fresh-context';
 import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
 import { installConsentCommandBootstrap } from './consent/browser-context-builders';
-import { consentV2RolloutControls } from './consent/rollout-controls';
+import { certificationSafeConsentV2RolloutControls, consentV2RolloutControls } from './consent/rollout-controls';
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
 import { consentObservationFailure } from './consent/observation-stage';
 import { EvidenceCollector } from './evidence/evidence-collector';
@@ -1207,7 +1207,7 @@ export async function runStorefrontAudit(
   const selectedModules = selectedAuditModules(params.selected_modules);
   const runtimeBudget = new AuditRuntimeBudget(startedMs, timeoutMs, selectedModules);
   const consentSelected = selectedModules.includes('consent');
-  const consentV2Controls = consentV2RolloutControls();
+  const consentV2Controls = certificationSafeConsentV2RolloutControls(consentV2RolloutControls(), buildMetadata.certification_eligible);
   const consentV2Enabled = consentV2Controls.enabled;
   const trackingSelected = selectedModules.includes('tracking');
   const serverSelected = selectedModules.includes('server_side');
@@ -2426,6 +2426,7 @@ export async function runStorefrontAudit(
           geo_verified: freshConsent.geo.verified,
           page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
           timings: consentTimings,
+          rollout: consentV2Controls,
           access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic'
         }, consentCapture);
         consentV2Ran = true;
@@ -2564,7 +2565,7 @@ export async function runStorefrontAudit(
     } else {
       // PDP navigation deliberately retains the unanswered/default consent
       // state. Accept is a later, clean-context comparison only.
-      if (!preserveUnansweredPdp && cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown') {
+      if (buildMetadata.certification_eligible && !preserveUnansweredPdp && cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown') {
         currentPhase = 'product_consent_state_capture';
         const productConsentSnapshotStarted = Date.now();
         evidence.runtime.product_consent_snapshot.attempted = true;
@@ -3248,7 +3249,7 @@ export async function runStorefrontAudit(
           consentV2 = await withinPhaseBudget('consent_pdp_reject', Math.min(available, 15_000), () => runConsentV2Session(consentHomepage!, {
             geo, geo_verified: freshConsent.geo.verified,
             page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
-            timings: consentTimings, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic',
+            timings: consentTimings, rollout: consentV2Controls, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic',
             rollout_key: normalizedDomain
           }, consentCapture!));
           consentV2Ran = true;
@@ -3274,7 +3275,7 @@ export async function runStorefrontAudit(
       firstPartyCollectionObserved: evidence.network.relevant_requests.some((request) => request.kind === 'collection' && request.collector !== 'third_party'),
       productObservationIncomplete: evidence.product.observation?.minimum_observation_satisfied === false
     }) : null;
-    if (acceptReason && runtimeBudget.canRunOptional(3_000) && consentV2Enabled && trackingSelected) {
+    if (buildMetadata.certification_eligible && acceptReason && runtimeBudget.canRunOptional(3_000) && consentV2Enabled && trackingSelected) {
       // Reject never becomes the baseline for Accept. This deliberately uses a
       // second clean context and the already-confirmed PDP URL.
       currentPhase = 'accept_comparison';
@@ -3325,7 +3326,7 @@ export async function runStorefrontAudit(
       }
     } else if (acceptReason) {
       if (trackingSelected && consentV2Enabled) evidence.consent.tracking_enablement = 'inconclusive';
-      addTrace('accept_comparison_skipped', { reason_code: acceptReason, reason: runtimeBudget.canRunOptional(3_000) ? 'Consent V2 unavailable' : 'Reserved runtime budget' });
+      addTrace('accept_comparison_skipped', { reason_code: acceptReason, reason: !buildMetadata.certification_eligible ? 'non_certifiable_execution_mode' : runtimeBudget.canRunOptional(3_000) ? 'Consent V2 unavailable' : 'Reserved runtime budget' });
     }
     evidence.runtime.module_durations_ms.consent = Date.now() - consentStarted;
 

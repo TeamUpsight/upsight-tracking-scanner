@@ -43,6 +43,22 @@ export function consentV2RolloutControls(environment: NodeJS.ProcessEnv = proces
   };
 }
 
+/** Audit-runner boundary: an unproven execution artifact cannot activate CMP controls. */
+export function certificationSafeConsentV2RolloutControls(
+  controls: ConsentV2RolloutControls,
+  certificationEligible: boolean
+): ConsentV2RolloutControls {
+  if (certificationEligible) return controls;
+  return {
+    ...controls,
+    actions_enabled: false,
+    action_sample_percent: 0,
+    providers: Object.fromEntries(CONSENT_V2_ROLLOUT_PROVIDERS.map((provider) => [provider, {
+      ...controls.providers[provider], actions_enabled: false
+    }])) as ConsentV2RolloutControls['providers']
+  };
+}
+
 function sampleBucket(key: string) {
   let hash = 0;
   for (let index = 0; index < key.length; index += 1) hash = (hash * 31 + key.charCodeAt(index)) >>> 0;

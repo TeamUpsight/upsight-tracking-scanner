@@ -133,8 +133,11 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
     }), null, 2),
     'build-metadata.json': JSON.stringify({
       scanner_version: evidence?.scanner_version || 'unknown',
+      scanner_execution_mode: evidence?.scanner_execution_mode || 'unknown',
       build_commit: evidence?.build_commit || null,
       build_dirty: evidence?.build_dirty ?? null,
+      certification_eligible: evidence?.certification_eligible ?? false,
+      execution_diagnostic: evidence?.execution_diagnostic || 'non_certifiable_execution_mode',
       build_timestamp: evidence?.build_timestamp || 'unknown',
       rule_pack_version: evidence?.rule_pack_version || 'unknown'
     }, null, 2),

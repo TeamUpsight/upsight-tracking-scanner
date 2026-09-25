@@ -14,6 +14,7 @@
     "test:consent-unit": "vitest run src/scanner/consent --exclude src/scanner/consent/v2-session.production.test.ts",
     "test:consent-browser": "vitest run src/scanner/consent/v2-session.production.test.ts src/scanner/consent/gpc-experiment.production.test.ts",
     "test:audit-runner-browser": "vitest run src/scanner/audit-runner.production.test.ts",
+    "test:compiled-browser-smoke": "node scripts/smoke-compiled-browser-facts.mjs",
     "test:regression": "vitest run src/scanner/scanner-core.test.ts",
     "replay": "tsx scripts/replay.ts",
     "benchmark:access": "tsx scripts/access-benchmark.ts",
