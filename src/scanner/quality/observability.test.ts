@@ -37,6 +37,25 @@ function fixture(mode: 'normal' | 'diagnostic' = 'diagnostic') {
 const audit = (evidence = fixture()): StorefrontAudit => ({ audit_id: 'obs', domain: 'example.com', group_label: null, scan_started_at: evidence.runtime.started_at, scan_completed_at: null, scan_status: 'completed', error_category: 'none', tested_geos: 'USA', cms_platform_detected: 'Unknown', overall_status: 'pass', overall_confidence: 'high', consent_status: 'pass', cmp_provider: 'OneTrust', product_payload_status: 'not_tested', pdp_url_tested: 'https://example.com/products/one', server_side_status: 'not_tested', ss_collection_type: 'not_tested', trace_steps: '[]', evidence_bundle: evidence });
 
 describe('WP10 diagnostic observability', () => {
+  it('preserves the persisted execution diagnostic in debug-package provenance', () => {
+    const evidence = fixture();
+    evidence.scanner_execution_mode = 'compiled_bundle';
+    evidence.build_commit = 'a'.repeat(40);
+    evidence.build_dirty = false;
+    evidence.certification_eligible = true;
+    evidence.execution_diagnostic = null;
+    const metadata = JSON.parse(String(buildDebugPackageFiles(audit(evidence))['build-metadata.json']));
+    expect(metadata).toMatchObject({
+      scanner_execution_mode: 'compiled_bundle', build_commit: 'a'.repeat(40),
+      build_dirty: false, certification_eligible: true, execution_diagnostic: null
+    });
+
+    evidence.certification_eligible = false;
+    evidence.execution_diagnostic = 'non_certifiable_execution_mode';
+    expect(JSON.parse(String(buildDebugPackageFiles(audit(evidence))['build-metadata.json'])).execution_diagnostic)
+      .toBe('non_certifiable_execution_mode');
+  });
+
   it('OBS-CONSENT-01 through OBS-CONSENT-04 retain bounded observations and screenshot association', () => {
     const files = buildDebugPackageFiles(audit());
     const observations = JSON.parse(String(files['consent-observations.json']));

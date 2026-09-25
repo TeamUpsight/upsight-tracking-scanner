@@ -137,7 +137,9 @@ export function buildDebugPackageFiles(audit: StorefrontAudit) {
       build_commit: evidence?.build_commit || null,
       build_dirty: evidence?.build_dirty ?? null,
       certification_eligible: evidence?.certification_eligible ?? false,
-      execution_diagnostic: evidence?.execution_diagnostic || 'non_certifiable_execution_mode',
+      execution_diagnostic: evidence?.execution_diagnostic !== undefined
+        ? evidence.execution_diagnostic
+        : evidence?.certification_eligible ? null : 'non_certifiable_execution_mode',
       build_timestamp: evidence?.build_timestamp || 'unknown',
       rule_pack_version: evidence?.rule_pack_version || 'unknown'
     }, null, 2),
