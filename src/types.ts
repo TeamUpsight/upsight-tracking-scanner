@@ -171,6 +171,9 @@ export interface EvidenceBundle {
       phase: string;
       captured_at_ms: number;
       observation_complete: boolean;
+      dom_text_read_error_count?: number;
+      control_text_read_error_count?: number;
+      dom_text_fallback_used?: boolean;
       capture_stage_durations_ms?: { browser_facts: number; framework_observation: number; provider_context: number; provider_selection: number; provider_operations: number; semantic_discovery: number; ui_readiness: number; accessibility_census: number; total: number };
       readiness?: { triggered: boolean; reason: string | null; started_at_ms: number | null; completed_at_ms: number | null; elapsed_ms: number; completion: 'positive_ui_ready' | 'timeout' | 'skipped'; initial: { provider_count: number; strong_surface_count: number; semantic_control_count: number }; final: { provider_count: number; strong_surface_count: number; semantic_control_count: number; open_shadow_roots: number; provider_root_visible: boolean }; reason_codes: string[] };
       provider_selection: {
@@ -179,7 +182,7 @@ export interface EvidenceBundle {
         candidates: Array<{ provider: string; detection_status: string; confidence: 'high' | 'medium' | 'low'; deterministic_provider_signature?: boolean; independent_evidence_families: string[]; evidence_codes: string[] }>;
       };
       banner: { visibility: 'visible' | 'not_visible' | 'unknown'; surface: string };
-      visible_surfaces: Array<{ surface_type: string; provider_specific: boolean; visible: boolean; privacy_or_cookie_semantics: boolean; intent: string; strong_presentation?: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
+      visible_surfaces: Array<{ surface_type: string; provider_specific: boolean; visible: boolean; privacy_or_cookie_semantics: boolean; text_evidence_available?: boolean; intent: string; strong_presentation?: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
       visible_controls: Array<{ accessible_name: string; semantic_action: string; visible: boolean; enabled: boolean; actionable: boolean; provider_specific: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
       semantic_discovery?: {
         attempted: boolean;

@@ -291,7 +291,7 @@ function diagnosticObservation(
   const location = selection.provider === 'usercentrics' && facts.usercentrics.shadow_mode !== 'none' ? 'shadow_dom' as const : 'main_frame' as const;
   const surfaces: DiagnosticConsentObservation['visible_surfaces'] = facts.generic.surfaces.filter((surface) => surface.visible).slice(0, 11).map((surface) => ({
     surface_type: surface.surface_type, provider_specific: false, visible: surface.visible,
-    privacy_or_cookie_semantics: surface.privacy_or_cookie_semantics, intent: surface.intent, strong_presentation: surface.strong_presentation, location: surface.location
+    privacy_or_cookie_semantics: surface.privacy_or_cookie_semantics, text_evidence_available: surface.text_evidence_available, intent: surface.intent, strong_presentation: surface.strong_presentation, location: surface.location
   }));
   if (selection.provider && banner.visibility === 'visible' && surfaces.length < 12) surfaces.unshift({
     surface_type: banner.surface, provider_specific: true, visible: true, privacy_or_cookie_semantics: true, intent: 'consent', location
@@ -347,6 +347,9 @@ function diagnosticObservation(
   }
   return {
     capture_id: `consent-${context}-${Date.now()}`, context, phase, captured_at_ms: Date.now(), observation_complete: observationComplete,
+    dom_text_read_error_count: Math.min(20, facts.generic.text_read_diagnostics?.dom_text_read_error_count ?? 0),
+    control_text_read_error_count: Math.min(20, facts.generic.text_read_diagnostics?.control_text_read_error_count ?? 0),
+    dom_text_fallback_used: facts.generic.text_read_diagnostics?.dom_text_fallback_used === true,
     ...(stageDurations ? { capture_stage_durations_ms: { ...stageDurations } } : {}),
     provider_selection: { selected_provider: selection.provider || null, provider_conflict: selection.conflict, candidates: providerCandidates },
     banner: { visibility: banner.visibility, surface: banner.surface }, visible_surfaces: surfaces.slice(0, 12), visible_controls: controls.slice(0, 20),

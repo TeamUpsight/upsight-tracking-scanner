@@ -29,6 +29,8 @@ export interface GenericConsentSurface {
   visible: boolean;
   /** Derived by the bounded semantic probe; page text is not retained here. */
   privacy_or_cookie_semantics: boolean;
+  /** False means text could not be read; it is missing evidence, not a negative finding. */
+  text_evidence_available?: boolean;
   intent: GenericSurfaceIntent;
   /** A bounded browser semantic probe found a settings path plus an acknowledgement control. */
   consent_management_topology?: boolean;
@@ -276,6 +278,12 @@ export function detectGenericConsentMechanism(
     return {
       status: 'inconclusive', score, corroborating_signals: corroborating, actions: availableActions, action_plan: plans,
       mechanism: null, reason_codes: [ConsentAuditCodes.DETECTION_INCONCLUSIVE]
+    };
+  }
+  if (visibleSurfaces.some((surface) => surface.text_evidence_available === false)) {
+    return {
+      status: 'inconclusive', score, corroborating_signals: corroborating, actions: [], action_plan: [], mechanism: null,
+      reason_codes: [ConsentAuditCodes.DETECTION_INCONCLUSIVE]
     };
   }
   return {

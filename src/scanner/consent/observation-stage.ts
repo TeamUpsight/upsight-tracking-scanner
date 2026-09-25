@@ -17,6 +17,9 @@ export type ConsentObservationOperation =
 
 export type BrowserFactsSubstage =
   | 'browser_facts_core' | 'generic_main_dom' | 'cookiebot_dom' | 'shadow_dom'
+  | 'generic_surface_enumeration' | 'generic_surface_text' | 'generic_surface_controls'
+  | 'generic_control_text' | 'generic_control_visibility' | 'generic_surface_style'
+  | 'generic_surface_classification'
   | 'generic_shadow_controls' | 'cookiebot_runtime' | 'cookieyes_runtime'
   | 'onetrust_runtime' | 'didomi_runtime' | 'shopify_runtime'
   | 'consent_commands' | 'browser_storage' | 'browser_privacy_signal'
