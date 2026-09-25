@@ -9,7 +9,7 @@ import { chromium } from 'playwright-core';
 const root = fileURLToPath(new URL('..', import.meta.url));
 execFileSync(process.execPath, [resolve(root, 'scripts/build.mjs')], { cwd: root, stdio: 'inherit' });
 const require = createRequire(import.meta.url);
-const { captureBrowserConsentFacts, buildMetadata } = require(resolve(root, 'dist/browser-facts-smoke.cjs'));
+const { captureBrowserConsentFacts, captureUsercentricsMainFrameCensus, buildMetadata } = require(resolve(root, 'dist/browser-facts-smoke.cjs'));
 assert.equal(buildMetadata.scanner_execution_mode, 'compiled_bundle');
 assert.match(buildMetadata.build_commit || '', /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i);
 if (!buildMetadata.build_dirty) assert.equal(buildMetadata.certification_eligible, true);
@@ -30,7 +30,11 @@ try {
   const facts = await captureBrowserConsentFacts(page);
   assert.ok(facts.generic.surfaces.some((surface) => surface.visible && surface.privacy_or_cookie_semantics));
   assert.ok(facts.generic.controls.some((control) => control.accessible_name === 'Reject all'));
-  console.log('Compiled browser facts smoke passed: generic facts completed across page.evaluate.');
+  const census = await captureUsercentricsMainFrameCensus(page, facts, true);
+  assert.equal(census.usercentrics_surface_topology, 'main_frame_unowned');
+  assert.equal(census.reject_semantic_candidate_count, 1);
+  assert.equal(census.provider_owned_reject_candidate_count, 0);
+  console.log('Compiled browser facts smoke passed: generic facts and read-only census completed across page.evaluate.');
 } finally {
   await browser.close();
 }

@@ -1317,6 +1317,17 @@ describe('Consent V2 production session wiring', () => {
     expect(result.telemetry.provider).not.toBe('usercentrics');
   });
 
+  it('UC-MAIN-DIAG records an unowned first-layer surface without promoting generic controls', async () => {
+    const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><script>window.UC_UI={isInitialized:()=>true,getServicesBaseInfo:()=>[]}</script><section role="dialog" aria-modal="true" style="position:fixed;width:420px;height:220px">Cookie Einstellungen<button>Einstellungen verwalten</button><button>Alles ablehnen</button><button>Alles akzeptieren</button></section>', { ...input, diagnostic: true });
+    expect(result.telemetry).toMatchObject({ provider: 'usercentrics', usercentrics_runtime_version: 'v2_uc_ui', action_attempted: false, activation_occurred: false });
+    expect(result.diagnostic_observation).toMatchObject({
+      usercentrics_main_frame_census: { usercentrics_surface_topology: 'main_frame_unowned',
+        main_frame_consent_surface_count: 1, provider_owned_surface_count: 0,
+        reject_semantic_candidate_count: 1, provider_owned_reject_candidate_count: 0, ownership_reason: 'no_provider_marker' }
+    });
+    expect(result.result.interactions).toEqual([]);
+  });
+
   it('UC-IDENTITY-02 blocks action when Usercentrics conflicts with another active CMP', async () => {
     const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><script src="https://consent.cookiebot.com/uc.js"></script><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><div id="CybotCookiebotDialog" style="display:block;width:320px;height:120px"><button id="CybotCookiebotDialogBodyButtonDecline">Decline</button></div><script>document.querySelector("#usercentrics-cmp-ui").attachShadow({mode:"open"}).innerHTML="<button>Alles ablehnen</button>";</script>', { ...input, rollout: actionRollout });
     expect(result.telemetry.provider_conflict).toBe(true);

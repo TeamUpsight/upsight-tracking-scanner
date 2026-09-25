@@ -187,6 +187,9 @@ export interface EvidenceBundle {
       banner: { visibility: 'visible' | 'not_visible' | 'unknown'; surface: string };
       visible_surfaces: Array<{ surface_type: string; provider_specific: boolean; visible: boolean; privacy_or_cookie_semantics: boolean; text_evidence_available?: boolean; intent: string; strong_presentation?: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
       visible_controls: Array<{ accessible_name: string; semantic_action: string; visible: boolean; enabled: boolean; actionable: boolean; provider_specific: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
+      usercentrics_prechoice_state?: 'unanswered' | 'accepted' | 'rejected' | 'partial' | 'ambiguous';
+      explicit_decision_present?: boolean | 'unknown';
+      usercentrics_main_frame_census?: import('./scanner/consent/usercentrics-main-frame-census').UsercentricsMainFrameCensus;
       semantic_discovery?: {
         attempted: boolean;
         provider: 'cookiebot' | 'didomi' | 'usercentrics' | null;
