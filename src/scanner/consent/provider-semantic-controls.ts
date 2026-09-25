@@ -41,6 +41,8 @@ export type ProviderSemanticDiscoveryDiagnostic = {
   open_shadow_candidate_count: number;
   text_candidate_count: number;
   actionable_control_count: number;
+  /** Only the Usercentrics Browser UI path uses this bounded identity mismatch count. */
+  semantic_identity_conflict_count?: number;
   rejection_counts: Record<ProviderSemanticRejectionReason, number>;
   candidate_samples: Array<{
     lookup_class: ProviderSemanticLookupClass;

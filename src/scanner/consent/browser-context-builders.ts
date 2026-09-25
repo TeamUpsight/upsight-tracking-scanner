@@ -2,7 +2,7 @@ import type { BrowserContext, Page } from 'playwright-core';
 import type { CmpAdapterProviderId } from './adapter-registry';
 import { ONETRUST_DOCUMENTED_CONTROLS, ONETRUST_STANDARD_ROOTS } from './onetrust-adapter';
 import { COOKIEBOT_STANDARD_CONTROLS, COOKIEBOT_STANDARD_ROOT } from './cookiebot-adapter';
-import { USERCENTRICS_STANDARD_ROOT } from './usercentrics-adapter';
+import { USERCENTRICS_BROWSER_UI_ROOT, USERCENTRICS_STANDARD_ROOT } from './usercentrics-adapter';
 import { usercentricsRuntimeVersion, usercentricsV2Decision, type UsercentricsV2ServiceAggregate } from './usercentrics-v2-state';
 import { DIDOMI_STANDARD_ROOTS } from './didomi-adapter';
 import { COOKIEYES_STANDARD_ROOT, COOKIEYES_STABLE_CONTROLS } from './cookieyes-adapter';
@@ -96,7 +96,7 @@ const PROVIDER_GLOBALS = ['OneTrust', 'Optanon', 'Cookiebot', 'UC_UI', 'Didomi',
 const DOM_SELECTORS = [
   ...ONETRUST_STANDARD_ROOTS, ...Object.values(ONETRUST_DOCUMENTED_CONTROLS),
   COOKIEBOT_STANDARD_ROOT, ...Object.values(COOKIEBOT_STANDARD_CONTROLS),
-  USERCENTRICS_STANDARD_ROOT, ...DIDOMI_STANDARD_ROOTS,
+  USERCENTRICS_STANDARD_ROOT, USERCENTRICS_BROWSER_UI_ROOT, ...DIDOMI_STANDARD_ROOTS,
   COOKIEYES_STANDARD_ROOT, ...Object.values(COOKIEYES_STABLE_CONTROLS)
 ];
 
@@ -860,7 +860,10 @@ export async function buildProviderContexts(page: Page, facts: BrowserConsentFac
     ['usercentrics', {
       ...common,
       uc_ui_type: facts.globals.includes('UC_UI') ? 'object' : 'undefined',
-      surfaces: [{ selector: USERCENTRICS_STANDARD_ROOT, present: facts.usercentrics.present, visible: facts.usercentrics.visible, shadow_mode: facts.usercentrics.shadow_mode }],
+      surfaces: [
+        { selector: USERCENTRICS_STANDARD_ROOT, present: facts.usercentrics.present, visible: facts.usercentrics.visible, shadow_mode: facts.usercentrics.shadow_mode },
+        { selector: USERCENTRICS_BROWSER_UI_ROOT, present: Boolean(observation(facts, USERCENTRICS_BROWSER_UI_ROOT)), visible: Boolean(observation(facts, USERCENTRICS_BROWSER_UI_ROOT)?.visible), shadow_mode: 'none' as const }
+      ],
       lifecycle: facts.usercentrics.lifecycle,
       runtime_version: facts.usercentrics.runtime_version,
       service_state: facts.usercentrics.service_state,

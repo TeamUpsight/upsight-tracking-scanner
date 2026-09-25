@@ -183,7 +183,9 @@ async function captureConsentUiSnapshot(page: Page, controls: ConsentV2RolloutCo
   const baseDurations = (): ConsentCaptureStageDurations => ({ browser_facts: browserFactsMs, framework_observation: frameworkObservationMs, provider_context: providerContextMs, provider_selection: providerSelectionMs, provider_operations: providerOperationsMs, semantic_discovery: 0, ui_readiness: 0, accessibility_census: 0, total: Date.now() - captureStartedAt });
   if (selection.provider === 'usercentrics') {
     stageStartedAt = Date.now();
-    const semanticDiscovery = await withConsentObservationStage('semantic_discovery', 'discoverUsercentricsSemanticControls', () => discoverUsercentricsSemanticControls(page));
+    const semanticDiscovery = await withConsentObservationStage('semantic_discovery', 'discoverUsercentricsSemanticControls', () => discoverUsercentricsSemanticControls(page, {
+      browserUiEligible: facts.usercentrics.runtime_version === 'v2_uc_ui' && Boolean(candidate?.high_confidence || candidate?.deterministic_provider_signature)
+    }));
     const semanticDiscoveryMs = Date.now() - stageStartedAt;
     stageStartedAt = Date.now();
     contexts = await withConsentObservationStage('provider_context_build', 'buildProviderContexts', () => buildProviderContexts(page, facts, frameworkObservations, semanticDiscovery, geo));
@@ -247,10 +249,10 @@ async function captureConsentUiReadySnapshot(page: Page, controls: ConsentV2Roll
       snapshot.diagnosticControlCensus = await withConsentObservationStage('diagnostic_census', 'captureDiagnosticConsentControlCensus', () => captureDiagnosticConsentControlCensus(page));
       snapshot.stageDurations.accessibility_census = Date.now() - censusStartedAt;
     }
-    if (diagnostic && snapshot.selection.provider === 'usercentrics' && selectedCandidate?.high_confidence &&
-      snapshot.facts.usercentrics.runtime_version === 'v2_uc_ui' && snapshot.providerBannerVisibility === 'visible') {
+    if (diagnostic && snapshot.selection.provider === 'usercentrics' && (selectedCandidate?.high_confidence || selectedCandidate?.deterministic_provider_signature) &&
+      snapshot.facts.usercentrics.runtime_version === 'v2_uc_ui') {
       snapshot.usercentricsMainFrameCensus = await withConsentObservationStage('diagnostic_census', 'captureUsercentricsMainFrameCensus', () =>
-        captureUsercentricsMainFrameCensus(page, snapshot.facts, true));
+        captureUsercentricsMainFrameCensus(page, snapshot.facts, snapshot.providerBannerVisibility === 'visible'));
     }
     snapshot.stageDurations.total = Date.now() - totalStartedAt;
     return snapshot;
@@ -374,6 +376,7 @@ function diagnosticObservation(
       open_shadow_candidate_count: Math.min(80, semanticDiagnostic.open_shadow_candidate_count),
       text_candidate_count: Math.min(80, semanticDiagnostic.text_candidate_count),
       actionable_control_count: Math.min(20, semanticDiagnostic.actionable_control_count),
+      ...(semanticDiagnostic.semantic_identity_conflict_count !== undefined ? { semantic_identity_conflict_count: Math.min(80, semanticDiagnostic.semantic_identity_conflict_count) } : {}),
       rejection_counts: { ...semanticDiagnostic.rejection_counts },
       candidate_samples: semanticDiagnostic.candidate_samples.slice(0, 20).map((candidate) => ({ ...candidate, accessible_name: candidate.accessible_name.slice(0, 120) })),
       ...(exposeNearbyControls ? { nearby_actionable_controls: nearbyActionableControls } : {})
@@ -388,8 +391,13 @@ async function providerOperations(provider: CmpAdapterProviderId | undefined, co
 }
 
 async function freshActionProviderContexts(page: Page, facts: BrowserConsentFacts, frameworks: ConsentFrameworkObservations, provider: CmpAdapterProviderId, geo: ConsentV2SessionInput['geo']) {
+  const preliminary = provider === 'usercentrics' ? await buildProviderContexts(page, facts, frameworks, undefined, geo) : null;
+  const currentCandidate = preliminary ? scoreProviderCandidates(cmpAdapterRegistry.collectProviderEvidence(preliminary))
+    .find((item) => item.provider_id === 'usercentrics') : null;
   const semanticDiscovery = provider === 'cookiebot' ? await discoverProviderSemanticControls(page, provider)
-    : provider === 'usercentrics' ? await discoverUsercentricsSemanticControls(page) : undefined;
+    : provider === 'usercentrics' ? await discoverUsercentricsSemanticControls(page, {
+      browserUiEligible: facts.usercentrics.runtime_version === 'v2_uc_ui' && Boolean(currentCandidate?.high_confidence || currentCandidate?.deterministic_provider_signature)
+    }) : undefined;
   return { contexts: await buildProviderContexts(page, facts, frameworks, semanticDiscovery, geo), semanticDiscovery };
 }
 

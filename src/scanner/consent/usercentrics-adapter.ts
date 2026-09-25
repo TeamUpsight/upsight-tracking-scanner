@@ -22,7 +22,10 @@ import type { ShadowMode } from './surface-utils';
 import type { VerificationCapability } from './verification-capability';
 import { usercentricsV2ChannelAvailable, type UsercentricsRuntimeVersion, type UsercentricsV2ServiceAggregate } from './usercentrics-v2-state';
 
-export const USERCENTRICS_STANDARD_ROOT = 'aside#usercentrics-cmp-ui';
+export const USERCENTRICS_LEGACY_STANDARD_ROOT = 'aside#usercentrics-cmp-ui';
+/** Kept for existing callers and the certified legacy open-shadow contract. */
+export const USERCENTRICS_STANDARD_ROOT = USERCENTRICS_LEGACY_STANDARD_ROOT;
+export const USERCENTRICS_BROWSER_UI_ROOT = 'div#usercentrics-root';
 
 export type UsercentricsSemanticAction = 'accept_all' | 'reject_all' | 'open_preferences';
 
@@ -158,7 +161,8 @@ export function usercentricsProviderEvidence(context: UsercentricsAdapterContext
   if (hasCurrentLoader(context.asset_urls)) {
     evidence.push({ provider_id: 'usercentrics', family: 'provider_asset', kind: 'unique_provider_script_or_config', specificity: 'provider_specific', deterministic_provider_signature: true });
   }
-  if (context.surfaces?.some((surface) => surface.selector === USERCENTRICS_STANDARD_ROOT && surface.present !== false)) {
+  if (context.surfaces?.some((surface) =>
+    (surface.selector === USERCENTRICS_STANDARD_ROOT || surface.selector === USERCENTRICS_BROWSER_UI_ROOT) && surface.present !== false)) {
     evidence.push({ provider_id: 'usercentrics', family: 'provider_root', kind: 'stable_provider_root', specificity: 'provider_specific' });
   }
   if (hasLegacyEvidence(context)) {
@@ -188,6 +192,9 @@ export function usercentricsBannerState(context: UsercentricsAdapterContext): Ba
   const genericVisible = context.generic_surfaces?.some((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation) || false;
   if (detectUsercentrics(context).status === 'detected' && genericVisible) {
     return { surface: 'dialog', visibility: 'visible', evidence: ['usercentrics_deterministic_provider_signature', 'visible_consent_surface'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
+  }
+  if (detectUsercentrics(context).status === 'detected' && context.controls?.some(isActionable)) {
+    return { surface: 'dialog', visibility: 'visible', evidence: ['usercentrics_owned_visible_control'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] };
   }
   if (!root || root.present === false) return detectUsercentrics(context).status === 'detected'
     ? { surface: 'unknown', visibility: 'unknown', evidence: [], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] }

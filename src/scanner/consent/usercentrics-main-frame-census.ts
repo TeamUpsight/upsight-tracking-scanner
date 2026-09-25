@@ -1,8 +1,9 @@
 import type { Page } from 'playwright-core';
 import type { BrowserConsentFacts } from './browser-context-builders';
+import { USERCENTRICS_BROWSER_UI_ROOT, USERCENTRICS_STANDARD_ROOT } from './usercentrics-adapter';
 
-export type UsercentricsUiTopology = 'open_shadow_standard' | 'main_frame_provider_owned' | 'main_frame_unowned' | 'closed_shadow' | 'absent' | 'ambiguous';
-export type UsercentricsOwnershipReason = 'standard_root' | 'provider_specific_main_frame_marker' | 'no_provider_marker' | 'ambiguous_multiple_surfaces' | 'ambiguous_multiple_controls' | 'unsupported_topology';
+export type UsercentricsUiTopology = 'open_shadow_standard' | 'open_shadow_browser_ui' | 'main_frame_provider_owned' | 'main_frame_unowned' | 'closed_shadow' | 'absent' | 'ambiguous';
+export type UsercentricsOwnershipReason = 'standard_root' | 'browser_ui_open_shadow_root' | 'provider_specific_main_frame_marker' | 'no_provider_marker' | 'ambiguous_multiple_roots' | 'ambiguous_multiple_first_layers' | 'ambiguous_multiple_surfaces' | 'ambiguous_multiple_controls' | 'unsupported_topology';
 type SemanticInventory = Record<'reject_all' | 'accept_all' | 'open_preferences', {
   candidate_count: number; visible_count: number; enabled_count: number; directly_actionable_count: number;
 }>;
@@ -18,6 +19,11 @@ export interface UsercentricsMainFrameCensus {
   direct_actionable_reject_count: number;
   not_direct_actionable_target_count: number;
   semantic_control_inventory: SemanticInventory;
+  browser_ui_root_present: boolean;
+  browser_ui_root_count: number;
+  browser_ui_shadow_open: boolean;
+  first_layer_surface_count: number;
+  browser_ui_identity_conflict_count: number;
   ownership_reason: UsercentricsOwnershipReason;
   surfaces: Array<{
     location: 'main_frame';
@@ -48,11 +54,101 @@ const EMPTY_COUNTS = {
   main_frame_consent_surface_count: 0, provider_owned_surface_count: 0,
   reject_semantic_candidate_count: 0, accept_semantic_candidate_count: 0,
   preferences_semantic_candidate_count: 0, provider_owned_reject_candidate_count: 0,
-  direct_actionable_reject_count: 0, not_direct_actionable_target_count: 0, semantic_control_inventory: EMPTY_INVENTORY
+  direct_actionable_reject_count: 0, not_direct_actionable_target_count: 0, semantic_control_inventory: EMPTY_INVENTORY,
+  browser_ui_root_present: false, browser_ui_root_count: 0, browser_ui_shadow_open: false,
+  first_layer_surface_count: 0, browser_ui_identity_conflict_count: 0
 };
+
+const BROWSER_UI_FIRST_LAYER = 'div#uc-center-container[role="dialog"][aria-modal="true"][data-testid="uc-tcf-first-layer"]';
+
+/** The exact named Browser UI root is inspected before the generic main-frame census. */
+async function captureBrowserUiCensus(page: Page): Promise<UsercentricsMainFrameCensus | null> {
+  const observed = await page.evaluate(({ browserRoot, legacyRoot, layerSelector }) => {
+    const roots = Array.from(document.querySelectorAll(browserRoot)).slice(0, 21);
+    if (!roots.length) return null;
+    const root = roots.length === 1 ? roots[0] : null;
+    const shadow = root?.shadowRoot || null;
+    const layers = shadow ? Array.from(shadow.querySelectorAll(layerSelector)).slice(0, 21) : [];
+    const visible = (element: Element) => {
+      if (!(element instanceof HTMLElement)) return false;
+      const style = getComputedStyle(element); const box = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+    };
+    const currentLayers = layers.filter(visible);
+    const layer = currentLayers.length === 1 ? currentLayers[0] : null;
+    const normalize = (value: string) => value.replace(/\s+/g, ' ').trim().toLowerCase();
+    const identities = [
+      { action: 'reject_all', testId: 'uc-deny-all-button', labels: ['alles ablehnen', 'alle ablehnen', 'reject all'] },
+      { action: 'accept_all', testId: 'uc-accept-all-button', labels: ['alles akzeptieren', 'accept all'] },
+      { action: 'open_preferences', testId: 'uc-customize-button', labels: ['einstellungen verwalten'] }
+    ] as const;
+    const inventory = {
+      reject_all: { candidate_count: 0, visible_count: 0, enabled_count: 0, directly_actionable_count: 0 },
+      accept_all: { candidate_count: 0, visible_count: 0, enabled_count: 0, directly_actionable_count: 0 },
+      open_preferences: { candidate_count: 0, visible_count: 0, enabled_count: 0, directly_actionable_count: 0 }
+    };
+    let ownedReject = 0; let conflicts = 0; let notDirect = 0;
+    for (const control of shadow ? Array.from(shadow.querySelectorAll('button[data-testid]')).slice(0, 40) : []) {
+      const identity = identities.find((item) => item.testId === control.getAttribute('data-testid'));
+      if (!identity) continue;
+      const label = normalize(String(control.getAttribute('aria-label') || control.textContent || ''));
+      const agrees = identity.labels.some((item) => normalize(item) === label);
+      if (!agrees) {
+        const descendantExpected = Boolean(control.getAttribute('aria-label')) &&
+          identity.labels.some((item) => normalize(item) === normalize(String(control.textContent || '')));
+        if (descendantExpected) notDirect = Math.min(20, notDirect + 1);
+        else conflicts = Math.min(20, conflicts + 1);
+        continue;
+      }
+      if (!(layer && control.getRootNode() === shadow && control.closest(layerSelector) === layer)) continue;
+      const count = inventory[identity.action];
+      const isVisible = visible(control);
+      const isEnabled = !(control as HTMLButtonElement).disabled && control.getAttribute('aria-disabled') !== 'true';
+      count.candidate_count = Math.min(20, count.candidate_count + 1);
+      if (isVisible) count.visible_count = Math.min(20, count.visible_count + 1);
+      if (isEnabled) count.enabled_count = Math.min(20, count.enabled_count + 1);
+      if (isVisible && isEnabled) count.directly_actionable_count = Math.min(20, count.directly_actionable_count + 1);
+      if (identity.action === 'reject_all') ownedReject = Math.min(20, ownedReject + 1);
+    }
+    return {
+      rootCount: Math.min(20, roots.length), legacyRootCount: Math.min(20, document.querySelectorAll(legacyRoot).length),
+      shadowOpen: Boolean(shadow), firstLayerCount: Math.min(20, currentLayers.length),
+      inventory, ownedReject, conflicts, notDirect
+    };
+  }, { browserRoot: USERCENTRICS_BROWSER_UI_ROOT, legacyRoot: USERCENTRICS_STANDARD_ROOT, layerSelector: BROWSER_UI_FIRST_LAYER });
+  if (!observed) return null;
+  const duplicateControls = Object.values(observed.inventory).some((item) => item.candidate_count > 1);
+  const ambiguousRoots = observed.rootCount !== 1 || observed.legacyRootCount > 0;
+  const ambiguousLayers = observed.firstLayerCount > 1;
+  const qualified = observed.shadowOpen && observed.firstLayerCount === 1 && !ambiguousRoots;
+  const ambiguous = ambiguousRoots || ambiguousLayers || duplicateControls;
+  const topology: UsercentricsUiTopology = ambiguous ? 'ambiguous' : !observed.shadowOpen ? 'closed_shadow'
+    : qualified ? 'open_shadow_browser_ui' : 'absent';
+  const reason: UsercentricsOwnershipReason = ambiguousRoots ? 'ambiguous_multiple_roots'
+    : ambiguousLayers ? 'ambiguous_multiple_first_layers' : duplicateControls ? 'ambiguous_multiple_controls'
+      : qualified ? 'browser_ui_open_shadow_root' : 'unsupported_topology';
+  return {
+    ...EMPTY_COUNTS,
+    usercentrics_surface_topology: topology, ownership_reason: reason,
+    provider_owned_surface_count: qualified && !ambiguous ? 1 : 0,
+    browser_ui_root_present: true, browser_ui_root_count: observed.rootCount,
+    browser_ui_shadow_open: observed.shadowOpen, first_layer_surface_count: observed.firstLayerCount,
+    browser_ui_identity_conflict_count: observed.conflicts,
+    not_direct_actionable_target_count: observed.notDirect,
+    reject_semantic_candidate_count: observed.inventory.reject_all.candidate_count,
+    accept_semantic_candidate_count: observed.inventory.accept_all.candidate_count,
+    preferences_semantic_candidate_count: observed.inventory.open_preferences.candidate_count,
+    provider_owned_reject_candidate_count: qualified && !ambiguous ? observed.ownedReject : 0,
+    direct_actionable_reject_count: observed.inventory.reject_all.directly_actionable_count,
+    semantic_control_inventory: observed.inventory,
+    surfaces: []
+  };
+}
 
 /** Diagnostic only. Its output is never an invoke_control input or target reference. */
 export async function captureUsercentricsMainFrameCensus(page: Page, facts: BrowserConsentFacts, bannerVisible: boolean): Promise<UsercentricsMainFrameCensus> {
+  const browserUi = await captureBrowserUiCensus(page);
+  if (browserUi) return browserUi;
   if (facts.usercentrics.present && facts.usercentrics.shadow_mode === 'open')
     return { ...EMPTY_COUNTS, usercentrics_surface_topology: 'open_shadow_standard', ownership_reason: 'standard_root', surfaces: [] };
   if (facts.usercentrics.present && facts.usercentrics.shadow_mode === 'closed')
@@ -148,6 +244,7 @@ export async function captureUsercentricsMainFrameCensus(page: Page, facts: Brow
   const unsupportedNamedRoot = surfaces.some((surface) => surface.provider_marker_present || surface.ancestor_provider_marker_present || surface.descendant_provider_marker_present);
   const ambiguous = count > 1 || sum('direct_actionable_reject_count') > 1 || unsupportedNamedRoot;
   return {
+    ...EMPTY_COUNTS,
     usercentrics_surface_topology: ambiguous ? 'ambiguous' : 'main_frame_unowned',
     main_frame_consent_surface_count: count, provider_owned_surface_count: 0,
     reject_semantic_candidate_count: sum('reject_semantic_candidate_count'),

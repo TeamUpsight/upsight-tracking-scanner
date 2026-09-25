@@ -1328,6 +1328,34 @@ describe('Consent V2 production session wiring', () => {
     expect(result.result.interactions).toEqual([]);
   });
 
+  it('UC-BUI-SESSION observes the exact Browser UI root with actions disabled', async () => {
+    const html = `<script type="application/json" src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><script>
+      window.UC_UI={isInitialized:()=>true,getServicesBaseInfo:()=>[
+        {isEssential:true,consent:{status:true,history:[]},categorySlug:'essential'},
+        {isEssential:false,consent:{status:false,history:[]},categorySlug:'marketing'}
+      ]};
+      setTimeout(()=>{
+        const host=document.createElement('div');host.id='usercentrics-root';host.style='position:absolute;width:0;height:0';document.body.appendChild(host);
+        host.attachShadow({mode:'open'}).innerHTML='<div id="uc-center-container" role="dialog" aria-modal="true" data-testid="uc-tcf-first-layer" style="position:fixed;top:20px;left:20px;width:420px;height:220px;background:white"><button data-testid="uc-customize-button">Einstellungen verwalten</button><button data-testid="uc-deny-all-button">Alles ablehnen</button><button data-testid="uc-accept-all-button">Alles akzeptieren</button></div>';
+        window.dispatchEvent(new Event('UC_UI_INITIALIZED'));
+        window.dispatchEvent(new CustomEvent('UC_UI_VIEW_CHANGED',{detail:{view:'FIRST_LAYER'}}));
+        window.dispatchEvent(new CustomEvent('UC_UI_CMP_EVENT',{detail:{type:'CMP_SHOWN'}}));
+      },100);
+    </script>`;
+    const result = await auditNavigation(html, false, { ...input, diagnostic: true });
+    expect(result.telemetry).toMatchObject({ provider: 'usercentrics', provider_confidence: 'high',
+      usercentrics_runtime_version: 'v2_uc_ui', banner_visibility: 'visible', verification_capability: 'available',
+      requested_action_target_resolved: true, action_execution_eligible: false, action_attempted: false, activation_occurred: false });
+    expect(result.result.available_actions.map((item) => [item.action, item.availability])).toEqual(expect.arrayContaining([
+      ['reject_all', 'direct'], ['accept_all', 'direct'], ['open_preferences', 'direct']
+    ]));
+    expect(result.diagnostic_observation?.usercentrics_main_frame_census).toMatchObject({
+      usercentrics_surface_topology: 'open_shadow_browser_ui', provider_owned_surface_count: 1,
+      provider_owned_reject_candidate_count: 1, first_layer_surface_count: 1
+    });
+    expect(result.result.interactions).toEqual([]);
+  });
+
   it('UC-IDENTITY-02 blocks action when Usercentrics conflicts with another active CMP', async () => {
     const result = await audit('<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><script src="https://consent.cookiebot.com/uc.js"></script><aside id="usercentrics-cmp-ui" style="display:block;width:320px;height:120px"></aside><div id="CybotCookiebotDialog" style="display:block;width:320px;height:120px"><button id="CybotCookiebotDialogBodyButtonDecline">Decline</button></div><script>document.querySelector("#usercentrics-cmp-ui").attachShadow({mode:"open"}).innerHTML="<button>Alles ablehnen</button>";</script>', { ...input, rollout: actionRollout });
     expect(result.telemetry.provider_conflict).toBe(true);
