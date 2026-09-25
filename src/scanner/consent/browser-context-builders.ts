@@ -10,6 +10,17 @@ import { observeConsentFrameworks, tcfAggregateDecision, type ConsentFrameworkOb
 import { semanticActionForConsentLabel } from './generic-consent-detector';
 import type { ProviderSemanticDiscovery } from './provider-semantic-controls';
 import type { GpcBrowserSignal } from './domain-types';
+import { BrowserFactsCaptureError, browserFactsPlaywrightErrorFamily, type BrowserFactsErrorFamily, type BrowserFactsSubstage } from './observation-stage';
+
+type BrowserFactsFailureMarker = {
+  __upsight_browser_facts_failure: true;
+  browser_facts_substage: BrowserFactsSubstage;
+  error_family: BrowserFactsErrorFamily;
+};
+
+function isBrowserFactsFailureMarker(value: unknown): value is BrowserFactsFailureMarker {
+  return Boolean(value && typeof value === 'object' && (value as BrowserFactsFailureMarker).__upsight_browser_facts_failure === true);
+}
 
 export interface BrowserActionTarget {
   action: string;
@@ -277,7 +288,10 @@ export async function installConsentCommandBootstrap(page: Page) {
 
 /** Captures normalized, bounded browser facts. Provider interpretation remains in adapters. */
 export async function captureBrowserConsentFacts(page: Page): Promise<BrowserConsentFacts> {
-  const facts = await page.evaluate(({ globals, selectors, consentCommandKey, providerEventKey }) => {
+  let facts: Omit<BrowserConsentFacts, 'usercentrics'> | BrowserFactsFailureMarker;
+  try { facts = await page.evaluate(({ globals, selectors, consentCommandKey, providerEventKey }) => {
+    let currentStage: BrowserFactsSubstage = 'generic_main_dom';
+    try {
     const visible = (element: Element | null) => {
       if (!(element instanceof HTMLElement)) return false;
       const style = getComputedStyle(element); const box = element.getBoundingClientRect();
@@ -352,6 +366,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     // This is deliberately provider-first: two independent Cookiebot-specific
     // facts are required before inspecting non-standard descendants, and the
     // scan is bounded to a current visible consent surface.
+    currentStage = 'cookiebot_dom';
     const cookiebotExactLoader = Array.from(document.scripts).some((script) => {
       try { const url = new URL(script.src); return url.hostname.toLowerCase() === 'consent.cookiebot.com' && url.pathname === '/uc.js'; } catch { return false; }
     });
@@ -379,6 +394,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     });
     const surfaceSelector = '[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i], [class*="privacy" i], [id*="privacy" i]';
     const bridgeEntries: Array<{ element: Element; fact: typeof genericSurfaceFacts[number] }> = genericSurfaces.map((element, index) => ({ element, fact: genericSurfaceFacts[index] }));
+    currentStage = 'shadow_dom';
     const roots: Array<{ root: Document | ShadowRoot; depth: number }> = [{ root: document, depth: 0 }];
     let shadowHosts = 0;
     for (let rootIndex = 0; rootIndex < roots.length && shadowHosts < 40; rootIndex += 1) {
@@ -429,6 +445,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       }
       return surface;
     };
+    currentStage = 'generic_shadow_controls';
     const bridgeControls: typeof generic.controls = [];
     const retained = new Set<string>();
     for (const { element: surface, fact } of bridgeEntries) {
@@ -450,13 +467,17 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     for (const control of bridgeControls) {
       if (!generic.controls.some((existing) => existing.surface_id === control.surface_id && normal(existing.accessible_name) === normal(control.accessible_name))) generic.controls.push(control);
     }
+    currentStage = 'cookiebot_runtime';
     const cb = w.Cookiebot;
     const cookiebot = cb ? { has_response: typeof cb.hasResponse === 'boolean' ? cb.hasResponse : null, consented: typeof cb.consented === 'boolean' ? cb.consented : null, declined: typeof cb.declined === 'boolean' ? cb.declined : null, consent: cb.consent ? { preferences: typeof cb.consent.preferences === 'boolean' ? cb.consent.preferences : null, statistics: typeof cb.consent.statistics === 'boolean' ? cb.consent.statistics : null, marketing: typeof cb.consent.marketing === 'boolean' ? cb.consent.marketing : null } : null } : null;
+    currentStage = 'cookieyes_runtime';
     let cookieyes: Record<string, unknown> | null = null;
     try { const raw = typeof w.getCkyConsent === 'function' ? w.getCkyConsent() : null; const categories = raw?.categories || raw; cookieyes = categories ? { categories: { analytics: typeof categories.analytics === 'boolean' ? categories.analytics : null, advertisement: typeof categories.advertisement === 'boolean' ? categories.advertisement : null, performance: typeof categories.performance === 'boolean' ? categories.performance : null, functional: typeof categories.functional === 'boolean' ? categories.functional : null }, is_user_action_completed: typeof raw?.isUserActionCompleted === 'boolean' ? raw.isUserActionCompleted : null } : null; } catch { /* Runtime access is optional. */ }
+    currentStage = 'onetrust_runtime';
     const onetrust = { active_group_ids: typeof w.OnetrustActiveGroups === 'string' ? w.OnetrustActiveGroups.split(',').filter((value: string) => /^[A-Za-z0-9_-]{1,80}$/.test(value)).slice(0, 200) : [], provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => value === 'OneTrustGroupsUpdated' || value === 'OTConsentApplied').slice(0, 20) : [] };
     const onetrust_public_methods = ['AllowAll', 'RejectAll', 'ToggleInfoDisplay'].filter((name) => typeof w.OneTrust?.[name] === 'function');
     const cookieyes_runtime_functions = ['performBannerAction', 'getCkyConsent'].filter((name) => typeof w[name] === 'function');
+    currentStage = 'didomi_runtime';
     const didomiStatus = () => {
       try {
         const status = typeof w.Didomi?.getCurrentUserStatus === 'function' ? w.Didomi.getCurrentUserStatus() : null;
@@ -479,8 +500,10 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         visible: visible(element), enabled: !(element as HTMLButtonElement).disabled
       }));
     });
+    currentStage = 'shopify_runtime';
     let shopify: Record<string, unknown> | null = null;
     try { const privacy = w.Shopify?.customerPrivacy; if (privacy) { const methods = ['currentVisitorConsent', 'analyticsProcessingAllowed', 'marketingAllowed', 'preferencesProcessingAllowed', 'saleOfDataAllowed', 'shouldShowBanner', 'getRegion'].filter((name) => typeof privacy[name] === 'function'); const consent = typeof privacy.currentVisitorConsent === 'function' ? privacy.currentVisitorConsent() : null; shopify = { shopify_object_present: Boolean(w.Shopify), customer_privacy_object_present: true, runtime_methods: methods, visitor_consent: consent ? { analytics: consent.analytics === 'yes' || consent.analytics === 'no' ? consent.analytics : '', marketing: consent.marketing === 'yes' || consent.marketing === 'no' ? consent.marketing : '', preferences: consent.preferences === 'yes' || consent.preferences === 'no' ? consent.preferences : '', sale_of_data: consent.sale_of_data === 'yes' || consent.sale_of_data === 'no' ? consent.sale_of_data : '' } : null, processing_allowed: { analytics: typeof privacy.analyticsProcessingAllowed === 'function' ? Boolean(privacy.analyticsProcessingAllowed()) : null, marketing: typeof privacy.marketingAllowed === 'function' ? Boolean(privacy.marketingAllowed()) : null, preferences: typeof privacy.preferencesProcessingAllowed === 'function' ? Boolean(privacy.preferencesProcessingAllowed()) : null, sale_of_data: typeof privacy.saleOfDataAllowed === 'function' ? Boolean(privacy.saleOfDataAllowed()) : null }, should_show_banner: typeof privacy.shouldShowBanner === 'function' ? Boolean(privacy.shouldShowBanner()) : null, region_available: typeof privacy.getRegion === 'function' ? Boolean(privacy.getRegion()) : null }; } } catch { /* Runtime access is optional. */ }
+    currentStage = 'consent_commands';
     const commandState = (value: unknown) => {
       if (!value || typeof value !== 'object') return null;
       const source = value as Record<string, unknown>; const result: Record<string, unknown> = {};
@@ -493,9 +516,11 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       if (entry && (entry.command === 'default' || entry.command === 'update') && entry.state && typeof entry.state === 'object') commands.push({ command: entry.command, state: entry.state, timestamp: typeof entry.timestamp === 'number' ? entry.timestamp : undefined });
     }
     if (!commands.length) for (const entry of Array.isArray(w.dataLayer) ? w.dataLayer.slice(-100) : []) { const command = Array.isArray(entry) ? entry : entry && typeof entry === 'object' && typeof (entry as { length?: unknown }).length === 'number' ? Array.from(entry as ArrayLike<unknown>) : null; if (command && command[0] === 'consent' && (command[1] === 'default' || command[1] === 'update')) { const state = commandState(command[2]); if (state) commands.push({ command: command[1], state }); } }
+    currentStage = 'browser_storage';
     let cookieNames: string[] = []; let storageKeys: string[] = [];
     try { cookieNames = document.cookie.split(';').map((part) => part.trim().split('=')[0]).filter(Boolean).slice(0, 100); } catch { /* Opaque origins have no cookie jar. */ }
     try { storageKeys = Object.keys(localStorage).slice(0, 100); } catch { /* Opaque origins have no Web Storage. */ }
+    currentStage = 'browser_privacy_signal';
     let gpcSignal: 'present' | 'absent' | 'unavailable' = 'unavailable';
     try {
       if ('globalPrivacyControl' in navigator) {
@@ -503,14 +528,36 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         gpcSignal = value === true ? 'present' : value === false ? 'absent' : 'unavailable';
       }
     } catch { /* Browser privacy signal is optional. */ }
-    return { globals: globals.filter((name) => Boolean(w[name])), assets: Array.from(document.scripts).map((script) => script.src).filter(Boolean).slice(0, 200), cookie_names: cookieNames, cookiebot_data_cbid_present: Boolean(document.querySelector('[data-cbid]')), storage_keys: storageKeys, observations: selectors.map((selector) => { const element = document.querySelector(selector) as HTMLButtonElement | null; return element ? { selector, visible: visible(element), enabled: !element.disabled, text: String(element.getAttribute('aria-label') || element.textContent || '').slice(0, 120) } : null; }).filter(Boolean), cookiebot, cookieyes, onetrust, onetrust_public_methods, cookieyes_runtime_functions, didomi, didomi_controls, provider_events: Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => typeof value === 'string').slice(0, 20) : [], cookiebot_events: Array.isArray(w.__upsightCookiebotEvents) ? w.__upsightCookiebotEvents.filter((value: unknown) => value === 'CookiebotOnAccept' || value === 'CookiebotOnDecline' || value === 'CookiebotOnDialogDisplay').slice(0, 20) : [], shopify, consent_commands: commands, gpc_signal: gpcSignal, gpc_acknowledgement_observed: gpcAcknowledgementObserved, generic };
-  }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS, consentCommandKey: CONSENT_COMMAND_OBSERVATIONS_KEY, providerEventKey: PROVIDER_EVENT_OBSERVATIONS_KEY }) as Omit<BrowserConsentFacts, 'usercentrics'>;
-  const usercentrics = await page.evaluate(({ rootSelector, lifecycleKey, frameworkKey }) => {
+    currentStage = 'provider_globals';
+    const presentGlobals = globals.filter((name) => Boolean(w[name]));
+    currentStage = 'standard_dom_observations';
+    const assets = Array.from(document.scripts).map((script) => script.src).filter(Boolean).slice(0, 200);
+    const cookiebotDataCbidPresent = Boolean(document.querySelector('[data-cbid]'));
+    const observations = selectors.map((selector) => { const element = document.querySelector(selector) as HTMLButtonElement | null; return element ? { selector, visible: visible(element), enabled: !element.disabled, text: String(element.getAttribute('aria-label') || element.textContent || '').slice(0, 120) } : null; }).filter(Boolean);
+    currentStage = 'provider_events';
+    const providerEvents = Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => typeof value === 'string').slice(0, 20) : [];
+    const cookiebotEvents = Array.isArray(w.__upsightCookiebotEvents) ? w.__upsightCookiebotEvents.filter((value: unknown) => value === 'CookiebotOnAccept' || value === 'CookiebotOnDecline' || value === 'CookiebotOnDialogDisplay').slice(0, 20) : [];
+    currentStage = 'serialize_result';
+    return { globals: presentGlobals, assets, cookie_names: cookieNames, cookiebot_data_cbid_present: cookiebotDataCbidPresent, storage_keys: storageKeys, observations, cookiebot, cookieyes, onetrust, onetrust_public_methods, cookieyes_runtime_functions, didomi, didomi_controls, provider_events: providerEvents, cookiebot_events: cookiebotEvents, shopify, consent_commands: commands, gpc_signal: gpcSignal, gpc_acknowledgement_observed: gpcAcknowledgementObserved, generic };
+    } catch (error) {
+      let name = '';
+      try { name = typeof (error as { name?: unknown })?.name === 'string' ? (error as { name: string }).name : ''; } catch { /* A hostile exception may have a throwing name getter. */ }
+      const error_family: BrowserFactsErrorFamily = name === 'TypeError' ? 'type_error' : name === 'ReferenceError' ? 'reference_error' : name === 'SecurityError' ? 'security_error' : name === 'DOMException' ? 'dom_exception' : 'other';
+      return { __upsight_browser_facts_failure: true as const, browser_facts_substage: currentStage, error_family };
+    }
+  }, { globals: PROVIDER_GLOBALS, selectors: DOM_SELECTORS, consentCommandKey: CONSENT_COMMAND_OBSERVATIONS_KEY, providerEventKey: PROVIDER_EVENT_OBSERVATIONS_KEY }); }
+  catch (error) { throw new BrowserFactsCaptureError('browser_facts_core', browserFactsPlaywrightErrorFamily(error)); }
+  if (isBrowserFactsFailureMarker(facts)) throw new BrowserFactsCaptureError(facts.browser_facts_substage, facts.error_family);
+  let usercentrics: BrowserConsentFacts['usercentrics'] | BrowserFactsFailureMarker;
+  try { usercentrics = await page.evaluate(({ rootSelector, lifecycleKey, frameworkKey }) => {
+    let currentStage: BrowserFactsSubstage = 'usercentrics_lifecycle';
+    try {
     const w = window as any;
     const raw = w[lifecycleKey] && typeof w[lifecycleKey] === 'object' ? w[lifecycleKey] : {};
     const view = raw.latest_view === 'FIRST_LAYER' || raw.latest_view === 'SECOND_LAYER' || raw.latest_view === 'NONE' || raw.latest_view === 'PRIVACY_BUTTON' ? raw.latest_view : null;
     const lifecycle = { initialized: raw.initialized === true || (() => { try { return typeof w.UC_UI?.isInitialized === 'function' && w.UC_UI.isInitialized() === true; } catch { return false; } })(), latest_view: view, latest_view_at_ms: typeof raw.latest_view_at_ms === 'number' ? raw.latest_view_at_ms : null, cmp_shown_observed: raw.cmp_shown_observed === true, cmp_shown_at_ms: typeof raw.cmp_shown_at_ms === 'number' ? raw.cmp_shown_at_ms : null, event_count: Math.max(0, Math.min(20, Number(raw.event_count) || 0)) };
     const emptyState = (read_status: UsercentricsV2ServiceAggregate['read_status']): UsercentricsV2ServiceAggregate => ({ read_status, essential_total: 0, essential_granted: 0, nonessential_total: 0, nonessential_granted: 0, nonessential_denied: 0, nonessential_unknown: 0, explicit_decision_present: false });
+    currentStage = 'usercentrics_v2_state_read';
     const assets = Array.from(document.scripts).map((script) => script.src).filter(Boolean);
     const v2Loader = assets.some((url) => /app\.usercentrics\.eu\/browser-ui\/(?:latest|\d+(?:\.\d+){1,3})\/loader\.js(?:[?#]|$)/i.test(url));
     const v3Loader = assets.some((url) => /web\.cmp\.usercentrics\.eu\/ui\/loader\.js(?:[?#]|$)/i.test(url));
@@ -550,16 +597,20 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         }
       } catch { service_state = emptyState('read_error'); }
     }
+    currentStage = 'usercentrics_lifecycle';
     const cmp_events = Array.isArray(raw.cmp_events) ? raw.cmp_events.slice(0, 20).filter((entry: any) => entry && (entry.event_name === 'CMP_SHOWN' || entry.event_name === 'ACCEPT_ALL' || entry.event_name === 'DENY_ALL' || entry.event_name === 'SAVE') && Number.isFinite(entry.observed_at_ms)).map((entry: any) => ({ event_name: entry.event_name, observed_at_ms: entry.observed_at_ms })) : [];
     const tcfEventAt = w[frameworkKey]?.tcf?.latest_event_at_ms;
     const semantic = { lifecycle, runtime_version, service_state, cmp_event_listener_installed: raw.cmp_event_listener_installed === true,
       cmp_events, tcf_last_event_at_ms: Number.isFinite(tcfEventAt) ? tcfEventAt as number : null };
+    currentStage = 'usercentrics_root';
     const root = document.querySelector(rootSelector) as HTMLElement | null;
     if (!root) return { present: false, visible: false, shadow_mode: 'none' as const, controls: [], ...semantic };
     const style = getComputedStyle(root); const box = root.getBoundingClientRect();
     const visible = style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+    currentStage = 'usercentrics_shadow';
     const shadow = root.shadowRoot;
     if (!shadow) return { present: true, visible, shadow_mode: 'closed' as const, controls: [], ...semantic };
+    currentStage = 'usercentrics_controls';
     return {
       present: true,
       visible,
@@ -571,7 +622,15 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         enabled: !(element as HTMLButtonElement).disabled
       }))
     };
-  }, { rootSelector: USERCENTRICS_STANDARD_ROOT, lifecycleKey: USERCENTRICS_LIFECYCLE_KEY, frameworkKey: FRAMEWORK_OBSERVATIONS_KEY });
+    } catch (error) {
+      let name = '';
+      try { name = typeof (error as { name?: unknown })?.name === 'string' ? (error as { name: string }).name : ''; } catch { /* A hostile exception may have a throwing name getter. */ }
+      const error_family: BrowserFactsErrorFamily = name === 'TypeError' ? 'type_error' : name === 'ReferenceError' ? 'reference_error' : name === 'SecurityError' ? 'security_error' : name === 'DOMException' ? 'dom_exception' : 'other';
+      return { __upsight_browser_facts_failure: true as const, browser_facts_substage: currentStage, error_family };
+    }
+  }, { rootSelector: USERCENTRICS_STANDARD_ROOT, lifecycleKey: USERCENTRICS_LIFECYCLE_KEY, frameworkKey: FRAMEWORK_OBSERVATIONS_KEY }); }
+  catch (error) { throw new BrowserFactsCaptureError('usercentrics_dom_runtime', browserFactsPlaywrightErrorFamily(error)); }
+  if (isBrowserFactsFailureMarker(usercentrics)) throw new BrowserFactsCaptureError(usercentrics.browser_facts_substage, usercentrics.error_family);
   usercentrics.runtime_version = usercentricsRuntimeVersion(facts.assets, facts.globals.includes('UC_UI'));
   return { ...facts, usercentrics };
 }
