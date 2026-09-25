@@ -36,6 +36,7 @@ import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
 import { installConsentCommandBootstrap } from './consent/browser-context-builders';
 import { consentV2RolloutControls } from './consent/rollout-controls';
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
+import { consentObservationFailure } from './consent/observation-stage';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { isValidStorefrontStatus, resolveAccessDecision, resolveHostnameEvidence, type AccessDecision } from './navigation';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
@@ -2348,6 +2349,7 @@ export async function runStorefrontAudit(
           sharedConsentObservationStatus = 'incomplete';
           addTrace('homepage_shared_cmp_observation_incomplete', {
             error_family: runtimeErrorFamily(error),
+            ...consentObservationFailure(error),
             reason_code: String((error as Error)?.message || error) === 'SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE'
               ? 'SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE'
               : 'SHARED_CONSENT_OBSERVATION_FAILED'
@@ -2452,7 +2454,8 @@ export async function runStorefrontAudit(
         addTrace('consent_fresh_navigation_inconclusive', {
           reason_code: 'DETECTION_INCONCLUSIVE',
           failure_stage: freshConsentFailureStage,
-          error_family: runtimeErrorFamily(error)
+          error_family: runtimeErrorFamily(error),
+          ...consentObservationFailure(error)
         });
       }
     } else {
