@@ -10,6 +10,7 @@ import { parseGA4DataLayerEntry, parseGA4Request, toGA4Evidence } from '../track
 import { parseMetaRequest, toMetaEvidence } from '../tracking/meta';
 import { RULE_PACK_VERSION } from '../version';
 import { buildMetadata } from '../../build-metadata';
+import { safeObservedPageUrl } from '../tracking/page-provenance';
 
 const KNOWN_TRACKING_HOSTS = [
   'google-analytics.com',
@@ -260,6 +261,9 @@ export class EvidenceCollector {
     phase: string;
     timestamp?: number;
     source?: TrackingRequestEvidence['source'];
+    observed_page_id?: string;
+    observed_page_url?: string;
+    navigation_epoch?: number;
   }): TrackingRequestEvidence | null {
     this.bundle.network.total_requests += 1;
     const { host, path } = safeHostPath(input.url);
@@ -278,6 +282,10 @@ export class EvidenceCollector {
     const evidence = ga4 ? toGA4Evidence(ga4, common) : meta ? toMetaEvidence(meta, common) : null;
 
     if (evidence) {
+      evidence.source = input.source || 'page';
+      if (/^page_\d{1,9}$/.test(input.observed_page_id || '')) evidence.observed_page_id = input.observed_page_id;
+      if (input.observed_page_url) evidence.observed_page_url = safeObservedPageUrl(input.observed_page_url);
+      if (Number.isSafeInteger(input.navigation_epoch) && input.navigation_epoch! >= 1) evidence.navigation_epoch = input.navigation_epoch;
       if (this.bundle.network.relevant_requests.length < this.maxRelevantRequests) {
         this.bundle.network.relevant_requests.push(evidence);
       } else {
@@ -307,6 +315,9 @@ export class EvidenceCollector {
     pageUrl: string;
     phase: string;
     timestamp?: number;
+    observed_page_id?: string;
+    observed_page_url?: string;
+    navigation_epoch?: number;
   }): TrackingRequestEvidence | null {
     const parsed = parseGA4DataLayerEntry(input.entry);
     if (!parsed) return null;
@@ -321,6 +332,9 @@ export class EvidenceCollector {
       phase: input.phase,
       timestamp: input.timestamp || Date.now(),
       source: 'data_layer',
+      observed_page_id: /^page_\d{1,9}$/.test(input.observed_page_id || '') ? input.observed_page_id : undefined,
+      observed_page_url: input.observed_page_url ? safeObservedPageUrl(input.observed_page_url) : undefined,
+      navigation_epoch: Number.isSafeInteger(input.navigation_epoch) && input.navigation_epoch! >= 1 ? input.navigation_epoch : undefined,
       event: parsed.event,
       measurement_id: parsed.measurement_id || undefined,
       page_url: input.pageUrl,
@@ -333,7 +347,8 @@ export class EvidenceCollector {
     };
     const hits = this.bundle.product.data_layer_view_item_hits ||= [];
     const duplicate = hits.some((hit) => hit.event === evidence.event && hit.page_url === evidence.page_url &&
-      hit.product_id === evidence.product_id && hit.product_name === evidence.product_name);
+      hit.product_id === evidence.product_id && hit.product_name === evidence.product_name &&
+      hit.observed_page_id === evidence.observed_page_id && hit.navigation_epoch === evidence.navigation_epoch);
     if (!duplicate && hits.length < 20) hits.push(evidence);
     return duplicate ? null : evidence;
   }

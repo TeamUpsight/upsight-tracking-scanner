@@ -6,6 +6,7 @@ import { resolveConsentStatus, resolveOverallStatus, resolveProductPayloadStatus
 import { accessEvidenceViolations, enforceConsistency } from './consistency';
 import { calculateQaPriority, generateFailureFingerprints } from './fingerprints';
 import { selectedAuditModules } from '../../audit-modules';
+import { isRequestForPdp } from '../tracking/pdp-association';
 
 function cmsFromSignals(signals: string[]): CmsPlatform {
   const text = signals.join(' ').toLowerCase();
@@ -118,20 +119,11 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     (candidateOutcomes.length === 0 && evidence.product.navigation_succeeded === true
       ? evidence.product.final_pdp_url || evidence.product.pdp_url
       : null);
-  // The current association model uses the PDP capture phase and, when the
-  // request supplies a page URL, the verified PDP host and path.
+  // Phase records scanner chronology; only browser provenance or an explicit
+  // vendor page URL can bind a request to the verified PDP.
   const isAssociatedPdpCollection = (request: typeof requests[number]) => {
-    if (!confirmedPdpUrl || request.vendor !== 'ga4' || request.kind !== 'collection' ||
-        !request.phase.includes('product_pdp')) return false;
-    if (!request.page_url) return true;
-    try {
-      const pdp = new URL(confirmedPdpUrl);
-      const page = new URL(request.page_url);
-      const pdpHost = pdp.hostname.toLowerCase().replace(/^www\./, '');
-      const pageHost = page.hostname.toLowerCase().replace(/^www\./, '');
-      return (pageHost === pdpHost || pageHost.endsWith(`.${pdpHost}`)) &&
-        page.pathname.replace(/\/+$/, '') === pdp.pathname.replace(/\/+$/, '');
-    } catch { return false; }
+    if (!confirmedPdpUrl || request.vendor !== 'ga4' || request.kind !== 'collection') return false;
+    return isRequestForPdp(request, confirmedPdpCandidate || { url: confirmedPdpUrl, final_url: confirmedPdpUrl });
   };
   const pdpGa4CollectionObserved = ga4Collections.some(isAssociatedPdpCollection);
   const associatedNetworkViewItems = evidence.product.ga4_view_item_hits.filter(isAssociatedPdpCollection);

@@ -105,6 +105,10 @@ export interface TrackingRequestEvidence {
   measurement_id?: string;
   pixel_id?: string;
   page_url?: string;
+  /** Audit-local browser provenance; absent for Service Worker or legacy evidence. */
+  observed_page_id?: string;
+  observed_page_url?: string;
+  navigation_epoch?: number;
   client_id?: string;
   session_id?: string;
   fbp?: string;
@@ -361,6 +365,9 @@ export interface EvidenceBundle {
     candidate_outcomes?: Array<{
       url: string;
       final_url?: string | null;
+      observed_page_id?: string;
+      observed_page_url?: string;
+      navigation_epoch?: number;
       rank?: number;
       score?: number;
       source?: 'homepage_link' | 'sitemap' | 'product_sitemap' | 'promoted_child' | 'unknown';

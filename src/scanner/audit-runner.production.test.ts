@@ -5,6 +5,7 @@ import { diagnosticScreenshotDeltaMs, runStorefrontAudit, type AuditRunnerDepend
 import type { StorefrontAudit } from '../types';
 import { buildDebugPackageFiles } from './quality/debug-package';
 import { compareGpcObservations } from './consent/gpc-experiment';
+import { isRequestForPdp } from './tracking/pdp-association';
 
 // Most runner fixtures exercise compiled-production action wiring with a local
 // browser. One focused case switches to direct source provenance to prove the
@@ -32,7 +33,7 @@ vi.mock('./version', async (importOriginal) => {
 
 const resolvedFixtureHost = async () => ({ status: 'resolved' as const, sources: { fixture: 'resolved' as const } });
 
-type FixtureRoute = string | null | { body: string; status: number };
+type FixtureRoute = string | null | { body: string; status: number; headers?: Record<string, string> };
 type FixtureHtml = string | Record<string, FixtureRoute> | ((path: string) => FixtureRoute);
 
 async function fixtureServer(status: number, html: FixtureHtml) {
@@ -41,7 +42,7 @@ async function fixtureServer(status: number, html: FixtureHtml) {
     const route = typeof html === 'function' ? html(path) : typeof html === 'string' ? html : Object.prototype.hasOwnProperty.call(html, path) ? html[path] : html['/'] ?? '';
     if (route === null) return;
     const body = (typeof route === 'string' ? route : route.body).replaceAll('{{fixture_url}}', `http://${request.headers.host}`);
-    response.writeHead(typeof route === 'string' ? status : route.status, { 'content-type': 'text/html; charset=utf-8' });
+    response.writeHead(typeof route === 'string' ? status : route.status, { 'content-type': 'text/html; charset=utf-8', ...(typeof route === 'string' ? {} : route.headers) });
     response.end(body);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -528,13 +529,43 @@ describe('runStorefrontAudit production browser wiring', () => {
     const result = await auditFixture(200, {
       '/': '<a href="/products/widget">Widget</a>',
       '/products/widget': `<form action="/cart/add"><button>Add to cart</button></form>
-        <script>new Image().src='/g/collect?tid=G-TEST&en=view_item&pr1=idwidget~nmWidget&dl='+encodeURIComponent(location.href)</script>`,
+        <script>new Image().src='/g/collect?tid=G-TEST&en=view_item&pr1=idwidget~nmWidget'</script>`,
       '/g/collect': { body: '', status: 204 }
     }, true, ['tracking'], false);
     expect(result).toMatchObject({
       site_ga4_detected: true, site_ga4_collection_hit_detected: true, product_payload_status: 'pass'
     });
-    expect((result.evidence_bundle as { product: { ga4_view_item_hits: unknown[] } }).product.ga4_view_item_hits).toHaveLength(1);
+    const evidence = result.evidence_bundle as { product: { ga4_view_item_hits: Array<{ observed_page_id?: string; navigation_epoch?: number; page_url?: string }>; candidate_outcomes: Array<{ observed_page_id?: string; navigation_epoch?: number; observed_page_url?: string }> } };
+    expect(evidence.product.ga4_view_item_hits).toHaveLength(1);
+    expect(evidence.product.ga4_view_item_hits[0]).toMatchObject({ observed_page_id: expect.stringMatching(/^page_/), navigation_epoch: expect.any(Number) });
+    expect(evidence.product.ga4_view_item_hits[0].page_url).toBeUndefined();
+    expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ observed_page_id: evidence.product.ga4_view_item_hits[0].observed_page_id, navigation_epoch: evidence.product.ga4_view_item_hits[0].navigation_epoch, observed_page_url: expect.stringContaining('/products/widget') })]));
+  }, 35_000);
+
+  it('LN-02 keeps delayed homepage GA4 traffic on the homepage Page during PDP observation', async () => {
+    const result = await auditFixture(200, {
+      '/': `<a href="/products/widget">Widget</a><script>let n=0;const t=setInterval(()=>{if(++n>40){clearInterval(t);return}new Image().src='/g/collect?tid=G-TEST&en=page_view&n='+n},100)</script>`,
+      '/products/widget': '<form action="/cart/add"><button>Add to cart</button></form>',
+      '/g/collect': { body: '', status: 204 }
+    }, true, ['tracking'], false);
+    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ url: string; final_url?: string; observed_page_id?: string; navigation_epoch?: number; observed_page_url?: string }> }; network: { relevant_requests: Array<{ vendor: 'ga4'; kind: 'collection'; collector: 'same_origin'; host: string; path: string; method: string; phase: string; timestamp: number; event?: string; observed_page_id?: string; navigation_epoch?: number; observed_page_url?: string }> } };
+    const candidate = evidence.product.candidate_outcomes.find((item) => item.url.includes('/products/widget'))!;
+    const lateHome = evidence.network.relevant_requests.find((item) => item.phase === 'product_pdp_load' && item.event === 'page_view' && item.observed_page_id !== candidate.observed_page_id);
+    expect(lateHome).toBeDefined();
+    expect(lateHome?.observed_page_url).toMatch(/\/$/);
+    expect(isRequestForPdp(lateHome!, candidate)).toBe(false);
+  }, 35_000);
+
+  it('LN-02 persists final redirected PDP identity and associates its no-dl view_item', async () => {
+    const result = await auditFixture(200, {
+      '/': '<a href="/products/widget">Widget</a>',
+      '/products/widget': { body: '', status: 302, headers: { location: '/products/widget-new' } },
+      '/products/widget-new': `<form action="/cart/add"><button>Add to cart</button></form><script>new Image().src='/g/collect?tid=G-TEST&en=view_item&pr1=idwidget~nmWidget'</script>`,
+      '/g/collect': { body: '', status: 204 }
+    }, true, ['tracking'], false);
+    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ final_url?: string; observed_page_id?: string; navigation_epoch?: number; observed_page_url?: string }>; ga4_view_item_hits: Array<{ observed_page_id?: string; navigation_epoch?: number }> } };
+    expect(result.product_payload_status).toBe('pass');
+    expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ final_url: expect.stringContaining('/products/widget-new'), observed_page_url: expect.stringContaining('/products/widget-new'), observed_page_id: evidence.product.ga4_view_item_hits[0].observed_page_id, navigation_epoch: evidence.product.ga4_view_item_hits[0].navigation_epoch })]));
   }, 35_000);
 
   it('MULTI-PDP-01 retains a later dataLayer event without treating it as collected', async () => {

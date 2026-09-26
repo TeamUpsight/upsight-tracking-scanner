@@ -38,6 +38,8 @@ import { certificationSafeConsentV2RolloutControls, consentV2RolloutControls, le
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
 import { consentObservationFailure } from './consent/observation-stage';
 import { EvidenceCollector } from './evidence/evidence-collector';
+import { PageProvenanceTracker } from './tracking/page-provenance';
+import { isRequestForPdp, type PdpObservation } from './tracking/pdp-association';
 import { isValidStorefrontStatus, resolveAccessDecision, resolveHostnameEvidence, type AccessDecision } from './navigation';
 import { isPublicHostname, isPublicWebUrl, resolvesOnlyToPublicAddresses } from './url-safety';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
@@ -798,9 +800,9 @@ function matchesPdpUrl(pageUrl: string | undefined, candidateUrl: string, finalP
   }
 }
 
-export function isViewItemForPdp(hit: TrackingRequestEvidence, candidateUrl: string, finalPdpUrl = candidateUrl) {
+export function isViewItemForPdp(hit: TrackingRequestEvidence, candidate: PdpObservation) {
   if (hit.vendor !== 'ga4' || hit.kind !== 'collection' || hit.event !== 'view_item' || !hit.has_product) return false;
-  return matchesPdpUrl(hit.page_url, candidateUrl, finalPdpUrl);
+  return isRequestForPdp(hit, candidate);
 }
 
 export function isMetaViewContentForPdp(hit: TrackingRequestEvidence, candidateUrl: string, finalPdpUrl = candidateUrl) {
@@ -1107,9 +1109,10 @@ export async function capturePerformanceTrackingRequests(page: Page, phase: stri
   return recovered;
 }
 
-export async function captureDataLayerViewItems(page: Page, phase: string, evidenceCollector: EvidenceCollector) {
+export async function captureDataLayerViewItems(page: Page, phase: string, evidenceCollector: EvidenceCollector, provenance?: PageProvenanceTracker) {
   const observation = evidenceCollector.bundle.network.observation;
   if (observation) observation.data_layer_capture_attempted = true;
+  const observedPage = provenance?.snapshot(page);
   let entries: unknown[];
   try {
     entries = await page.evaluate(() => {
@@ -1153,7 +1156,7 @@ export async function captureDataLayerViewItems(page: Page, phase: string, evide
   }
   let captured = 0;
   for (const entry of entries) {
-    if (evidenceCollector.captureDataLayerViewItem({ entry, pageUrl: page.url(), phase })) captured += 1;
+    if (evidenceCollector.captureDataLayerViewItem({ entry, pageUrl: page.url(), phase, ...observedPage })) captured += 1;
   }
   if (observation) observation.data_layer_capture_completed = true;
   return captured;
@@ -1265,6 +1268,7 @@ export async function runStorefrontAudit(
   let currentBrowserRoute: 'local' | 'standard' | 'stealth' = 'local';
   let effectiveDomain = normalizedDomain || '';
   const observedContexts = new WeakSet<BrowserContext>();
+  const pageProvenance = new PageProvenanceTracker();
   const securityGuardedContexts = new WeakSet<BrowserContext>();
   const publicHostChecks = new Map<string, Promise<boolean>>();
   let unsafeRequestBlocked = false;
@@ -1579,6 +1583,7 @@ export async function runStorefrontAudit(
   const attachContextObservers = (browserContext: BrowserContext) => {
     if (observedContexts.has(browserContext)) return;
     observedContexts.add(browserContext);
+    pageProvenance.attach(browserContext);
     evidence.network.observation ||= {
       request_listener_active: false, request_capture_completed: false,
       data_layer_capture_attempted: false, data_layer_capture_completed: false,
@@ -1605,7 +1610,8 @@ export async function runStorefrontAudit(
         method: request.method(),
         phase: currentPhase,
         timestamp: Date.now(),
-        source: (request as Request & { serviceWorker?: () => unknown }).serviceWorker?.() ? 'service_worker' : 'page'
+        source: request.serviceWorker() ? 'service_worker' : 'page',
+        ...pageProvenance.forRequest(request)
       });
       if (consentV2Enabled && isSharedPreChoicePhase(currentPhase)) {
         const captured = capturedTracking || captureConsentTrackingRequest({ url: requestUrl, post_data: request.postData(), resource_type: request.resourceType(), method: request.method() });
@@ -2765,6 +2771,8 @@ export async function runStorefrontAudit(
           candidateNavigationElapsedMs = Date.now() - candidateStarted;
           productRuntime.candidate_navigation_ms += candidateNavigationElapsedMs;
           const finalPdpUrl = safeUrl(pdpPage!.url()) || safeUrl(pdpUrl)!;
+          const candidateProvenance = pageProvenance.snapshot(pdpPage!);
+          const pdpObservation: PdpObservation = { url: pdpUrl, final_url: finalPdpUrl, ...candidateProvenance };
           evidence.product.candidate_url = safeUrl(pdpUrl);
           if (!navigationTimedOut) {
             addTrace('pdp_navigation_committed', {
@@ -2867,7 +2875,7 @@ export async function runStorefrontAudit(
             });
           }
           const candidateNetworkViewItemHits = () => evidence.product.ga4_view_item_hits.slice(viewItemStart)
-            .filter((hit) => isViewItemForPdp(hit, pdpUrl, finalPdpUrl));
+            .filter((hit) => isViewItemForPdp(hit, pdpObservation));
           let candidateHits = candidateNetworkViewItemHits();
           const finalPdpUrlValid = Boolean(
             productPatternPdpCandidate(finalPdpUrl, effectiveDomain) || twoLevelPdpCandidate(finalPdpUrl, effectiveDomain)
@@ -2929,7 +2937,7 @@ export async function runStorefrontAudit(
               await wait(100, pdpPage);
               checkProductBudget();
             }
-            const candidateDataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector);
+            const candidateDataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector, pageProvenance);
             if (candidateDataLayerCaptured > 0) {
               addTrace('ga4_data_layer_view_item_captured', { phase: 'product_pdp_load', count: candidateDataLayerCaptured });
               candidateHits = candidateNetworkViewItemHits();
@@ -3013,7 +3021,7 @@ export async function runStorefrontAudit(
           }
           const minimumObservationMs = Date.now() - observationStart;
           pdpOperation = 'pdp_data_layer_capture';
-          const dataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector);
+          const dataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector, pageProvenance);
           if (dataLayerCaptured > 0) addTrace('ga4_data_layer_view_item_captured', { phase: 'product_pdp_load', count: dataLayerCaptured });
           pdpOperation = 'pdp_performance_capture';
           const pdpTimingRecovered = await capturePerformanceTrackingRequests(pdpPage, 'product_pdp_load', evidenceCollector);
@@ -3046,7 +3054,7 @@ export async function runStorefrontAudit(
                 checkProductBudget();
               }
               pdpOperation = 'pdp_data_layer_capture';
-              await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector);
+              await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector, pageProvenance);
               pdpOperation = 'pdp_performance_capture';
               await capturePerformanceTrackingRequests(pdpPage, 'product_pdp_load', evidenceCollector);
               finalViewItems = candidateNetworkViewItemHits();
@@ -3059,6 +3067,7 @@ export async function runStorefrontAudit(
           const candidateOutcome: NonNullable<EvidenceBundle['product']['candidate_outcomes']>[number] = {
             url: finalPdpUrl,
             final_url: finalPdpUrl,
+            ...candidateProvenance,
             rank: candidateIndex + 1,
             score: candidate.score, source: candidate.source, sources: candidate.sources, promoted_from: candidate.promoted_from || null, page_role: assessment.page_role,
             semantic_result: 'VALID_PRODUCT',
@@ -3344,7 +3353,7 @@ export async function runStorefrontAudit(
             if (observed) break;
             await wait(200, freshAccept.page);
           }
-          await captureDataLayerViewItems(freshAccept.page, 'post_accept_comparison', evidenceCollector);
+          await captureDataLayerViewItems(freshAccept.page, 'post_accept_comparison', evidenceCollector, pageProvenance);
           await capturePerformanceTrackingRequests(freshAccept.page, 'post_accept_comparison', evidenceCollector);
           const html = await freshAccept.page.content().catch(() => '');
           await capturePageTrackingInstallations(freshAccept.page, html, 'post_accept_comparison', evidenceCollector);

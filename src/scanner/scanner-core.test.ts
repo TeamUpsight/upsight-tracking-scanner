@@ -19,6 +19,7 @@ import { FinalizeOnce } from './resolver/lifecycle';
 import { resolveConsentStatus, resolveProductPayloadStatus } from './resolver/status-resolver';
 import { classifyCollection, findStrictDuplicates } from './server-side/classify-collection';
 import { parseGA4DataLayerEntry, parseGA4Request } from './tracking/ga4';
+import { isRequestForPdp } from './tracking/pdp-association';
 import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } from './tracking/meta';
 import {
   assessPdpCandidate, botChallengeObservationWindow, classifyBrowserConnectionError, classifyNavigationError, consentChoiceSelectors, isEvidenceBackedExternalRedirect,
@@ -155,7 +156,7 @@ describe('audit module selection', () => {
     tracking.product.pdp_candidates = ['https://tracking-alone.example/products/item'];
     tracking.product.pdp_url = 'https://tracking-alone.example/products/item';
     tracking.product.navigation_succeeded = true;
-    tracking.product.ga4_view_item_hits = [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'analytics.google.com', path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1, event: 'view_item', has_product: true }];
+    tracking.product.ga4_view_item_hits = [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'analytics.google.com', path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1, event: 'view_item', has_product: true, page_url: tracking.product.pdp_url }];
     expect(replayEvidence(tracking).product_payload_status).toBe('pass');
 
     const server = baseEvidence('server-alone.example');
@@ -424,10 +425,10 @@ describe('PDP candidate selection', () => {
       event: 'view_item', measurement_id: 'G-TEST', has_product: true,
       page_url: 'https://example.com/product/model-a'
     } satisfies TrackingRequestEvidence;
-    expect(isViewItemForPdp(hit, 'https://www.example.com/product/model-a')).toBe(true);
-    expect(isViewItemForPdp(hit, 'https://example.com/product/model-b')).toBe(false);
-    expect(isViewItemForPdp({ ...hit, kind: 'data_layer' }, 'https://www.example.com/product/model-a')).toBe(false);
-    expect(isViewItemForPdp({ ...hit, page_url: 'https://example.com/products/model-a' }, 'https://example.com/product/model-a', 'https://example.com/products/model-a')).toBe(true);
+    expect(isViewItemForPdp(hit, { url: 'https://www.example.com/product/model-a' })).toBe(true);
+    expect(isViewItemForPdp(hit, { url: 'https://example.com/product/model-b' })).toBe(false);
+    expect(isViewItemForPdp({ ...hit, kind: 'data_layer' }, { url: 'https://www.example.com/product/model-a' })).toBe(false);
+    expect(isViewItemForPdp({ ...hit, page_url: 'https://example.com/products/model-a' }, { url: 'https://example.com/product/model-a', final_url: 'https://example.com/products/model-a' })).toBe(true);
     expect(pdpReadinessSatisfied(null, false)).toBe(false);
     expect(pdpReadinessSatisfied({ is_product: true }, false)).toBe(true);
     expect(canKeepTimedOutPdp({ navigationTimedOut: true, finalPdpUrlValid: false, assessment: null, hasValidViewItem: true })).toBe(true);
@@ -1375,6 +1376,59 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     expect(replayEvidence(otherPdpViewItem).product_payload_status).toBe('missing_view_item');
   });
 
+  it('LN-02 leaves a delayed homepage collection inconclusive after the PDP phase switch', () => {
+    const evidence = baseEvidence('chronology.example');
+    const url = 'https://chronology.example/products/widget';
+    evidence.selected_modules = ['tracking']; evidence.page.valid = true;
+    evidence.consent.tracking_enablement = 'inconclusive';
+    evidence.product.executed = true; evidence.product.discovery_executed = true;
+    evidence.product.pdp_candidates = [url]; evidence.product.pdp_url = url;
+    evidence.product.navigation_succeeded = true;
+    evidence.product.candidate_outcomes = [{ url, final_url: url, page_role: 'PDP', semantic_result: 'VALID_PRODUCT', navigation_complete: true, observation_complete: true, outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', observed_page_id: 'page_2', navigation_epoch: 1, observed_page_url: url }];
+    evidence.network.relevant_requests = [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'www.google-analytics.com', path: '/g/collect', method: 'GET', phase: 'product_pdp_load', timestamp: 1, event: 'page_view', observed_page_id: 'page_1', navigation_epoch: 1, observed_page_url: 'https://chronology.example/' }];
+    expect(replayEvidence(evidence).product_payload_status).toBe('inconclusive');
+    const legacy = structuredClone(evidence);
+    delete legacy.product.candidate_outcomes![0].observed_page_id;
+    delete legacy.product.candidate_outcomes![0].navigation_epoch;
+    delete legacy.product.candidate_outcomes![0].observed_page_url;
+    legacy.network.relevant_requests = [{ ...legacy.network.relevant_requests[0], observed_page_id: undefined, navigation_epoch: undefined, observed_page_url: undefined }];
+    expect(replayEvidence(legacy).product_payload_status).toBe('inconclusive');
+  });
+
+  it('LN-02 rejects a stale epoch on the same Page and accepts an exact PDP epoch without dl', () => {
+    const evidence = baseEvidence('epoch.example');
+    const url = 'https://epoch.example/products/widget';
+    evidence.selected_modules = ['tracking']; evidence.page.valid = true;
+    evidence.consent.tracking_enablement = 'inconclusive';
+    evidence.product.executed = true; evidence.product.discovery_executed = true;
+    evidence.product.pdp_candidates = [url]; evidence.product.pdp_url = url;
+    evidence.product.navigation_succeeded = true;
+    evidence.product.candidate_outcomes = [{ url, final_url: url, page_role: 'PDP', semantic_result: 'VALID_PRODUCT', navigation_complete: true, observation_complete: true, outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', observed_page_id: 'page_1', navigation_epoch: 2, observed_page_url: url }];
+    const request: TrackingRequestEvidence = { vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'www.google-analytics.com', path: '/g/collect', method: 'GET', phase: 'product_pdp_load', timestamp: 1, event: 'page_view', observed_page_id: 'page_1', navigation_epoch: 1, observed_page_url: 'https://epoch.example/' };
+    evidence.network.relevant_requests = [request];
+    expect(replayEvidence(evidence).product_payload_status).toBe('inconclusive');
+    evidence.network.relevant_requests = [{ ...request, navigation_epoch: 2, observed_page_url: url }];
+    expect(replayEvidence(evidence).product_payload_status).toBe('missing_view_item');
+    const viewItem = { ...request, navigation_epoch: 2, observed_page_url: url, event: 'view_item', has_product: true, product_id: 'widget' };
+    evidence.network.relevant_requests = [viewItem];
+    evidence.product.ga4_view_item_hits = [viewItem];
+    expect(replayEvidence(evidence)).toMatchObject({ product_payload_status: 'pass' });
+  });
+
+  it('LN-02 uses explicit vendor URL only when browser identity is unavailable', () => {
+    const pdp = { url: 'https://example.com/products/widget', final_url: 'https://example.com/products/widget-new', observed_page_id: 'page_2', navigation_epoch: 3, observed_page_url: 'https://example.com/products/widget-new' };
+    const request: TrackingRequestEvidence = { vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'www.google-analytics.com', path: '/g/collect', method: 'GET', phase: 'product_pdp_load', timestamp: 1, event: 'view_item', has_product: true, product_id: 'widget' };
+    expect(isRequestForPdp({ ...request, observed_page_id: 'page_2', navigation_epoch: 3, observed_page_url: pdp.observed_page_url }, pdp)).toBe(true);
+    expect(isRequestForPdp({ ...request, observed_page_id: 'page_2', navigation_epoch: 2 }, pdp)).toBe(false);
+    expect(isRequestForPdp({ ...request, observed_page_id: 'page_1', navigation_epoch: 3 }, pdp)).toBe(false);
+    expect(isRequestForPdp({ ...request, source: 'service_worker', page_url: pdp.final_url }, pdp)).toBe(true);
+    expect(isRequestForPdp({ ...request, source: 'service_worker' }, pdp)).toBe(false);
+    expect(isRequestForPdp({ ...request, observed_page_id: 'page_2', navigation_epoch: 3, page_url: 'https://example.com/' }, pdp)).toBe(false);
+    expect(isRequestForPdp({ ...request, page_url: pdp.url }, pdp)).toBe(false);
+    expect(isRequestForPdp({ ...request, page_url: pdp.final_url }, { url: pdp.url, final_url: pdp.final_url })).toBe(true);
+    expect(isRequestForPdp(request, { url: pdp.final_url })).toBe(false);
+  });
+
   it('builds the complete sanitized debug package manifest', () => {
     const evidence = baseEvidence();
     evidence.runtime.screenshots.push({ name: 'home page.jpg', mime_type: 'image/jpeg', content_base64: 'aGVsbG8=' });
@@ -1465,10 +1519,11 @@ describe('status resolver and consistency', () => {
     evidence.product.pdp_candidates = ['https://example.com/product/model'];
     evidence.product.pdp_url = 'https://example.com/product/model';
     evidence.product.navigation_succeeded = true;
+    evidence.product.candidate_outcomes = [{ url: evidence.product.pdp_url, final_url: evidence.product.pdp_url, page_role: 'PDP', semantic_result: 'VALID_PRODUCT', navigation_complete: true, observation_complete: true, outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', observed_page_id: 'page_2', navigation_epoch: 1, observed_page_url: evidence.product.pdp_url }];
     evidence.product.observation!.minimum_observation_satisfied = true;
     Object.assign(evidence.network.observation!, { request_listener_active: true, request_capture_completed: true, data_layer_capture_completed: true, performance_capture_completed: true });
     const entry = JSON.parse(readFileSync(path.join(process.cwd(), 'tests/fixtures/listenlively-m2-datalayer.json'), 'utf8'));
-    collector.captureDataLayerViewItem({ entry, pageUrl: evidence.product.pdp_url, phase: 'product_pdp_load', timestamp: 1 });
+    collector.captureDataLayerViewItem({ entry, pageUrl: evidence.product.pdp_url, phase: 'product_pdp_load', timestamp: 1, observed_page_id: 'page_2', navigation_epoch: 1, observed_page_url: 'https://example.com/product/model?private=x#detail' });
     const result = replayEvidence(evidence);
     expect(result.product_payload_status).toBe('ga4_not_detected');
     expect(result.site_ga4_detected).toBe(false);
@@ -1476,6 +1531,7 @@ describe('status resolver and consistency', () => {
     expect(result.site_ga4_measurement_ids).toEqual([]);
     expect(result.finding_confidence?.product.evidence).toEqual(expect.arrayContaining(['DATALAYER_VIEW_ITEM_OBSERVED', 'PRODUCT_EVENT_MODEL_OBSERVED']));
     expect(result.evidence_bundle?.product.data_layer_view_item_hits).toHaveLength(1);
+    expect(result.evidence_bundle?.product.data_layer_view_item_hits[0]).toMatchObject({ observed_page_id: 'page_2', navigation_epoch: 1, observed_page_url: 'https://example.com/product/model' });
     expect(result.evidence_bundle?.decision_summary?.find((item) => item.decision_name === 'product_payload')?.evidence_codes).toContain('DATALAYER_VIEW_ITEM_OBSERVED');
   });
 
@@ -1706,7 +1762,7 @@ describe('decision hardening regression pack', () => {
       { url: evidence.product.pdp_candidates[0], outcome: 'INVALID_PRODUCT', semantic_result: 'INVALID_PRODUCT', observation_complete: true },
       { url: evidence.product.pdp_url, page_role: 'PDP', outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM', semantic_result: 'VALID_PRODUCT', navigation_complete: true, observation_complete: true }
     ];
-    evidence.product.ga4_view_item_hits = [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'analytics.google.com', path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1, event: 'view_item', has_product: true, product_id: 'sku' }];
+    evidence.product.ga4_view_item_hits = [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'analytics.google.com', path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1, event: 'view_item', has_product: true, product_id: 'sku', page_url: evidence.product.pdp_url }];
     const result = replayEvidence(evidence);
     expect(result.product_payload_status).toBe('pass');
     expect(result.evidence_bundle?.decision_summary?.find((item) => item.decision_name === 'product_payload')).toMatchObject({ applicable: true, observation_complete: true });
