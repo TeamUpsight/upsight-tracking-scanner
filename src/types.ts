@@ -95,7 +95,7 @@ export interface FindingConfidence {
 export interface TrackingRequestEvidence {
   vendor: 'ga4' | 'meta' | 'google_ads' | 'tiktok' | 'snapchat' | 'pinterest' | 'x' | 'floodlight' | 'unknown';
   kind: 'script' | 'collection' | 'data_layer';
-  collector: 'third_party' | 'first_party' | 'same_origin';
+  collector: 'third_party' | 'first_party' | 'same_origin' | 'unclassifiable';
   host: string;
   path: string;
   method: string;
@@ -126,6 +126,23 @@ export interface TrackingRequestEvidence {
   source?: 'page' | 'service_worker' | 'performance_timing' | 'data_layer' | 'unknown';
   /** Bounded semantic Consent Mode interpretation; never stores raw gcs/gcd. */
   consent_measurement?: 'full_measurement' | 'limited_measurement' | 'unknown';
+}
+
+/** Bounded, value-free behavioral collection evidence for the Server-side resolver. */
+export interface ServerMeasurementCandidate {
+  host: string;
+  path: string;
+  origin: string;
+  method: string;
+  relationship: TrackingRequestEvidence['collector'];
+  strength: 'strong' | 'medium';
+  provider_hint: 'unknown';
+  semantic_groups: Array<'event' | 'identity' | 'page' | 'commerce' | 'schema'>;
+  evidence_codes: string[];
+  phase: string;
+  timestamp: number;
+  observed_page_id?: string;
+  navigation_epoch?: number;
 }
 
 export interface ScreenshotEvidence {
@@ -408,6 +425,8 @@ export interface EvidenceBundle {
   };
   server_side: {
     executed: boolean;
+    measurement_candidates?: ServerMeasurementCandidate[];
+    candidate_truncated?: boolean;
     first_party_collection_count: number;
     same_origin_collection_count: number;
     third_party_collection_count: number;

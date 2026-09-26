@@ -12,21 +12,8 @@ import { RULE_PACK_VERSION } from '../version';
 import { buildMetadata } from '../../build-metadata';
 import { safeObservedPageUrl } from '../tracking/page-provenance';
 import { CorrelationTokens, normalizeRequestCorrelation } from './correlation-tokens';
-
-const KNOWN_TRACKING_HOSTS = [
-  'google-analytics.com',
-  'analytics.google.com',
-  'googletagmanager.com',
-  'doubleclick.net',
-  'googleadservices.com',
-  'facebook.com',
-  'connect.facebook.net'
-];
-
-function isKnownTrackingEndpoint(host: string, path: string) {
-  if (KNOWN_TRACKING_HOSTS.some((known) => host === known || host.endsWith(`.${known}`))) return true;
-  return (host === 'google.com' || host === 'www.google.com') && path.replace(/\/+$/, '') === '/ccm/collect';
-}
+import { classifyCollectorRelationship } from '../server-side/collector-relationship';
+import { detectGenericMeasurementCandidate } from '../server-side/measurement-candidate';
 
 function safeHostPath(raw: string) {
   try {
@@ -47,23 +34,6 @@ function safeAccessUrl(raw: string | null | undefined) {
   }
 }
 
-function baseDomain(host: string) {
-  return host.toLowerCase().replace(/^www\./, '');
-}
-
-function collectorFor(host: string, domain: string): TrackingRequestEvidence['collector'] {
-  const normalizedHost = baseDomain(host);
-  const normalizedDomain = baseDomain(domain);
-  if (normalizedHost === normalizedDomain) return 'same_origin';
-  if (normalizedHost.endsWith(`.${normalizedDomain}`)) return 'first_party';
-  return 'third_party';
-}
-
-function looksLikeUnknownCollector(path: string, body: string) {
-  return /\/(g\/collect|collect|events?|metrics|measure|tr)\/?$/i.test(path) &&
-    /(?:^|[?&])(tid=G-|en=|ev=|event=|id=\d+)/i.test(body);
-}
-
 interface CaptureRequestInput {
   url: string;
   body?: string;
@@ -78,7 +48,6 @@ interface CaptureRequestInput {
 
 export class EvidenceCollector {
   readonly bundle: EvidenceBundle;
-  private collectionDomain: string;
   private readonly maxRelevantRequests: number;
   private readonly maxResponses: number;
   private readonly correlationTokens = new CorrelationTokens();
@@ -94,7 +63,6 @@ export class EvidenceCollector {
     const mode = input.mode || 'normal';
     this.maxRelevantRequests = mode === 'diagnostic' ? 500 : 200;
     this.maxResponses = mode === 'diagnostic' ? 100 : 30;
-    this.collectionDomain = input.domain;
     this.bundle = {
       audit_id: String(input.auditId),
       ...buildMetadata,
@@ -208,6 +176,8 @@ export class EvidenceCollector {
       },
       server_side: {
         executed: false,
+        measurement_candidates: [],
+        candidate_truncated: false,
         first_party_collection_count: 0,
         same_origin_collection_count: 0,
         third_party_collection_count: 0,
@@ -276,7 +246,9 @@ export class EvidenceCollector {
   captureRequests(input: CaptureRequestInput): TrackingRequestEvidence[] {
     this.bundle.network.total_requests += 1;
     const { host, path } = safeHostPath(input.url);
-    const collector = collectorFor(host, this.collectionDomain);
+    const observedPageUrl = input.observed_page_url || (input.source !== 'service_worker' && this.bundle.page.valid === true
+      ? this.bundle.page.final_url : null);
+    const collector = classifyCollectorRelationship(input.url, observedPageUrl);
     const common = {
       host,
       path,
@@ -326,11 +298,22 @@ export class EvidenceCollector {
     }
     if (captured.length) return captured;
 
-    if (!isKnownTrackingEndpoint(host, path) && looksLikeUnknownCollector(path, `${input.url}?${input.body || ''}`)) {
-      const key = `${host}${path}`;
-      if (!this.bundle.network.novel_endpoints.some((endpoint) => `${endpoint.host}${endpoint.path}` === key) &&
-        this.bundle.network.novel_endpoints.length < 20) {
-        this.bundle.network.novel_endpoints.push({ host, path });
+    if (this.bundle.selected_modules === undefined || this.bundle.selected_modules.includes('server_side')) {
+      const candidate = detectGenericMeasurementCandidate({
+        url: input.url, body: input.body, method: input.method, relationship: collector,
+        phase: input.phase, timestamp: common.timestamp,
+        observed_page_id: input.observed_page_id, navigation_epoch: input.navigation_epoch
+      });
+      if (candidate) {
+        const candidates = this.bundle.server_side.measurement_candidates ||= [];
+        const limit = this.bundle.mode === 'diagnostic' ? 100 : 50;
+        if (candidates.length < limit) candidates.push(candidate);
+        else this.bundle.server_side.candidate_truncated = true;
+        const key = `${candidate.host}${candidate.path}`;
+        if (!this.bundle.network.novel_endpoints.some((endpoint) => `${endpoint.host}${endpoint.path}` === key) &&
+          this.bundle.network.novel_endpoints.length < 20) {
+          this.bundle.network.novel_endpoints.push({ host: candidate.host, path: candidate.path });
+        }
       }
     }
     return [];
@@ -351,7 +334,7 @@ export class EvidenceCollector {
     const evidence: TrackingRequestEvidence = {
       vendor: 'ga4',
       kind: 'data_layer',
-      collector: collectorFor(host, this.collectionDomain),
+      collector: classifyCollectorRelationship(input.pageUrl, input.observed_page_url || input.pageUrl),
       host,
       path,
       method: 'PUSH',
@@ -467,13 +450,7 @@ export class EvidenceCollector {
   }
 
   setObservedDomain(domain: string) {
-    const normalized = domain.toLowerCase().replace(/^www\./, '');
-    if (!normalized) return;
-    this.collectionDomain = normalized;
     this.bundle.page.observed_domain = domain.toLowerCase();
-    for (const request of this.bundle.network.relevant_requests) {
-      request.collector = collectorFor(request.host, normalized);
-    }
   }
 
   addScreenshot(screenshot: ScreenshotEvidence) {

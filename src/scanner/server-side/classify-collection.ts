@@ -1,5 +1,6 @@
-import type { CollectionType, ServerSideStatus, TrackingRequestEvidence } from '../../types';
+import type { CollectionType, ServerMeasurementCandidate, ServerSideStatus, TrackingRequestEvidence } from '../../types';
 import { STRICT_DUPLICATE_WINDOW_MS } from '../version';
+import { isFirstPartyRelationship } from './collector-relationship';
 
 export interface ServerSideClassification {
   collection_type: CollectionType;
@@ -33,7 +34,8 @@ function strictMatch(a: TrackingRequestEvidence, b: TrackingRequestEvidence) {
   const aId = eventId(a);
   const bId = eventId(b);
   if (!aId || aId !== bId) return false;
-  if ((a.collector === 'third_party') === (b.collector === 'third_party')) return false;
+  if (!(a.collector === 'third_party' && isFirstPartyRelationship(b.collector)) &&
+      !(b.collector === 'third_party' && isFirstPartyRelationship(a.collector))) return false;
   if (Math.abs(a.timestamp - b.timestamp) > STRICT_DUPLICATE_WINDOW_MS) return false;
   const aPage = normalizedPage(a.page_url);
   const bPage = normalizedPage(b.page_url);
@@ -67,6 +69,8 @@ export function classifyCollection(input: {
   executed: boolean;
   page_valid: boolean | null;
   requests: TrackingRequestEvidence[];
+  measurement_candidates?: ServerMeasurementCandidate[];
+  candidate_truncated?: boolean;
   collector_cookie_detected?: boolean;
   collector_cookie_persisted?: boolean;
   /** Absence requires an explicitly completed passive request observation. */
@@ -88,45 +92,83 @@ export function classifyCollection(input: {
   }
 
   const collection = input.requests.filter((request) => request.kind === 'collection' && (request.vendor === 'ga4' || request.vendor === 'meta'));
-  const firstParty = collection.filter((request) => request.collector === 'first_party');
-  const sameOrigin = collection.filter((request) => request.collector === 'same_origin');
-  const thirdParty = collection.filter((request) => request.collector === 'third_party');
-  const firstPartyTotal = firstParty.length + sameOrigin.length;
-  const duplicatePairs = firstPartyTotal > 0 ? findStrictDuplicates(collection) : [];
+  const knownFirstParty = collection.filter((request) => request.collector === 'first_party');
+  const knownSameOrigin = collection.filter((request) => request.collector === 'same_origin');
+  const knownThirdParty = collection.filter((request) => request.collector === 'third_party');
+  const knownUnclassifiable = collection.filter((request) => request.collector === 'unclassifiable');
+  // Repeated medium summaries corroborate only within one origin/path family,
+  // with overlapping behavioral dimensions. One family is one collection hit.
+  const candidates = input.measurement_candidates || [];
+  const promoted = candidates.filter((candidate) => candidate.strength === 'strong');
+  const mediumByEndpoint = new Map<string, ServerMeasurementCandidate[]>();
+  for (const candidate of candidates) {
+    if (candidate.strength !== 'medium') continue;
+    const key = `${candidate.origin}|${candidate.path}|${candidate.relationship}`;
+    const family = mediumByEndpoint.get(key) || [];
+    family.push(candidate);
+    mediumByEndpoint.set(key, family);
+  }
+  let ambiguousMedium = false;
+  for (const family of mediumByEndpoint.values()) {
+    const first = family[0];
+    const corroborated = family.length >= 2 && family.slice(1).some((next) =>
+      first.semantic_groups.includes('event') && next.semantic_groups.includes('event') &&
+      first.semantic_groups.filter((group) => next.semantic_groups.includes(group)).length >= 2);
+    if (corroborated) promoted.push(first);
+    else ambiguousMedium = true;
+  }
+  const firstParty = knownFirstParty.length + promoted.filter((candidate) => candidate.relationship === 'first_party').length;
+  const sameOrigin = knownSameOrigin.length + promoted.filter((candidate) => candidate.relationship === 'same_origin').length;
+  const thirdParty = knownThirdParty.length + promoted.filter((candidate) => candidate.relationship === 'third_party').length;
+  const unclassifiable = knownUnclassifiable.length + promoted.filter((candidate) => candidate.relationship === 'unclassifiable').length;
+  const firstPartyTotal = firstParty + sameOrigin;
+  const knownFirstPartyTotal = knownFirstParty.length + knownSameOrigin.length;
+  const duplicatePairs = knownFirstPartyTotal > 0 ? findStrictDuplicates(collection) : [];
 
   if (firstPartyTotal === 0 && input.observation_complete !== true) {
     return {
       collection_type: 'inconclusive', status: 'inconclusive',
-      first_party_collection_count: 0, same_origin_collection_count: 0, third_party_collection_count: thirdParty.length,
+      first_party_collection_count: 0, same_origin_collection_count: 0, third_party_collection_count: thirdParty,
       strict_duplicate_count: 0, duplicate_pairs: [], reason_code: 'SERVER_OBSERVATION_INCOMPLETE'
     };
   }
 
   if (firstPartyTotal === 0) {
+    if (unclassifiable > 0 || ambiguousMedium || input.candidate_truncated) {
+      return {
+        collection_type: 'inconclusive', status: 'inconclusive',
+        first_party_collection_count: 0, same_origin_collection_count: 0, third_party_collection_count: thirdParty,
+        strict_duplicate_count: 0, duplicate_pairs: [],
+        reason_code: unclassifiable > 0 ? 'SERVER_COLLECTOR_RELATIONSHIP_UNCLASSIFIABLE'
+          : ambiguousMedium ? 'SERVER_MEASUREMENT_CANDIDATE_AMBIGUOUS' : 'SERVER_MEASUREMENT_CANDIDATES_TRUNCATED'
+      };
+    }
     return {
-      collection_type: thirdParty.length > 0 ? 'third_party' : 'not_detected',
+      collection_type: thirdParty > 0 ? 'third_party' : 'not_detected',
       status: 'not_detected',
       first_party_collection_count: 0,
       same_origin_collection_count: 0,
-      third_party_collection_count: thirdParty.length,
+      third_party_collection_count: thirdParty,
       strict_duplicate_count: 0,
       duplicate_pairs: [],
-      reason_code: thirdParty.length > 0 ? 'SERVER_THIRD_PARTY_ONLY' : 'SERVER_NOT_DETECTED'
+      reason_code: thirdParty > 0 ? 'SERVER_THIRD_PARTY_ONLY' : 'SERVER_NOT_DETECTED'
     };
   }
 
-  const collectionType: CollectionType = thirdParty.length > 0
+  const collectionType: CollectionType = thirdParty > 0
     ? 'mixed'
-    : sameOrigin.length > 0 && firstParty.length === 0 ? 'same_origin' : 'first_party';
+    : sameOrigin > 0 && firstParty === 0 ? 'same_origin' : 'first_party';
   let status: ServerSideStatus = 'first_party_collection_detected';
   let reasonCode = collectionType === 'mixed' ? 'SERVER_MIXED_NO_DUPLICATE' : 'SERVER_FP_COLLECTOR';
-  if (duplicatePairs.length > 0) {
+  if (knownFirstPartyTotal === 0) {
+    reasonCode = 'SERVER_GENERIC_MEASUREMENT_CANDIDATE';
+  } else if (duplicatePairs.length > 0) {
     status = 'partial_or_misconfigured';
     reasonCode = 'SERVER_STRICT_DUPLICATE';
   } else if (input.collector_cookie_persisted) {
     status = 'strong_server_side_evidence';
     reasonCode = 'SERVER_FP_COOKIE_PERSISTED';
-  } else if (input.collector_cookie_detected || firstPartyTotal >= 2) {
+  } else if (input.collector_cookie_detected || knownFirstPartyTotal >= 2) {
     status = 'likely_server_side';
     reasonCode = 'SERVER_FP_COLLECTOR';
   }
@@ -134,9 +176,9 @@ export function classifyCollection(input: {
   return {
     collection_type: collectionType,
     status,
-    first_party_collection_count: firstParty.length,
-    same_origin_collection_count: sameOrigin.length,
-    third_party_collection_count: thirdParty.length,
+    first_party_collection_count: firstParty,
+    same_origin_collection_count: sameOrigin,
+    third_party_collection_count: thirdParty,
     strict_duplicate_count: duplicatePairs.length,
     duplicate_pairs: duplicatePairs,
     reason_code: reasonCode

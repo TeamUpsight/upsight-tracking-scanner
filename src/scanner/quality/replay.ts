@@ -221,6 +221,8 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     executed: evidence.server_side.executed,
     page_valid: evidence.page.valid,
     requests,
+    measurement_candidates: evidence.server_side.measurement_candidates,
+    candidate_truncated: evidence.server_side.candidate_truncated,
     collector_cookie_detected: evidence.server_side.collector_cookie_names.length > 0,
     collector_cookie_persisted: evidence.server_side.collector_cookie_persisted,
     observation_complete: evidence.server_side.passive_classification_completed === true && requestObservationComplete

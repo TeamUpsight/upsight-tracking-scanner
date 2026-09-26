@@ -3317,7 +3317,8 @@ export async function runStorefrontAudit(
       viewItemHits: [...evidence.product.ga4_view_item_hits, ...(evidence.product.data_layer_view_item_hits || [])],
       consentMode: evidence.runtime.consent_v2?.consent_mode_classification,
       limitedMeasurementObserved: evidence.network.observation?.limited_measurement_observed,
-      firstPartyCollectionObserved: evidence.network.relevant_requests.some((request) => request.kind === 'collection' && request.collector !== 'third_party'),
+      firstPartyCollectionObserved: evidence.network.relevant_requests.some((request) => request.kind === 'collection' &&
+        (request.collector === 'first_party' || request.collector === 'same_origin')),
       productObservationIncomplete: evidence.product.observation?.minimum_observation_satisfied === false
     }) : null;
     if (buildMetadata.certification_eligible && evidence.runtime.proxy_country_verified === true && acceptReason && runtimeBudget.canRunOptional(3_000) &&
@@ -3383,7 +3384,7 @@ export async function runStorefrontAudit(
     } else {
       evidence.server_side.executed = true;
       const firstPartyRequests = evidence.network.relevant_requests.filter((request) =>
-        request.kind === 'collection' && request.collector !== 'third_party'
+        request.kind === 'collection' && (request.collector === 'first_party' || request.collector === 'same_origin')
       );
       evidence.server_side.collector_cookie_names = [...collectorCookieNames];
       if (firstPartyRequests.length > 0 && collectorCookieNames.size > 0 && runtimeBudget.canRunOptional(4_000)) {
@@ -3407,6 +3408,8 @@ export async function runStorefrontAudit(
         executed: true,
         page_valid: evidence.page.valid,
         requests: serverRequests,
+        measurement_candidates: evidence.server_side.measurement_candidates,
+        candidate_truncated: evidence.server_side.candidate_truncated,
         collector_cookie_detected: collectorCookieNames.size > 0,
         collector_cookie_persisted: evidence.server_side.collector_cookie_persisted,
         observation_complete: evidence.network.observation?.request_listener_active === true &&
