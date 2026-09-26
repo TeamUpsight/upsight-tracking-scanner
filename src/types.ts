@@ -301,7 +301,7 @@ export interface EvidenceBundle {
     }>;
     response_statuses: Array<{ host: string; path: string; status: number; phase: string }>;
     novel_endpoints: Array<{ host: string; path: string }>;
-    /** Privacy-safe capture health; absence decisions require these channels. */
+    /** Privacy-safe capture health; Server absence uses the request channel only. */
     observation?: {
       request_listener_active: boolean;
       request_capture_completed: boolean;
@@ -431,6 +431,7 @@ export interface EvidenceBundle {
     same_origin_collection_count: number;
     third_party_collection_count: number;
     collector_cookie_names: string[];
+    /** Legacy diagnostic fields retained for stored bundle compatibility; Server no longer tests persistence. */
     collector_cookie_persistence_checked: boolean;
     collector_cookie_persisted: boolean;
     strict_duplicate_count: number;

@@ -883,6 +883,26 @@ describe('runStorefrontAudit production browser wiring', () => {
     ]));
   }, 35_000);
 
+  it('LN-05 uses a first-party response cookie without a Server-specific reload', async () => {
+    let homepageLoads = 0;
+    const result = await auditFixture(200, (path) => {
+      if (path === '/') {
+        homepageLoads += 1;
+        return `<title>Storefront</title><main>Products</main><script>new Image().src='/g/collect?v=2&tid=G-TEST&en=page_view';</script>`;
+      }
+      if (path === '/g/collect') return { body: '', status: 200, headers: { 'set-cookie': 'collector_id=opaque; Path=/' } };
+      return '';
+    }, true, ['server_side']);
+    const bundle = result.evidence_bundle as StorefrontAudit['evidence_bundle'];
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    expect(result.server_side_status).toBe('first_party_collection_detected');
+    expect(bundle?.server_side.collector_cookie_names).toContain('collector_id');
+    expect(bundle?.server_side.collector_cookie_persistence_checked).toBe(false);
+    expect(bundle?.server_side.collector_cookie_persisted).toBe(false);
+    expect(trace.some((entry) => entry.step.includes('server_cookie_persistence_reload'))).toBe(false);
+    expect(homepageLoads).toBe(1);
+  }, 35_000);
+
   it('ACCESS-RECOVERY-01 clears the active challenge state after a verified storefront recovery', async () => {
     let homepageLoads = 0;
     const result = await auditFixture(200, (path) => {

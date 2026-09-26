@@ -1,5 +1,5 @@
 export const SCANNER_VERSION = '2.1.0';
-export const RULE_PACK_VERSION = '2026.09.26.4';
+export const RULE_PACK_VERSION = '2026.09.26.5';
 export const PDP_POST_LOAD_OBSERVATION_MS = 12000;
 export const PDP_MIN_TRACKING_OBSERVATION_MS = 5000;
 export const PDP_NAVIGATION_ATTEMPT_LIMIT = 6;

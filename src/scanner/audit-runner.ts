@@ -68,7 +68,8 @@ import { replayEvidence } from './quality/replay';
 import { sanitizeValue } from './quality/sanitize';
 import { buildObservabilityConsistency } from './quality/observability';
 import { FinalizeOnce } from './resolver/lifecycle';
-import { classifyCollection } from './server-side/classify-collection';
+import { classifyCollection, serverRequestObservationComplete } from './server-side/classify-collection';
+import { classifyCollectorRelationship, isFirstPartyRelationship } from './server-side/collector-relationship';
 import { parseGA4Request } from './tracking/ga4';
 import { hasMetaBootstrapInText, parseMetaPixelIdsFromText, parseMetaRequest } from './tracking/meta';
 import { PDP_MIN_TRACKING_OBSERVATION_MS, PDP_NAVIGATION_ATTEMPT_LIMIT, PDP_POST_LOAD_OBSERVATION_MS } from './version';
@@ -1649,10 +1650,9 @@ export async function runStorefrontAudit(
         const request = response.request();
         const parsed = parseGA4Request(response.url(), request.postData() || '') || parseMetaRequest(response.url(), request.postData() || '');
         if (!parsed || parsed.kind !== 'collection') return;
-        const host = new URL(response.url()).hostname.toLowerCase();
-        const domain = effectiveDomain;
-        const firstParty = host === domain || host === `www.${domain}` || host.endsWith(`.${domain}`);
-        if (!firstParty) return;
+        const observedPageUrl = pageProvenance.forRequest(request).observed_page_url ||
+          (evidence.page.valid === true ? evidence.page.final_url : null);
+        if (!isFirstPartyRelationship(classifyCollectorRelationship(response.url(), observedPageUrl))) return;
         const headers = await response.allHeaders();
         const setCookie = headers['set-cookie'] || '';
         for (const candidate of setCookie.split(/\r?\n|,(?=[^;,]+=)/)) {
@@ -3383,39 +3383,15 @@ export async function runStorefrontAudit(
       addTrace('server_side_module_skipped');
     } else {
       evidence.server_side.executed = true;
-      const firstPartyRequests = evidence.network.relevant_requests.filter((request) =>
-        request.kind === 'collection' && (request.collector === 'first_party' || request.collector === 'same_origin')
-      );
       evidence.server_side.collector_cookie_names = [...collectorCookieNames];
-      if (firstPartyRequests.length > 0 && collectorCookieNames.size > 0 && runtimeBudget.canRunOptional(4_000)) {
-        evidence.server_side.collector_cookie_persistence_checked = true;
-        currentPhase = 'server_cookie_persistence_reload';
-        try {
-          await homepage!.reload({ waitUntil: 'commit', timeout: 12_000 });
-          await waitForDomContentSoft(homepage!, 'server_cookie_persistence_reload', 8_000);
-          await wait(1_000, homepage);
-          const cookies = await context!.cookies();
-          evidence.server_side.collector_cookie_persisted = cookies.some((cookie) => collectorCookieNames.has(cookie.name));
-        } catch {
-          evidence.server_side.collector_cookie_persisted = false;
-        }
-      } else {
-        evidence.server_side.persistence_not_tested_budget = firstPartyRequests.length > 0 && collectorCookieNames.size > 0;
-        addTrace('collector_cookie_check_skipped', { reason: evidence.server_side.persistence_not_tested_budget ? 'Reserved runtime budget' : 'No first-party collector response cookie to verify' });
-      }
-      const serverRequests = evidence.network.relevant_requests.filter((request) => request.phase !== 'server_cookie_persistence_reload');
       const classification = classifyCollection({
         executed: true,
         page_valid: evidence.page.valid,
-        requests: serverRequests,
+        requests: evidence.network.relevant_requests,
         measurement_candidates: evidence.server_side.measurement_candidates,
         candidate_truncated: evidence.server_side.candidate_truncated,
-        collector_cookie_detected: collectorCookieNames.size > 0,
-        collector_cookie_persisted: evidence.server_side.collector_cookie_persisted,
-        observation_complete: evidence.network.observation?.request_listener_active === true &&
-          evidence.network.observation?.request_capture_completed === true &&
-          evidence.network.observation?.data_layer_capture_completed === true &&
-          evidence.network.observation?.performance_capture_completed === true
+        request_evidence_truncated: evidence.network.relevant_requests_truncated,
+        observation_complete: serverRequestObservationComplete(evidence.network.observation)
       });
       evidence.server_side.passive_classification_completed = true;
       evidence.server_side.first_party_collection_count = classification.first_party_collection_count;

@@ -1,7 +1,7 @@
 import { reconcileConsentMeasurement } from '../consent/tracking-consistency';
 import type { CmpProvider, CmsPlatform, EvidenceBundle, StorefrontAudit } from '../../types';
 import { detectCMP } from '../consent/detect-cmp';
-import { classifyCollection } from '../server-side/classify-collection';
+import { classifyCollection, serverRequestObservationComplete } from '../server-side/classify-collection';
 import { resolveConsentStatus, resolveOverallStatus, resolveProductPayloadStatus } from '../resolver/status-resolver';
 import { accessEvidenceViolations, enforceConsistency } from './consistency';
 import { calculateQaPriority, generateFailureFingerprints } from './fingerprints';
@@ -94,8 +94,7 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
   const trackingSelected = selected_modules.includes('tracking');
   const serverSelected = selected_modules.includes('server_side');
   const requests = evidence.network.relevant_requests;
-  const requestObservationComplete = evidence.network.observation?.request_listener_active === true &&
-    evidence.network.observation?.request_capture_completed === true;
+  const requestObservationComplete = serverRequestObservationComplete(evidence.network.observation);
   const networkObservationComplete = requestObservationComplete &&
     evidence.network.observation?.request_capture_completed === true &&
     evidence.network.observation?.data_layer_capture_completed === true &&
@@ -223,10 +222,11 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     requests,
     measurement_candidates: evidence.server_side.measurement_candidates,
     candidate_truncated: evidence.server_side.candidate_truncated,
+    request_evidence_truncated: evidence.network.relevant_requests_truncated,
     collector_cookie_detected: evidence.server_side.collector_cookie_names.length > 0,
     collector_cookie_persisted: evidence.server_side.collector_cookie_persisted,
     observation_complete: evidence.server_side.passive_classification_completed === true && requestObservationComplete
-  }) : { status: 'not_tested' as const, collection_type: 'not_tested' as const, reason_code: 'SERVER_NOT_TESTED' };
+  }) : { status: 'not_tested' as const, collection_type: 'not_tested' as const, reason_code: 'SERVER_NOT_TESTED', evidence_codes: [] };
   const base: Partial<StorefrontAudit> = {
     audit_id: evidence.audit_id,
     domain: evidence.domain,
@@ -265,7 +265,7 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
         evidence: metaCollections.length > 0 ? ['network_hit'] : meta.length > 0 ? ['script'] : metaInstallationSignals.map((signal) => signal.source),
         reason_code: evidence.page.valid !== true || !trackingEnablementValid ? 'META_NOT_TESTED' : metaCollections.length > 0 ? 'META_COLLECTION_DETECTED' : metaInstalled ? 'META_SCRIPT_ONLY' : trackingObservationEligible ? 'META_NOT_DETECTED' : 'META_OBSERVATION_INCOMPLETE'
       },
-      server_side: { status: server.status, confidence: server.status === 'strong_server_side_evidence' ? 'high' : server.status === 'inconclusive' ? 'low' : 'medium', evidence: [server.reason_code], reason_code: server.reason_code }
+      server_side: { status: server.status, confidence: server.status === 'first_party_collection_detected' ? 'high' : server.status === 'inconclusive' ? 'low' : 'medium', evidence: server.evidence_codes, reason_code: server.reason_code }
     },
     reason_codes: [consentSelected ? cmp.reason_code : null, consentSelected ? consent.reason_code : null, trackingSelected ? product.reason_code : null, serverSelected ? server.reason_code : null].filter(Boolean) as string[]
   };

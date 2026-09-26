@@ -1,5 +1,6 @@
 import type { EvidenceBundle, StorefrontAudit } from '../../types';
 import { includesAuditModule } from '../../audit-modules';
+import { serverRequestObservationComplete } from '../server-side/classify-collection';
 
 function normalizedUrl(value: string | null) {
   try {
@@ -40,8 +41,7 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
   const corrected = { ...audit };
   const violations: string[] = accessEvidenceViolations(evidence);
   let priority = 0;
-  const requestObservationComplete = evidence.network.observation?.request_listener_active === true &&
-    evidence.network.observation?.request_capture_completed === true;
+  const requestObservationComplete = serverRequestObservationComplete(evidence.network.observation);
   const networkObservationComplete = requestObservationComplete &&
     evidence.network.observation?.request_capture_completed === true &&
     evidence.network.observation?.data_layer_capture_completed === true &&
@@ -80,7 +80,8 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
   }
 
   if (includesAuditModule(evidence.selected_modules, 'server_side') && corrected.server_side_status === 'not_detected' &&
-    !(evidence.server_side.passive_classification_completed === true && requestObservationComplete)) {
+    !(evidence.server_side.passive_classification_completed === true && requestObservationComplete &&
+      evidence.network.relevant_requests_truncated !== true && evidence.server_side.candidate_truncated !== true)) {
     corrected.server_side_status = 'inconclusive';
     corrected.ss_collection_type = 'inconclusive';
     confidence.server_side = { ...(confidence.server_side || { confidence: 'low', evidence: [] }), status: 'inconclusive', confidence: 'low', reason_code: 'SERVER_OBSERVATION_INCOMPLETE' };
