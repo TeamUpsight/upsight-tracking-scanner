@@ -6,11 +6,12 @@ import type {
   ScreenshotEvidence,
   TrackingRequestEvidence
 } from '../../types';
-import { parseGA4DataLayerEntry, parseGA4Request, toGA4Evidence } from '../tracking/ga4';
+import { isGA4BatchTruncated, parseGA4DataLayerEntry, parseGA4Requests, toGA4Evidence } from '../tracking/ga4';
 import { parseMetaRequest, toMetaEvidence } from '../tracking/meta';
 import { RULE_PACK_VERSION } from '../version';
 import { buildMetadata } from '../../build-metadata';
 import { safeObservedPageUrl } from '../tracking/page-provenance';
+import { CorrelationTokens, normalizeRequestCorrelation } from './correlation-tokens';
 
 const KNOWN_TRACKING_HOSTS = [
   'google-analytics.com',
@@ -63,11 +64,24 @@ function looksLikeUnknownCollector(path: string, body: string) {
     /(?:^|[?&])(tid=G-|en=|ev=|event=|id=\d+)/i.test(body);
 }
 
+interface CaptureRequestInput {
+  url: string;
+  body?: string;
+  method?: string;
+  phase: string;
+  timestamp?: number;
+  source?: TrackingRequestEvidence['source'];
+  observed_page_id?: string;
+  observed_page_url?: string;
+  navigation_epoch?: number;
+}
+
 export class EvidenceCollector {
   readonly bundle: EvidenceBundle;
   private collectionDomain: string;
   private readonly maxRelevantRequests: number;
   private readonly maxResponses: number;
+  private readonly correlationTokens = new CorrelationTokens();
 
   constructor(input: {
     auditId: string | number;
@@ -254,17 +268,12 @@ export class EvidenceCollector {
     };
   }
 
-  captureRequest(input: {
-    url: string;
-    body?: string;
-    method?: string;
-    phase: string;
-    timestamp?: number;
-    source?: TrackingRequestEvidence['source'];
-    observed_page_id?: string;
-    observed_page_url?: string;
-    navigation_epoch?: number;
-  }): TrackingRequestEvidence | null {
+  captureRequest(input: CaptureRequestInput): TrackingRequestEvidence | null {
+    return this.captureRequests(input)[0] || null;
+  }
+
+  /** One physical request can contain several bounded logical GA4 events. */
+  captureRequests(input: CaptureRequestInput): TrackingRequestEvidence[] {
     this.bundle.network.total_requests += 1;
     const { host, path } = safeHostPath(input.url);
     const collector = collectorFor(host, this.collectionDomain);
@@ -277,28 +286,45 @@ export class EvidenceCollector {
       collector,
       source: input.source || 'page'
     };
-    const ga4 = parseGA4Request(input.url, input.body || '');
-    const meta = ga4 ? null : parseMetaRequest(input.url, input.body || '');
-    const evidence = ga4 ? toGA4Evidence(ga4, common) : meta ? toMetaEvidence(meta, common) : null;
+    const ga4 = parseGA4Requests(input.url, input.body || '');
+    if (input.body && isGA4BatchTruncated(input.body) && (ga4.length > 0 || /(?:^|[&])tid=G-[A-Z0-9]+/i.test(input.body))) {
+      this.bundle.network.relevant_requests_truncated = true;
+    }
+    const meta = ga4.length ? null : parseMetaRequest(input.url, input.body || '');
+    const captured = ga4.length
+      ? ga4.map((parsed) => {
+        const evidence = toGA4Evidence(parsed, common);
+        const ga4Client = this.correlationTokens.token('ga4_client', parsed.client_id);
+        const ga4Session = this.correlationTokens.token('ga4_session', parsed.session_id);
+        if (ga4Client || ga4Session) evidence.correlation = { ga4_client: ga4Client, ga4_session: ga4Session };
+        return evidence;
+      })
+      : meta ? [toMetaEvidence(meta, common)] : [];
+    if (meta && captured[0]) {
+      const metaBrowser = this.correlationTokens.token('meta_browser', meta.fbp);
+      const metaClick = this.correlationTokens.token('meta_click', meta.fbc);
+      if (metaBrowser || metaClick) captured[0].correlation = { meta_browser: metaBrowser, meta_click: metaClick };
+    }
 
-    if (evidence) {
+    for (const evidence of captured) {
+      evidence.page_url = evidence.page_url ? safeObservedPageUrl(evidence.page_url) : undefined;
       evidence.source = input.source || 'page';
       if (/^page_\d{1,9}$/.test(input.observed_page_id || '')) evidence.observed_page_id = input.observed_page_id;
       if (input.observed_page_url) evidence.observed_page_url = safeObservedPageUrl(input.observed_page_url);
       if (Number.isSafeInteger(input.navigation_epoch) && input.navigation_epoch! >= 1) evidence.navigation_epoch = input.navigation_epoch;
       if (this.bundle.network.relevant_requests.length < this.maxRelevantRequests) {
         this.bundle.network.relevant_requests.push(evidence);
+        if (evidence.vendor === 'ga4' && evidence.kind === 'collection' && evidence.event === 'view_item') {
+          if (this.bundle.product.ga4_view_item_hits.length < 20) this.bundle.product.ga4_view_item_hits.push(evidence);
+        }
+        if (evidence.vendor === 'meta' && evidence.kind === 'collection' && evidence.event?.toLowerCase() === 'viewcontent') {
+          if (this.bundle.product.meta_view_content_hits.length < 20) this.bundle.product.meta_view_content_hits.push(evidence);
+        }
       } else {
         this.bundle.network.relevant_requests_truncated = true;
       }
-      if (evidence.vendor === 'ga4' && evidence.kind === 'collection' && evidence.event === 'view_item') {
-        if (this.bundle.product.ga4_view_item_hits.length < 20) this.bundle.product.ga4_view_item_hits.push(evidence);
-      }
-      if (evidence.vendor === 'meta' && evidence.kind === 'collection' && evidence.event?.toLowerCase() === 'viewcontent') {
-        if (this.bundle.product.meta_view_content_hits.length < 20) this.bundle.product.meta_view_content_hits.push(evidence);
-      }
-      return evidence;
     }
+    if (captured.length) return captured;
 
     if (!isKnownTrackingEndpoint(host, path) && looksLikeUnknownCollector(path, `${input.url}?${input.body || ''}`)) {
       const key = `${host}${path}`;
@@ -307,7 +333,7 @@ export class EvidenceCollector {
         this.bundle.network.novel_endpoints.push({ host, path });
       }
     }
-    return null;
+    return [];
   }
 
   captureDataLayerViewItem(input: {
@@ -456,6 +482,12 @@ export class EvidenceCollector {
   }
 
   complete(startMs: number) {
+    // Final persistence guard also covers any legacy-style evidence supplied by callers.
+    const normalize = (request: TrackingRequestEvidence) => normalizeRequestCorrelation(request, this.correlationTokens);
+    this.bundle.network.relevant_requests = this.bundle.network.relevant_requests.map(normalize);
+    this.bundle.product.ga4_view_item_hits = this.bundle.product.ga4_view_item_hits.map(normalize);
+    this.bundle.product.data_layer_view_item_hits = this.bundle.product.data_layer_view_item_hits.map(normalize);
+    this.bundle.product.meta_view_content_hits = this.bundle.product.meta_view_content_hits.map(normalize);
     this.bundle.runtime.completed_at = new Date().toISOString();
     this.bundle.runtime.total_duration_ms = Date.now() - startMs;
     let serialized = JSON.stringify(this.bundle);

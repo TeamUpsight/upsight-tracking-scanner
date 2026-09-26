@@ -1,6 +1,6 @@
 import type { TrackingRequestEvidence } from '../../types';
 import type { VerificationResult } from './domain-types';
-import { parseGA4Request } from '../tracking/ga4';
+import { isGA4BatchTruncated, isGA4MeasurementId, parseGA4Request, parseGA4Requests } from '../tracking/ga4';
 import { googleMeasurementFacts, type GoogleConsentModeResult } from './google-consent-mode-observer';
 
 export type TrackingConsistencyStatus = 'consistent' | 'contradiction' | 'insufficient_evidence' | 'not_applicable';
@@ -72,7 +72,8 @@ function isVendorEndpoint(vendor: TrackingConsistencyVendor, request: TrackingRe
   if (request.vendor === 'ga4' && request.kind === 'script' && path.includes('/gtag/js')) return true;
   if (request.kind === 'script') return /\.js$/.test(path) || vendor === 'meta';
   switch (vendor) {
-    case 'google_analytics': return /\/(?:g\/)?collect$/.test(path);
+    case 'google_analytics': return /\/(?:g\/)?collect$/.test(path) ||
+      (request.vendor === 'ga4' && request.kind === 'collection' && Boolean(request.event) && isGA4MeasurementId(request.measurement_id || ''));
     case 'google_ads': return /\/(?:pagead\/)?conversion(?:\/|$)|\/collect$/.test(path);
     case 'meta': return /^\/tr(?:\/|$)/.test(path);
     case 'tiktok': return /\/(?:api\/)?(?:v\d+\/)?pixel\/(?:track|event)|\/event(?:\/|$)/.test(path);
@@ -125,7 +126,7 @@ export function captureConsentTrackingRequest(input: {
   if (!vendor) return null;
   const bodyFields = safePostFields(input.post_data);
   const event = safeEventName(
-    parsed.searchParams.get('en') || parsed.searchParams.get('ev') || parsed.searchParams.get('event') || parsed.searchParams.get('event_name') ||
+    ga4?.event || parsed.searchParams.get('en') || parsed.searchParams.get('ev') || parsed.searchParams.get('event') || parsed.searchParams.get('event_name') ||
     bodyFields.en || bodyFields.ev || bodyFields.event || bodyFields.event_name || bodyFields.eventName || bodyFields.event_type || bodyFields.eventType
   );
   // An eventless Google ping belongs to GCM observations unless the shared GA4
@@ -136,9 +137,36 @@ export function captureConsentTrackingRequest(input: {
     kind: ga4?.kind || (input.resource_type === 'script' ? 'script' : 'collection'),
     collector: 'third_party', host, path: normalizedPath(parsed.pathname), method: input.method,
     phase: 'consent_v2', timestamp: input.timestamp ?? Date.now(), event,
+    measurement_id: ga4?.measurement_id || undefined,
     consent_measurement: ga4?.consent_measurement
   };
 }
+
+/** Mirrors each logical GA4 event from the shared parser in the Consent buffer. */
+export function captureConsentTrackingRequests(input: Parameters<typeof captureConsentTrackingRequest>[0]): TrackingRequestEvidence[] {
+  const parsed = parseGA4Requests(input.url, input.post_data || '');
+  if (parsed.length <= 1) {
+    const one = captureConsentTrackingRequest(input);
+    return one ? [one] : [];
+  }
+  let url: URL;
+  try { url = new URL(input.url); } catch { return []; }
+  return parsed.map((event) => ({
+    vendor: 'ga4' as const,
+    kind: event.kind,
+    collector: 'third_party' as const,
+    host: url.hostname.toLowerCase(),
+    path: normalizedPath(url.pathname),
+    method: input.method,
+    phase: 'consent_v2',
+    timestamp: input.timestamp ?? Date.now(),
+    event: safeEventName(event.event),
+    measurement_id: event.measurement_id || undefined,
+    consent_measurement: event.consent_measurement
+  }));
+}
+
+export { isGA4BatchTruncated };
 
 const POST_BODY_MAX_BYTES = 4_096;
 const POST_FIELD_MAX_COUNT = 24;

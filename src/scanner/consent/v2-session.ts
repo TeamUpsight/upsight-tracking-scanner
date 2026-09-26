@@ -19,7 +19,7 @@ import { captureUsercentricsMainFrameCensus, type UsercentricsMainFrameCensus } 
 import { usercentricsVerificationCapability } from './usercentrics-adapter';
 import { usercentricsV2Decision } from './usercentrics-v2-state';
 import { assessRejectVerificationCapability, type VerificationCapability } from './verification-capability';
-import { captureConsentTrackingRequest, checkTrackingConsistency, ConsentRequestBuffer, normalizeConsentMeasurement, reconcileConsentMeasurement, type ConsentMeasurementSummary, type TrackingConsistencyResult } from './tracking-consistency';
+import { captureConsentTrackingRequests, checkTrackingConsistency, ConsentRequestBuffer, isGA4BatchTruncated, normalizeConsentMeasurement, reconcileConsentMeasurement, type ConsentMeasurementSummary, type TrackingConsistencyResult } from './tracking-consistency';
 import { buildUnknownCmpFingerprint } from './unknown-cmp-fingerprint';
 import { consentV2ActionsEnabledFor, consentV2RolloutControls, type ConsentV2RolloutControls, type ConsentV2RolloutProvider } from './rollout-controls';
 import { captureDiagnosticConsentControlCensus, discoverProviderSemanticControls, type DiagnosticConsentControlCensusRecord, type ProviderSemanticDiscovery } from './provider-semantic-controls';
@@ -86,9 +86,10 @@ export async function prepareConsentV2Session(page: Page): Promise<PreparedConse
     // postData is immediately reduced by the owning observers/classifier and
     // is never appended to requests, the ledger, telemetry, or persistence.
     const postData = request.method().toUpperCase() === 'POST' ? request.postData() : null;
-    gcm.observeMeasurementRequest({ url, body: postData || undefined, timestamp });
-    const captured = captureConsentTrackingRequest({ url, resource_type: request.resourceType(), method: request.method(), post_data: postData, timestamp });
-    if (captured) request_buffer.append(captured);
+    gcm.observeMeasurementRequests({ url, body: postData || undefined, timestamp });
+    const captured = captureConsentTrackingRequests({ url, resource_type: request.resourceType(), method: request.method(), post_data: postData, timestamp });
+    for (const event of captured) request_buffer.append(event);
+    if (isGA4BatchTruncated(postData || '') && (captured.some((event) => event.vendor === 'ga4') || /(?:^|[&])tid=G-[A-Z0-9]+/i.test(postData || ''))) request_buffer.truncated = true;
   };
   let disposed = false;
   page.on('request', listener);

@@ -542,6 +542,22 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ observed_page_id: evidence.product.ga4_view_item_hits[0].observed_page_id, navigation_epoch: evidence.product.ga4_view_item_hits[0].navigation_epoch, observed_page_url: expect.stringContaining('/products/widget') })]));
   }, 35_000);
 
+  it('LN-03 retains a second-line GA4 view_item on a custom same-origin route', async () => {
+    const result = await auditFixture(200, {
+      '/': '<a href="/products/widget">Widget</a>',
+      '/products/widget': `<form action="/cart/add"><button>Add to cart</button></form>
+        <script>fetch('/custom-prefix/collect',{method:'POST',headers:{'content-type':'text/plain'},body:'v=2&tid=G-TEST&en=page_view\\nv=2&tid=G-TEST&en=view_item&pr1=idSKU~nmCoffee%7ETable&cid=RAW_CLIENT_123456&sid=RAW_SESSION_987654'})</script>`,
+      '/custom-prefix/collect': { body: '', status: 204 }
+    }, true, ['tracking'], false);
+    expect(result).toMatchObject({ site_ga4_collection_hit_detected: true, product_payload_status: 'pass' });
+    const evidence = result.evidence_bundle as { network: { relevant_requests: Array<{ path: string; event?: string; observed_page_id?: string; navigation_epoch?: number; timestamp: number; product_name?: string }> }; product: { ga4_view_item_hits: Array<{ product_name?: string }> } };
+    const batch = evidence.network.relevant_requests.filter((request) => request.path === '/custom-prefix/collect');
+    expect(batch.map((request) => request.event)).toEqual(['page_view', 'view_item']);
+    expect(batch[0]).toMatchObject({ observed_page_id: batch[1].observed_page_id, navigation_epoch: batch[1].navigation_epoch, timestamp: batch[1].timestamp });
+    expect(evidence.product.ga4_view_item_hits[0].product_name).toBe('Coffee~Table');
+    expect(JSON.stringify(result.evidence_bundle)).not.toMatch(/RAW_CLIENT_123456|RAW_SESSION_987654/);
+  }, 35_000);
+
   it('LN-02 keeps delayed homepage GA4 traffic on the homepage Page during PDP observation', async () => {
     const result = await auditFixture(200, {
       '/': `<a href="/products/widget">Widget</a><script>let n=0;const t=setInterval(()=>{if(++n>40){clearInterval(t);return}new Image().src='/g/collect?tid=G-TEST&en=page_view&n='+n},100)</script>`,

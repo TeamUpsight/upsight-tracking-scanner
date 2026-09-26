@@ -1,0 +1,2 @@
+v=2&tid=G-TEST&en=page_view
+v=2&tid=G-TEST&en=view_item&pr1=idSKU~nmWidget

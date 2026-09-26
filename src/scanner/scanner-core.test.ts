@@ -1481,10 +1481,10 @@ describe('server-side collection classifier', () => {
   });
 
   it('requires strict event identity for duplicate detection', () => {
-    const third = event({ collector: 'third_party', timestamp: 1000, client_id: 'one', session_id: 'session' });
-    const firstMismatch = event({ collector: 'first_party', host: 'data.example.com', timestamp: 1100, client_id: 'two', session_id: 'session' });
+    const third = event({ collector: 'third_party', timestamp: 1000, correlation: { ga4_client: 'one', ga4_session: 'session' } });
+    const firstMismatch = event({ collector: 'first_party', host: 'data.example.com', timestamp: 1100, correlation: { ga4_client: 'two', ga4_session: 'session' } });
     expect(findStrictDuplicates([third, firstMismatch])).toHaveLength(0);
-    expect(findStrictDuplicates([third, { ...firstMismatch, client_id: 'one' }])).toHaveLength(1);
+    expect(findStrictDuplicates([third, { ...firstMismatch, correlation: { ga4_client: 'one', ga4_session: 'session' } }])).toHaveLength(1);
   });
 
   it('does not call mixed collection misconfigured without a strict duplicate', () => {

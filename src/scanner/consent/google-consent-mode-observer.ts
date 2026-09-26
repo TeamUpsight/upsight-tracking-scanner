@@ -289,6 +289,12 @@ export class GoogleConsentModeObserver {
     return observation;
   }
 
+  /** Keeps bounded Consent Mode network facts for every logical batch line. */
+  observeMeasurementRequests(input: { url: string; body?: string; timestamp?: number }): GoogleConsentNetworkObservation[] {
+    const lines = input.body?.includes('\n') ? input.body.split(/\r?\n/, 20) : [input.body];
+    return lines.map((body) => this.observeMeasurementRequest({ ...input, body })).filter((item): item is GoogleConsentNetworkObservation => item !== null);
+  }
+
   markUserChoice(timestamp?: number) {
     this.userChoiceTimestamp = timestampOrNow(timestamp);
   }

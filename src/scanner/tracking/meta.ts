@@ -106,8 +106,6 @@ export function toMetaEvidence(parsed: ParsedMetaRequest, input: {
     timestamp: input.timestamp,
     event: parsed.event || undefined,
     pixel_id: parsed.pixel_id || undefined,
-    page_url: parsed.page_url || undefined,
-    fbp: parsed.fbp || undefined,
-    fbc: parsed.fbc || undefined
+    page_url: parsed.page_url || undefined
   };
 }

@@ -1,4 +1,4 @@
-import { captureConsentTrackingRequest, ConsentRequestBuffer, isSharedPreChoicePhase, normalizeConsentMeasurement, reconcileConsentMeasurement } from './consent/tracking-consistency';
+import { captureConsentTrackingRequests, ConsentRequestBuffer, isGA4BatchTruncated, isSharedPreChoicePhase, normalizeConsentMeasurement, reconcileConsentMeasurement } from './consent/tracking-consistency';
 import { GoogleConsentModeObserver } from './consent/google-consent-mode-observer';
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
@@ -1078,7 +1078,6 @@ export async function capturePerformanceTrackingRequests(page: Page, phase: stri
   try {
     urls = await page.evaluate(() => performance.getEntriesByType('resource')
       .map((entry) => entry.name)
-      .filter((name) => /(?:google-analytics\.com|analytics\.google\.com|doubleclick\.net|facebook\.com)\/(?:g\/collect|collect|tr\/)/i.test(name))
       .slice(-100));
   } catch {
     if (observation) {
@@ -1096,11 +1095,11 @@ export async function capturePerformanceTrackingRequests(page: Page, phase: stri
       if (parsed.vendor === 'ga4') {
         return request.event === (parsed.event || undefined) &&
           request.measurement_id === (parsed.measurement_id || undefined) &&
-          request.page_url === (parsed.page_url || undefined);
+          request.page_url === (parsed.page_url ? safeUrl(parsed.page_url) || undefined : undefined);
       }
       return request.event === (parsed.event || undefined) &&
         request.pixel_id === (parsed.pixel_id || undefined) &&
-        request.page_url === (parsed.page_url || undefined);
+        request.page_url === (parsed.page_url ? safeUrl(parsed.page_url) || undefined : undefined);
     });
     if (alreadyCaptured) continue;
     if (evidenceCollector.captureRequest({ url, method: 'GET', phase, source: 'performance_timing' })) recovered += 1;
@@ -1604,7 +1603,7 @@ export async function runStorefrontAudit(
         const sanitized = safeUrl(requestUrl);
         if (sanitized && cmpNetworkSignals.size < 100) cmpNetworkSignals.add(sanitized);
       }
-      const capturedTracking = evidenceCollector.captureRequest({
+      const capturedTracking = evidenceCollector.captureRequests({
         url: requestUrl,
         body: request.postData() || '',
         method: request.method(),
@@ -1614,9 +1613,11 @@ export async function runStorefrontAudit(
         ...pageProvenance.forRequest(request)
       });
       if (consentV2Enabled && isSharedPreChoicePhase(currentPhase)) {
-        const captured = capturedTracking || captureConsentTrackingRequest({ url: requestUrl, post_data: request.postData(), resource_type: request.resourceType(), method: request.method() });
-        if (captured) sharedConsentRequests.append({ ...captured, phase: currentPhase });
-        sharedConsentGcm.observeMeasurementRequest({ url: requestUrl, body: request.postData() || undefined, timestamp: captured?.timestamp });
+        const captured = capturedTracking.length ? capturedTracking : captureConsentTrackingRequests({ url: requestUrl, post_data: request.postData(), resource_type: request.resourceType(), method: request.method() });
+        for (const event of captured) sharedConsentRequests.append({ ...event, phase: currentPhase });
+        const body = request.postData() || '';
+        if (isGA4BatchTruncated(body) && (captured.some((event) => event.vendor === 'ga4') || /(?:^|[&])tid=G-[A-Z0-9]+/i.test(body))) sharedConsentRequests.truncated = true;
+        sharedConsentGcm.observeMeasurementRequests({ url: requestUrl, body: request.postData() || undefined, timestamp: captured[0]?.timestamp });
       }
     });
     browserContext.on('response', (response: Response) => {

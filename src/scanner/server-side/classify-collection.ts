@@ -38,10 +38,10 @@ function strictMatch(a: TrackingRequestEvidence, b: TrackingRequestEvidence) {
   const aPage = normalizedPage(a.page_url);
   const bPage = normalizedPage(b.page_url);
   if (!aPage || !bPage || aPage !== bPage) return false;
-  if (a.client_id && b.client_id && a.client_id !== b.client_id) return false;
-  if (a.session_id && b.session_id && a.session_id !== b.session_id) return false;
-  if (a.fbp && b.fbp && a.fbp !== b.fbp) return false;
-  if (a.fbc && b.fbc && a.fbc !== b.fbc) return false;
+  if (a.correlation?.ga4_client && b.correlation?.ga4_client && a.correlation.ga4_client !== b.correlation.ga4_client) return false;
+  if (a.correlation?.ga4_session && b.correlation?.ga4_session && a.correlation.ga4_session !== b.correlation.ga4_session) return false;
+  if (a.correlation?.meta_browser && b.correlation?.meta_browser && a.correlation.meta_browser !== b.correlation.meta_browser) return false;
+  if (a.correlation?.meta_click && b.correlation?.meta_click && a.correlation.meta_click !== b.correlation.meta_click) return false;
   return true;
 }
 

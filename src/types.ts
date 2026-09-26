@@ -109,11 +109,15 @@ export interface TrackingRequestEvidence {
   observed_page_id?: string;
   observed_page_url?: string;
   navigation_epoch?: number;
-  client_id?: string;
-  session_id?: string;
-  fbp?: string;
-  fbc?: string;
+  /** Opaque equality tokens scoped to one audit (or one historical replay). */
+  correlation?: {
+    ga4_client?: string;
+    ga4_session?: string;
+    meta_browser?: string;
+    meta_click?: string;
+  };
   has_product?: boolean;
+  product_item_count?: number;
   product_id?: string;
   product_name?: string;
   brand?: string;

@@ -7,6 +7,7 @@ import { accessEvidenceViolations, enforceConsistency } from './consistency';
 import { calculateQaPriority, generateFailureFingerprints } from './fingerprints';
 import { selectedAuditModules } from '../../audit-modules';
 import { isRequestForPdp } from '../tracking/pdp-association';
+import { CorrelationTokens, normalizeRequestCorrelation } from '../evidence/correlation-tokens';
 
 function cmsFromSignals(signals: string[]): CmsPlatform {
   const text = signals.join(' ').toLowerCase();
@@ -26,6 +27,9 @@ function cmsFromSignals(signals: string[]): CmsPlatform {
  * explicitly selecting every module.
  */
 export function normalizeReplayEvidence(source: EvidenceBundle): EvidenceBundle {
+  const correlationTokens = new CorrelationTokens();
+  const normalizeRequest = (request: EvidenceBundle['network']['relevant_requests'][number]) =>
+    normalizeRequestCorrelation(request, correlationTokens);
   const access = source.access || {
     valid_storefront: source.page.valid,
     final_url: source.page.final_url,
@@ -50,7 +54,7 @@ export function normalizeReplayEvidence(source: EvidenceBundle): EvidenceBundle 
     page: { ...source.page, cms_signals: [...source.page.cms_signals] },
     network: {
       ...source.network,
-      relevant_requests: [...source.network.relevant_requests],
+      relevant_requests: source.network.relevant_requests.map(normalizeRequest),
       installation_signals: [...(source.network.installation_signals || [])],
       observation: source.network.observation ? { ...source.network.observation, capture_channel_errors: [...source.network.observation.capture_channel_errors] } : undefined,
       novel_endpoints: [...source.network.novel_endpoints]
@@ -59,9 +63,9 @@ export function normalizeReplayEvidence(source: EvidenceBundle): EvidenceBundle 
     product: {
       ...source.product,
       pdp_candidates: [...source.product.pdp_candidates],
-      ga4_view_item_hits: [...source.product.ga4_view_item_hits],
-      data_layer_view_item_hits: [...(source.product.data_layer_view_item_hits || [])],
-      meta_view_content_hits: [...source.product.meta_view_content_hits],
+      ga4_view_item_hits: source.product.ga4_view_item_hits.map(normalizeRequest),
+      data_layer_view_item_hits: (source.product.data_layer_view_item_hits || []).map(normalizeRequest),
+      meta_view_content_hits: source.product.meta_view_content_hits.map(normalizeRequest),
       candidate_outcomes: [...(source.product.candidate_outcomes || [])],
       observation: source.product.observation ? { ...source.product.observation } : undefined
     },
