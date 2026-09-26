@@ -41,11 +41,27 @@ function baseEvidence(name = 'example.com'): EvidenceBundle {
   Object.assign(bundle.network.observation!, { request_listener_active: true, request_capture_completed: true, data_layer_capture_attempted: true, data_layer_capture_completed: true, performance_capture_attempted: true, performance_capture_completed: true });
   Object.assign(bundle.product.observation!, { observation_started_at: 1, minimum_observation_satisfied: true, transport_failure: false, timeout: false });
   bundle.server_side.passive_classification_completed = true;
+  bundle.runtime.proxy_country_verified = true;
+  bundle.runtime.country_matches_requested_geo = true;
   bundle.product.applicability = 'applicable';
   return bundle;
 }
 
 describe('audit module selection', () => {
+  it('keeps privacy conclusions inconclusive when requested egress geo was not verified', () => {
+    const evidence = baseEvidence('geo-unverified.example');
+    evidence.geo = 'EU';
+    evidence.page.valid = true;
+    evidence.consent.executed = true;
+    evidence.consent.resolved_provider = 'Cookiebot';
+    evidence.consent.pre_choice_measurement = 'full_measurement';
+    expect(replayEvidence(evidence).consent_status).toBe('prior_consent_violation');
+    evidence.runtime.proxy_country_verified = false;
+    const result = replayEvidence(evidence);
+    expect(result.consent_status).toBe('inconclusive');
+    expect(result.reason_codes).toContain('GEO_UNVERIFIED');
+    expect(result.overall_status).toBe('inconclusive');
+  });
   it('defaults historical evidence, rejects invalid selections, and canonicalizes order', () => {
     expect(normalizeAuditModules(undefined)).toEqual(AUDIT_MODULE_ORDER);
     expect(normalizeAuditModules([])).toBeNull();

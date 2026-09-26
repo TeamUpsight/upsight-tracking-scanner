@@ -15,6 +15,8 @@ function consentEvidence(trackingConsistency: 'consistent' | 'contradiction' | '
   evidence.page.status_code = 200;
   evidence.page.final_url = 'https://www.velux.de/';
   evidence.page.access_category = 'none';
+  evidence.runtime.proxy_country_verified = true;
+  evidence.runtime.country_matches_requested_geo = true;
   evidence.consent.executed = true;
   evidence.consent.resolved_provider = 'Cookiebot';
   evidence.consent.resolved_provider_confidence = 'high';

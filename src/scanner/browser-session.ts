@@ -1,5 +1,17 @@
 import type { Browser, BrowserContext, Page } from 'playwright-core';
 
+export async function closeWithDeadline(close: () => Promise<unknown>, timeoutMs = 2_000): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      close().then(() => true, () => false),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export interface BrowserGeoProfile {
   country: string;
   profile_country: string | null;

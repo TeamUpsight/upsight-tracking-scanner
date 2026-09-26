@@ -18,6 +18,7 @@ export interface StatusDecision<T> {
 export function resolveConsentStatus(input: {
   executed: boolean;
   page_valid: boolean | null;
+  geo_verified?: boolean;
   geo: 'USA' | 'EU' | 'UK';
   cmp_provider: string | null;
   /** Limited/denied Consent Mode pings do not establish a pre-choice violation. */
@@ -34,6 +35,9 @@ export function resolveConsentStatus(input: {
   }
   if (!input.executed) {
     return { status: 'not_tested', confidence: 'low', reason_code: 'CONSENT_NOT_TESTED', evidence: [] };
+  }
+  if (input.geo_verified === false) {
+    return { status: 'inconclusive', confidence: 'low', reason_code: 'GEO_UNVERIFIED', evidence: ['requested_geo_not_verified'] };
   }
   const fullMeasurementBeforeInteraction = input.tracking_before_interaction === true || input.tracking_before_interaction === 'full_measurement';
   // A full pre-choice collection is a complete, higher-priority semantic fact.

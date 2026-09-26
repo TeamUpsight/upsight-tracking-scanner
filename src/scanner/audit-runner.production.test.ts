@@ -623,6 +623,26 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect((result.evidence_bundle as { product: { data_layer_view_item_hits: unknown[] } }).product.data_layer_view_item_hits).toHaveLength(1);
   }, 45_000);
 
+  it('keeps Tracking-only Accept observation-only when action flags are off', async () => {
+    const gatedPdp = `<script>window.OneTrust={AllowAll(){}};</script><script src="/otSDKStub.js"></script>
+      <div id="onetrust-banner-sdk"><button id="onetrust-accept-btn-handler" onclick="window.dataLayer=[{event:'view_item',ecommerce:{items:[{item_id:'accepted'}]}}]">Accept all</button></div>
+      <form action="/cart/add"><button>Add to cart</button></form>`;
+    const result = await auditFixture(200, { '/': '<a href="/products/gated">Gated</a>', '/products/gated': gatedPdp }, true, ['tracking'], false);
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    expect(trace.some((step) => step.step === 'accept_comparison_completed')).toBe(false);
+    expect((result.evidence_bundle as { product: { data_layer_view_item_hits: unknown[] } }).product.data_layer_view_item_hits).toHaveLength(0);
+    expect(result.product_payload_status).not.toBe('pass');
+  }, 45_000);
+
+  it('contains one scanner exception and can execute the next audit', async () => {
+    const failed = await auditFixture(200, '<main>Storefront</main>', false, ['tracking'], false, {
+      launchBrowser: async () => { throw new Error('deterministic browser launch failure'); }
+    });
+    expect(failed).toMatchObject({ scan_status: 'failed', overall_status: 'inconclusive', product_payload_status: 'not_tested' });
+    const next = await auditFixture(200, '<main>Storefront</main>', false, ['tracking'], false);
+    expect(next.scan_status).toBe('completed');
+  }, 45_000);
+
   it('ADVANCED-ACCEPT-E2E-01 preserves denied pre-Accept measurement and captures post-Accept view_item', async () => {
     const advancedPdp = `<script>window.OneTrust={AllowAll(){}};new Image().src='https://www.google-analytics.com/g/collect?en=page_view&gcs=G100';</script><script src="/otSDKStub.js"></script>
       <div id="onetrust-banner-sdk"><button id="onetrust-accept-btn-handler" onclick="window.dataLayer=[{event:'view_item',ecommerce:{items:[{item_id:'advanced',item_name:'Advanced'}]}}]">Accept all</button></div>

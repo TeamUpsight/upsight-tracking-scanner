@@ -1,7 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { consentV2ActionsEnabledFor, consentV2RolloutControls } from './rollout-controls';
+import { certificationSafeConsentV2RolloutControls, consentV2ActionsEnabledFor, consentV2RolloutControls, legacyAcceptActionEnabled } from './rollout-controls';
 
 describe('Consent V2 rollout controls', () => {
+  it('keeps legacy Accept off by default and limits production action to certified Cookiebot', () => {
+    const defaultControls = consentV2RolloutControls({});
+    expect(legacyAcceptActionEnabled(defaultControls, 'Cookiebot', 'storefront.example')).toBe(false);
+    const requested = consentV2RolloutControls({
+      CONSENT_V2_ACTIONS_ENABLED: 'true', CONSENT_V2_ACTION_SAMPLE_PERCENT: '100',
+      CONSENT_COOKIEBOT_ACTIONS_ENABLED: 'true', CONSENT_USERCENTRICS_ACTIONS_ENABLED: 'true',
+      CONSENT_ONETRUST_ACTIONS_ENABLED: 'true'
+    });
+    const production = certificationSafeConsentV2RolloutControls(requested, true, { NODE_ENV: 'production' });
+    expect(consentV2ActionsEnabledFor(production, 'cookiebot', 'storefront.example')).toBe(true);
+    expect(consentV2ActionsEnabledFor(production, 'usercentrics', 'storefront.example')).toBe(false);
+    expect(consentV2ActionsEnabledFor(production, 'onetrust', 'storefront.example')).toBe(false);
+    expect(legacyAcceptActionEnabled(production, 'Cookiebot', 'storefront.example')).toBe(true);
+    expect(legacyAcceptActionEnabled(production, 'Usercentrics', 'storefront.example')).toBe(false);
+    expect(legacyAcceptActionEnabled(production, 'TrustArc', 'storefront.example')).toBe(false);
+    const missingMode = certificationSafeConsentV2RolloutControls(requested, true, {});
+    expect(legacyAcceptActionEnabled(missingMode, 'Usercentrics', 'storefront.example')).toBe(false);
+    const uncertified = certificationSafeConsentV2RolloutControls(requested, false, { NODE_ENV: 'production' });
+    expect(legacyAcceptActionEnabled(uncertified, 'Cookiebot', 'storefront.example')).toBe(false);
+  });
   it('defaults to observation-only while retaining provider detection', () => {
     const controls = consentV2RolloutControls({});
     expect(controls.enabled).toBe(true);

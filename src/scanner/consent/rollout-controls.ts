@@ -46,17 +46,30 @@ export function consentV2RolloutControls(environment: NodeJS.ProcessEnv = proces
 /** Audit-runner boundary: an unproven execution artifact cannot activate CMP controls. */
 export function certificationSafeConsentV2RolloutControls(
   controls: ConsentV2RolloutControls,
-  certificationEligible: boolean
+  certificationEligible: boolean,
+  environment: NodeJS.ProcessEnv = process.env
 ): ConsentV2RolloutControls {
-  if (certificationEligible) return controls;
+  if (certificationEligible && environment.NODE_ENV === 'test') return controls;
   return {
     ...controls,
-    actions_enabled: false,
-    action_sample_percent: 0,
+    actions_enabled: certificationEligible && controls.actions_enabled,
+    action_sample_percent: certificationEligible ? controls.action_sample_percent : 0,
     providers: Object.fromEntries(CONSENT_V2_ROLLOUT_PROVIDERS.map((provider) => [provider, {
-      ...controls.providers[provider], actions_enabled: false
+      ...controls.providers[provider], actions_enabled: certificationEligible &&
+        (environment.NODE_ENV === 'test' || provider === 'cookiebot') && controls.providers[provider].actions_enabled
     }])) as ConsentV2RolloutControls['providers']
   };
+}
+
+/** Legacy Product/Accept comparisons may act only through an explicit certified provider gate. */
+export function legacyAcceptActionEnabled(
+  controls: ConsentV2RolloutControls,
+  provider: string,
+  stableKey: string
+): boolean {
+  const id = ({ Cookiebot: 'cookiebot', OneTrust: 'onetrust', Usercentrics: 'usercentrics',
+    Didomi: 'didomi', CookieYes: 'cookieyes', Sourcepoint: 'sourcepoint' } as Record<string, ConsentV2RolloutProvider>)[provider];
+  return Boolean(id && consentV2ActionsEnabledFor(controls, id, stableKey));
 }
 
 function sampleBucket(key: string) {

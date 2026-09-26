@@ -162,6 +162,7 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
   const consent = consentSelected ? resolveConsentStatus({
     executed: evidence.consent.executed,
     page_valid: evidence.page.valid,
+    geo_verified: evidence.runtime.proxy_country_verified === true,
     geo: evidence.geo,
     cmp_provider: cmp.provider,
     tracking_before_interaction: before,

@@ -19,7 +19,7 @@ import { selectedAuditModules } from '../audit-modules';
 import { classifyAuditTermination } from '../audit-lifecycle';
 import { boundedInteger, bulkProxyRetryLimit, consentTimingValues, globalScanTimeoutMs, singleProxyRetryLimit } from '../shared/config';
 import { buildMetadata } from '../build-metadata';
-import { browserGeoProfile, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
+import { browserGeoProfile, closeWithDeadline, configureBrowserGeo, reuseOrCreateContext } from './browser-session';
 import { countryMatchesRequestedGeo } from './geo-jurisdiction';
 import { createBrowserQlHandoff } from './browserless-bql';
 import { GPC_ARM_MAX_BUDGET_MS, GPC_ARM_MIN_BUDGET_MS, GPC_FINALIZATION_MARGIN_MS, openBrowserlessGpcExperimentSession, runGpcExperiment, type GpcExperimentEvidence } from './consent/gpc-experiment';
@@ -34,11 +34,12 @@ import {
 } from './consent/fresh-context';
 import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
 import { installConsentCommandBootstrap } from './consent/browser-context-builders';
-import { certificationSafeConsentV2RolloutControls, consentV2RolloutControls } from './consent/rollout-controls';
+import { certificationSafeConsentV2RolloutControls, consentV2RolloutControls, legacyAcceptActionEnabled } from './consent/rollout-controls';
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
 import { consentObservationFailure } from './consent/observation-stage';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { isValidStorefrontStatus, resolveAccessDecision, resolveHostnameEvidence, type AccessDecision } from './navigation';
+import { isPublicHostname, isPublicWebUrl, resolvesOnlyToPublicAddresses } from './url-safety';
 import { OrderedAuditUpdates } from './persistence/ordered-updates';
 import {
   buildBrowserlessCdpUrl,
@@ -149,6 +150,7 @@ export function normalizeAuditDomain(input: unknown): string | null {
   if (input === undefined || input === null) return null;
   const raw = String(input).trim();
   if (!raw || /\s/.test(raw) || ['undefined', 'null'].includes(raw.toLowerCase())) return null;
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(raw) && !/^https?:\/\//i.test(raw)) return null;
   let hostname = raw;
   try {
     hostname = new URL(/^[a-z]+:\/\//i.test(raw) ? raw : `https://${raw}`).hostname;
@@ -156,7 +158,7 @@ export function normalizeAuditDomain(input: unknown): string | null {
     return null;
   }
   hostname = hostname.toLowerCase().replace(/\.$/, '');
-  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(hostname)
+  return isPublicHostname(hostname)
     ? hostname
     : null;
 }
@@ -186,7 +188,8 @@ export function isEvidenceBackedExternalRedirect(
   if (!isValidStorefrontStatus(finalStatus) || chain.length < 2 || chain.length > 10 || isNonStorefrontUrl(finalUrl)) return false;
   let parsed: URL;
   try { parsed = new URL(finalUrl); } catch { return false; }
-  if (parsed.protocol !== 'https:' || isSafeCanonicalRedirect(originalDomain, parsed.hostname)) return false;
+  if (parsed.protocol !== 'https:' || !isPublicHostname(parsed.hostname) ||
+      chain.some((hop) => !isPublicHostname(hop.host)) || isSafeCanonicalRedirect(originalDomain, parsed.hostname)) return false;
   const originalBase = originalDomain.toLowerCase().replace(/^www\./, '');
   const firstBase = chain[0].host.toLowerCase().replace(/^www\./, '');
   const finalBase = parsed.hostname.toLowerCase().replace(/^www\./, '');
@@ -1219,6 +1222,10 @@ export async function runStorefrontAudit(
     selectedModules
   });
   const evidence = evidenceCollector.bundle;
+  if (process.env.BROWSER_PROVIDER === 'local' && dependencies.consentGeoVerified === true) {
+    evidence.runtime.proxy_country_verified = true;
+    evidence.runtime.country_matches_requested_geo = true;
+  }
   const sharedConsentRequests = new ConsentRequestBuffer();
   const sharedConsentGcm = new GoogleConsentModeObserver();
   const trace: Record<string, unknown>[] = [];
@@ -1259,6 +1266,9 @@ export async function runStorefrontAudit(
   let currentBrowserRoute: 'local' | 'standard' | 'stealth' = 'local';
   let effectiveDomain = normalizedDomain || '';
   const observedContexts = new WeakSet<BrowserContext>();
+  const securityGuardedContexts = new WeakSet<BrowserContext>();
+  const publicHostChecks = new Map<string, Promise<boolean>>();
+  let unsafeRequestBlocked = false;
   const collectorCookieNames = new Set<string>();
   const cmpNetworkSignals = new Set<string>();
   const accessNetworkSignals = new Set<string>();
@@ -1472,15 +1482,18 @@ export async function runStorefrontAudit(
 
   const closeSession = async () => {
     gpcExperimentCdpUrl = null;
-    if (consentHomepage && !consentHomepage.isClosed()) await consentHomepage.close().catch(() => {});
+    const close = async (label: string, operation: () => Promise<unknown>) => {
+      if (!await closeWithDeadline(operation)) addTrace('session_cleanup_incomplete', { resource: label }, { module: 'runtime', severity: 'warning' });
+    };
+    if (consentHomepage && !consentHomepage.isClosed()) await close('consent_page', () => consentHomepage!.close());
     consentHomepage = null;
-    if (consentContext) await consentContext.close().catch(() => {});
+    if (consentContext) await close('consent_context', () => consentContext!.close());
     consentContext = null;
-    if (pdpPage && !pdpPage.isClosed()) await pdpPage.close().catch(() => {});
+    if (pdpPage && !pdpPage.isClosed()) await close('pdp_page', () => pdpPage!.close());
     pdpPage = null;
-    if (context) await context.close().catch(() => {});
+    if (context) await close('canonical_context', () => context!.close());
     context = null;
-    if (browser) await browser.close().catch(() => {});
+    if (browser) await close('browser', () => browser!.close());
     browser = null;
   };
 
@@ -1488,7 +1501,7 @@ export async function runStorefrontAudit(
     if (evidence.network.observation) {
       const productObservation = evidence.product.observation;
       evidence.network.observation.request_capture_completed = Boolean(
-        evidence.network.observation.request_listener_active &&
+        evidence.network.observation.request_listener_active && !unsafeRequestBlocked &&
         (!trackingSelected || (productObservation?.minimum_observation_satisfied && !productObservation.transport_failure && !productObservation.timeout))
       );
     }
@@ -1649,6 +1662,28 @@ export async function runStorefrontAudit(
     });
   };
 
+  const guardBrowserContext = async (browserContext: BrowserContext) => {
+    if (process.env.BROWSER_PROVIDER === 'local' || securityGuardedContexts.has(browserContext)) return;
+    securityGuardedContexts.add(browserContext);
+    await browserContext.route('**/*', async (route) => {
+      const rawUrl = route.request().url();
+      let allowed = isPublicWebUrl(rawUrl);
+      if (allowed) {
+        const host = new URL(rawUrl).hostname;
+        if (!publicHostChecks.has(host) && publicHostChecks.size < 100) {
+          publicHostChecks.set(host, resolvesOnlyToPublicAddresses(host));
+        }
+        allowed = await (publicHostChecks.get(host) || Promise.resolve(false));
+      }
+      if (!allowed) {
+        unsafeRequestBlocked = true;
+        await route.abort('blockedbyclient').catch(() => {});
+        return;
+      }
+      await route.continue().catch(() => {});
+    });
+  };
+
   const browserlessSessionTimeoutMs = boundedInteger(
     process.env.BROWSERLESS_SESSION_TIMEOUT_MS,
     Math.min(timeoutMs + 30_000, 300_000),
@@ -1664,6 +1699,7 @@ export async function runStorefrontAudit(
       serviceWorkers: 'allow'
     }, preferExisting);
     context = selected.context;
+    await guardBrowserContext(context);
     context.setDefaultTimeout(10_000);
     context.setDefaultNavigationTimeout(15_000);
     homepage = context.pages()[0] || await context.newPage();
@@ -1710,7 +1746,7 @@ export async function runStorefrontAudit(
 
   const verifyProxyEgress = async (neutral = false) => {
     if (!homepage || !context) return;
-    const shouldProbe = neutral || evidence.mode === 'diagnostic' || process.env.PROXY_EGRESS_PROBE === 'true';
+    const shouldProbe = neutral || consentSelected || evidence.mode === 'diagnostic' || process.env.PROXY_EGRESS_PROBE === 'true';
     if (!shouldProbe || process.env.BROWSER_PROVIDER === 'local') return;
     const probeUrl = neutral
       ? (process.env.PROXY_NEUTRAL_PROBE_URL || 'https://example.com/')
@@ -1720,7 +1756,13 @@ export async function runStorefrontAudit(
     try {
       const response = await probePage.goto(probeUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
       if (!response || !response.ok()) throw new Error('Egress probe returned a non-success status');
-      const payload = neutral ? {} : await response.json() as Record<string, unknown>;
+      const payload = neutral ? {} : await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Egress probe body timed out')), 8_000);
+        void (response.json() as Promise<Record<string, unknown>>).then(
+          (body) => { clearTimeout(timer); resolve(body); },
+          (error) => { clearTimeout(timer); reject(error); }
+        );
+      });
       const actualCountry = parseEgressCountry(payload);
       evidence.runtime.proxy_egress_reachable = true;
       evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, neutral
@@ -1768,7 +1810,7 @@ export async function runStorefrontAudit(
       }
       addTrace('proxy_egress_probe_inconclusive', { expected_geo: geo });
     } finally {
-      await probePage.close().catch(() => {});
+      await closeWithDeadline(() => probePage.close());
     }
   };
 
@@ -2391,6 +2433,7 @@ export async function runStorefrontAudit(
         });
         consentContext = freshConsent.context;
         consentHomepage = freshConsent.page;
+        await guardBrowserContext(consentContext);
         const consentAuthorized = await attachAuthorizedAccessHeader(consentContext, consentHomepage, effectiveDomain);
         addTrace('consent_fresh_context_ready', {
           service_workers: freshConsent.service_workers,
@@ -2565,7 +2608,8 @@ export async function runStorefrontAudit(
     } else {
       // PDP navigation deliberately retains the unanswered/default consent
       // state. Accept is a later, clean-context comparison only.
-      if (buildMetadata.certification_eligible && !preserveUnansweredPdp && cmp.provider !== 'Not Found' && cmp.provider !== 'Unknown') {
+      if (buildMetadata.certification_eligible && evidence.runtime.proxy_country_verified === true && !preserveUnansweredPdp &&
+          legacyAcceptActionEnabled(consentV2Controls, cmp.provider, normalizedDomain)) {
         currentPhase = 'product_consent_state_capture';
         const productConsentSnapshotStarted = Date.now();
         evidence.runtime.product_consent_snapshot.attempted = true;
@@ -3235,6 +3279,7 @@ export async function runStorefrontAudit(
           });
           consentContext = freshConsent.context;
           consentHomepage = freshConsent.page;
+          await guardBrowserContext(consentContext);
           attachContextObservers(consentContext);
           await attachAuthorizedAccessHeader(consentContext, consentHomepage, effectiveDomain);
           consentCapture = await prepareConsentV2Session(consentHomepage);
@@ -3275,7 +3320,8 @@ export async function runStorefrontAudit(
       firstPartyCollectionObserved: evidence.network.relevant_requests.some((request) => request.kind === 'collection' && request.collector !== 'third_party'),
       productObservationIncomplete: evidence.product.observation?.minimum_observation_satisfied === false
     }) : null;
-    if (buildMetadata.certification_eligible && acceptReason && runtimeBudget.canRunOptional(3_000) && consentV2Enabled && trackingSelected) {
+    if (buildMetadata.certification_eligible && evidence.runtime.proxy_country_verified === true && acceptReason && runtimeBudget.canRunOptional(3_000) &&
+        consentV2Enabled && trackingSelected && consentV2Controls.actions_enabled && consentV2Controls.action_sample_percent > 0) {
       // Reject never becomes the baseline for Accept. This deliberately uses a
       // second clean context and the already-confirmed PDP URL.
       currentPhase = 'accept_comparison';
@@ -3286,6 +3332,7 @@ export async function runStorefrontAudit(
           independentlyVerified: dependencies.consentGeoVerified ?? null
         });
         acceptContext = freshAccept.context;
+        await guardBrowserContext(acceptContext);
         attachContextObservers(acceptContext);
         await attachAuthorizedAccessHeader(acceptContext, freshAccept.page, effectiveDomain);
         await withinPhaseBudget('accept_comparison_navigation', Math.min(8_000, runtimeBudget.optionalAllowance()), () =>
@@ -3293,7 +3340,7 @@ export async function runStorefrontAudit(
         );
         const raw = await captureCmpRawEvidence(freshAccept.page);
         const acceptCmp = detectCMP({ ...raw, network_hosts: [...cmpNetworkSignals] });
-        const accepted = acceptCmp.provider !== 'Not Found' && acceptCmp.provider !== 'Unknown' &&
+        const accepted = legacyAcceptActionEnabled(consentV2Controls, acceptCmp.provider, normalizedDomain) &&
           (await clickConsentChoice(freshAccept.page, 'accept') || await callConsentApi(freshAccept.page, acceptCmp.provider, 'accept'));
         if (accepted) {
           const acceptObservationStarted = Date.now();

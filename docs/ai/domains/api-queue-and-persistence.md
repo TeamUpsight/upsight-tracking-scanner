@@ -19,7 +19,7 @@ Owns the REST boundary, optional internal authentication, request/file validatio
 - Results and QA: CSV export, debug package, QA feedback, mark correct.
 - Quality: metrics, review candidates, deterministic review, replay.
 - Operations: proxy metrics/readiness and queue state.
-- `/api/health` is public and intentionally minimal; `/api/v1` is protected when `INTERNAL_API_TOKEN` is set.
+- `/api/health` is public and exposes build provenance and queue counts without audit-domain details. `/api/v1` requires `INTERNAL_API_TOKEN` in production. Production startup also requires Browserless/Decodo configuration and refuses memory/local-browser mode. Bulk debug ZIP reads at most 25 full audit rows per request.
 
 The UI sends Bearer authentication through `src/ui/api.ts`. The server also accepts `X-Internal-API-Token`. Input controls include JSON byte limits, in-memory Multer upload, CSV parsing/deduplication, allowed geo/mode, maximum batch size, and bounded environment values.
 

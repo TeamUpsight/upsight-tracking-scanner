@@ -24,6 +24,8 @@ import { normalizeAuditModules } from './src/audit-modules';
 import { isRecoverableStaleAudit, queueJobForAudit, rerunAuditOptions, shouldEnqueueAudit, type AuditQueueJob } from './src/audit-lifecycle';
 import { boundedInteger, bulkProxyRetryLimit, globalScanTimeoutMs } from './src/shared/config';
 import { buildMetadata } from './src/build-metadata';
+import { productionConfigurationIssues } from './src/production-config';
+import { csvCell } from './src/csv-cell';
 
 dotenv.config();
 
@@ -299,15 +301,12 @@ async function restorePendingAudits() {
   }
 }
 
-function csvCell(value: unknown) {
-  let normalized = value === undefined || value === null ? '' : Array.isArray(value) ? value.join('|') : String(value);
-  if (/^[=+\-@]/.test(normalized)) normalized = `'${normalized}`;
-  return `"${normalized.replace(/"/g, '""')}"`;
-}
-
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', build: buildMetadata, queue: queue.stats() }));
+app.get('/api/health', (_req, res) => {
+  const { active, pending, delayed, concurrency } = queue.stats();
+  res.json({ status: 'ok', build: buildMetadata, queue: { active, pending, delayed, concurrency } });
+});
 app.use('/api/v1', internalAuth);
 
 app.post('/api/v1/scan', asyncRoute(async (req, res) => {
@@ -474,8 +473,11 @@ app.get('/api/v1/audits/export', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/v1/scans/bulk-debug-package', asyncRoute(async (req, res) => {
+  if (Array.isArray(req.body?.ids) && req.body.ids.length > 25) {
+    return res.status(413).json({ error: 'Bulk debug package is limited to 25 audits per request.' });
+  }
   const ids: string[] | null = Array.isArray(req.body?.ids)
-    ? [...new Set<string>(req.body.ids.map((id: unknown) => String(id)))].slice(0, 1000)
+    ? [...new Set<string>(req.body.ids.map((id: unknown) => String(id)))]
     : null;
   if (!ids?.length) return res.status(400).json({ error: 'ids must be a non-empty array.' });
   const audits = (await Promise.all(ids.map((id) => db.getAudit(id)))).filter((audit): audit is StorefrontAudit => Boolean(audit));
@@ -598,6 +600,8 @@ app.get('/api/v1/scanner/access-readiness', (_req, res) => res.json({
 app.get('/api/v1/queue', (_req, res) => res.json(queue.stats()));
 
 async function startServer() {
+  const configurationIssues = productionConfigurationIssues(process.env, buildMetadata.scanner_execution_mode === 'compiled_bundle');
+  if (configurationIssues.length) throw new Error(`Production configuration invalid: ${configurationIssues.join(' ')}`);
   await db.initialize();
   hydrateProxyHealth(await db.getProxyHealth());
   const proxyIssues = validateProxyConfiguration(bulkProxyRetryLimit());
