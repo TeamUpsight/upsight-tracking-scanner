@@ -23,6 +23,8 @@ Capture inputs are reduced to a versioned bundle with `page`, `network`, `consen
 
 Key distinctions must remain explicit: installation versus actual collection; generic Google collection versus GA4; third-party versus first/same-origin collection; CMP presence versus a verified consent transition; PDP discovery versus a valid URL-matched product event.
 
+LN-01 Tracking truth: a dataLayer `view_item` is retained as product-event implementation evidence, never proof of GA4 installation, collection, or a collected product event. A GA4 product pass requires a network `view_item` collection with usable product data associated with the verified PDP. Complete negative PDP observations cannot override unresolved Tracking/Consent gating merely by being repeated; a definitive `GA4_NO_VIEW_ITEM` under that gate requires a PDP-local GA4 collection and complete request observation. Sold-out availability is independent of PDP validity, so a semantically valid sold-out PDP receives the normal tracking observation. These rules are resolved in canonical replay and identified by rule pack `2026.09.26.1`.
+
 Diagnostic Consent control evidence is bounded and non-decisional. When a deterministic provider has visible Consent UI but exact semantic discovery yields no candidates, Playwright accessibility roles may expose at most 20 normalized names from locally corroborated Consent scopes, prioritized by visible/enabled/direct actionability. These names never create actions. A diagnostic screenshot is associated only when captured at the same observation boundary; its signed delta is `screenshot_time - observation_time`, so an earlier image remains explicitly negative rather than appearing contemporaneous.
 
 ### Usercentrics action boundary (WP17A)

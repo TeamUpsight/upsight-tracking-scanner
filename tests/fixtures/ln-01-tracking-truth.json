@@ -1,0 +1,21 @@
+{
+  "pdp_urls": [
+    "https://ln-01.example/products/one",
+    "https://ln-01.example/products/two",
+    "https://ln-01.example/products/three"
+  ],
+  "pdp_page_view": {
+    "vendor": "ga4",
+    "kind": "collection",
+    "collector": "third_party",
+    "host": "www.google-analytics.com",
+    "path": "/g/collect",
+    "method": "POST",
+    "phase": "product_pdp_load",
+    "timestamp": 1,
+    "event": "page_view",
+    "measurement_id": "G-TEST",
+    "page_url": "https://ln-01.example/products/one",
+    "has_product": false
+  }
+}

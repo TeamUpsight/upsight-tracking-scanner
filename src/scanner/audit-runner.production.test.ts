@@ -346,7 +346,7 @@ describe('runStorefrontAudit production browser wiring', () => {
     }, true, ['consent', 'tracking'], false);
     const evidence = result.evidence_bundle as { consent: { banner_visible: boolean; reject_action_available: boolean; interaction_attempted: boolean }; product: { pdp_candidates: string[]; sitemap_enrichment_status: string; candidate_outcomes: Array<{ source?: string }> }; decision_summary: Array<{ decision_name: string; status: unknown; blocking_uncertainty: string[] }> };
     const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
-    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive', product_payload_status: 'pass', site_ga4_detected: true, scan_status: 'completed' });
+    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive', product_payload_status: 'inconclusive', site_ga4_detected: true, scan_status: 'completed' });
     expect(evidence.consent).toMatchObject({ banner_visible: true, reject_action_available: true, interaction_attempted: false });
     expect(evidence.product).toMatchObject({ sitemap_enrichment_status: 'timed_out' });
     expect(evidence.product.pdp_candidates).toEqual(expect.arrayContaining([expect.stringContaining('/products/widget')]));
@@ -368,14 +368,16 @@ describe('runStorefrontAudit production browser wiring', () => {
       '/sitemap.xml': null
     }, true, ['consent', 'tracking'], false);
     const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ page_role?: string; outcome: string; promoted_from?: string | null }>; candidate_discovered_count: number; candidate_queued_count: number; candidate_promoted_count: number; candidate_attempted_count: number; candidate_completed_count: number } };
-    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string; candidate_url?: string }>;
-    expect(result).toMatchObject({ consent_status: 'inconclusive', product_payload_status: 'pass', site_ga4_detected: true });
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string; candidate_url?: string; pdp_url?: string }>;
+    expect(result).toMatchObject({ consent_status: 'inconclusive', product_payload_status: 'inconclusive', site_ga4_detected: true });
     expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([
       expect.objectContaining({ page_role: 'PRODUCT_LISTING', outcome: 'PRODUCT_LISTING' }),
-      expect.objectContaining({ outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM', promoted_from: expect.stringContaining('/collections/all') })
+      expect.objectContaining({ outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', promoted_from: expect.stringContaining('/collections/all') })
     ]));
-    expect(evidence.product).toMatchObject({ candidate_promoted_count: 2, candidate_attempted_count: 2, candidate_completed_count: 2 });
-    expect(trace.filter((item) => item.step === 'pdp_candidate_tracking_observation_started')).toHaveLength(0);
+    expect(evidence.product).toMatchObject({ candidate_promoted_count: 2 });
+    expect(evidence.product.candidate_attempted_count).toBeGreaterThanOrEqual(2);
+    expect(trace.filter((item) => item.step === 'pdp_candidate_tracking_observation_started')
+      .every((item) => !item.pdp_url?.includes('/collections/all'))).toBe(true);
   }, 45_000);
 
   it('PRODUCT-CHILD-01 rejects legal and generic listing links while retaining strong product-card children', async () => {
@@ -516,13 +518,26 @@ describe('runStorefrontAudit production browser wiring', () => {
       <script>window.dataLayer=[{event:'view_item', ecommerce:{items:[{item_id:'widget-1',item_name:'Widget'}]}}]</script>`;
     const result = await auditFixture(200, html, true, ['tracking']);
     const trace = JSON.parse(String(result.trace_steps));
-    expect(result).toMatchObject({ product_payload_status: 'pass', scan_status: 'completed' });
+    expect(result).toMatchObject({ product_payload_status: 'ga4_not_detected', scan_status: 'completed' });
     expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_navigation_started' })]));
     expect(trace).not.toEqual(expect.arrayContaining([expect.objectContaining({ step: 'product_consent_enablement' })]));
     expect((result.evidence_bundle as { product: { data_layer_view_item_hits: unknown[] } }).product.data_layer_view_item_hits).toHaveLength(1);
   }, 35_000);
 
-  it('MULTI-PDP-01 lets a later PDP view_item rescue an earlier complete no-event PDP', async () => {
+  it('LN-01 passes a PDP-associated network GA4 view_item with product data', async () => {
+    const result = await auditFixture(200, {
+      '/': '<a href="/products/widget">Widget</a>',
+      '/products/widget': `<form action="/cart/add"><button>Add to cart</button></form>
+        <script>new Image().src='/g/collect?tid=G-TEST&en=view_item&pr1=idwidget~nmWidget&dl='+encodeURIComponent(location.href)</script>`,
+      '/g/collect': { body: '', status: 204 }
+    }, true, ['tracking'], false);
+    expect(result).toMatchObject({
+      site_ga4_detected: true, site_ga4_collection_hit_detected: true, product_payload_status: 'pass'
+    });
+    expect((result.evidence_bundle as { product: { ga4_view_item_hits: unknown[] } }).product.ga4_view_item_hits).toHaveLength(1);
+  }, 35_000);
+
+  it('MULTI-PDP-01 retains a later dataLayer event without treating it as collected', async () => {
     const product = (body = '') => `<form action="/cart/add"><button>Add to cart</button></form>${body}`;
     const result = await auditFixture(200, {
       '/': `<a href="/products/a">A</a><a href="/products/b">B</a>`,
@@ -530,9 +545,9 @@ describe('runStorefrontAudit production browser wiring', () => {
       '/products/b': product(`<script>window.dataLayer=[{event:'view_item', ecommerce:{items:[{item_id:'b',item_name:'B'}]}}]</script>`)
     }, true, ['tracking']);
     const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ outcome: string }> } };
-    expect(result.product_payload_status).toBe('pass');
+    expect(result.product_payload_status).toBe('ga4_not_detected');
     expect(evidence.product.candidate_outcomes.map((item) => item.outcome)).toEqual([
-      'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', 'VALID_PRODUCT_WITH_VIEW_ITEM'
+      'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'
     ]);
   }, 45_000);
 
@@ -546,10 +561,10 @@ describe('runStorefrontAudit production browser wiring', () => {
     }, true, ['tracking']);
     const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ url: string; outcome: string; minimum_observation_ms?: number; extended_observation_used?: boolean }>; product_runtime: { candidate_total_ms: number; minimum_observation_ms: number; extended_observation_ms: number; product_budget_ms: number } } };
     const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string; candidate_attempt?: number }>;
-    expect(result.product_payload_status).toBe('pass');
+    expect(result.product_payload_status).toBe('ga4_not_detected');
     expect(evidence.product.candidate_outcomes).toEqual(expect.arrayContaining([
       expect.objectContaining({ url: expect.stringContaining('/products/a'), outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', extended_observation_used: false }),
-      expect.objectContaining({ url: expect.stringContaining('/products/b'), outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' })
+      expect.objectContaining({ url: expect.stringContaining('/products/b'), outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' })
     ]));
     expect(evidence.product.candidate_outcomes).not.toEqual(expect.arrayContaining([expect.objectContaining({ url: expect.stringContaining('/products/c') })]));
     expect(evidence.product.candidate_outcomes[0].minimum_observation_ms).toBeGreaterThanOrEqual(250);
@@ -557,7 +572,7 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_extended_observation_skipped_for_reserve', candidate_attempt: 1 })]));
   }, 45_000);
 
-  it('PRODUCT-RUNTIME-02 stops after two complete negative PDPs and emits missing_view_item', async () => {
+  it('PRODUCT-RUNTIME-02 stops after two complete negative PDPs without overriding unresolved gating', async () => {
     const product = `<form action="/cart/add"><button>Add to cart</button></form>`;
     const result = await auditFixture(200, {
       '/': `<script>new Image().src='https://www.google-analytics.com/g/collect?en=page_view';</script><a href="/products/a">A</a><a href="/products/b">B</a><a href="/products/c">Fallback</a>`,
@@ -565,12 +580,14 @@ describe('runStorefrontAudit production browser wiring', () => {
       '/products/b': product,
       '/products/c': product
     }, true, ['tracking'], false);
-    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ url: string; outcome: string; observation_complete: boolean }> } };
+    const evidence = result.evidence_bundle as { product: { candidate_outcomes: Array<{ url: string; outcome: string; observation_complete: boolean; reason_code?: string }> } };
     const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
-    expect(result.product_payload_status).toBe('missing_view_item');
+    expect(result.product_payload_status).toBe('inconclusive');
     expect(evidence.product.candidate_outcomes.filter((outcome) => outcome.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' && outcome.observation_complete)).toHaveLength(2);
+    expect(evidence.product.candidate_outcomes.filter((outcome) => outcome.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM')
+      .every((outcome) => outcome.reason_code === 'PDP_VIEW_ITEM_NOT_OBSERVED')).toBe(true);
     expect(evidence.product.candidate_outcomes).not.toEqual(expect.arrayContaining([expect.objectContaining({ url: expect.stringContaining('/products/c') })]));
-    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_negative_evidence_sufficient' })]));
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_negative_observation_limit_reached' })]));
   }, 45_000);
 
   it('PRODUCT-RUNTIME-03 keeps an incomplete second PDP from becoming a negative finding', async () => {
@@ -597,7 +614,7 @@ describe('runStorefrontAudit production browser wiring', () => {
       '/dcl-stall.js': null
     }, true, ['tracking']);
     const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
-    expect(result.product_payload_status).toBe('pass');
+    expect(result.product_payload_status).toBe('ga4_not_detected');
     expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_domcontentloaded_bypassed_for_semantic_readiness' })]));
     expect(trace).not.toEqual(expect.arrayContaining([expect.objectContaining({ step: 'domcontentloaded_wait_timed_out_continuing', phase: 'product_pdp_load' })]));
   }, 45_000);
@@ -607,9 +624,9 @@ describe('runStorefrontAudit production browser wiring', () => {
       '/': `<a href="/products/hydrated">Hydrated</a>`,
       '/products/hydrated': `<main id="app">Loading</main><script>setTimeout(() => { document.querySelector('#app').innerHTML = '<form action="/cart/add"><button>Add to cart</button></form>'; window.dataLayer=[{event:"view_item", ecommerce:{items:[{item_id:"hydrated", item_name:"Hydrated"}]}}]; }, 300)</script>`
     }, true, ['tracking']);
-    expect(result.product_payload_status).toBe('pass');
+    expect(result.product_payload_status).toBe('ga4_not_detected');
     expect((result.evidence_bundle as { product: { candidate_outcomes: Array<{ outcome: string }> } }).product.candidate_outcomes)
-      .toEqual(expect.arrayContaining([expect.objectContaining({ outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM' })]));
+      .toEqual(expect.arrayContaining([expect.objectContaining({ outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' })]));
   }, 45_000);
 
   it('ACCEPT-E2E-01 runs clean-context Accept for Tracking-only and retains post-Accept view_item', async () => {
@@ -618,7 +635,7 @@ describe('runStorefrontAudit production browser wiring', () => {
       <form action="/cart/add"><button>Add to cart</button></form>`;
     const result = await auditFixture(200, { '/': `<a href="/products/gated">Gated</a>`, '/products/gated': gatedPdp }, true, ['tracking']);
     const trace = JSON.parse(String(result.trace_steps));
-    expect(result).toMatchObject({ product_payload_status: 'pass', consent_status: 'not_tested' });
+    expect(result).toMatchObject({ product_payload_status: 'ga4_not_detected', consent_status: 'not_tested' });
     expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'accept_comparison_completed', reason_code: 'NO_TRACKING_OBSERVED_PRE_ACCEPT' })]));
     expect((result.evidence_bundle as { product: { data_layer_view_item_hits: unknown[] } }).product.data_layer_view_item_hits).toHaveLength(1);
   }, 45_000);
@@ -649,7 +666,13 @@ describe('runStorefrontAudit production browser wiring', () => {
       <form action="/cart/add"><button>Add to cart</button></form>`;
     const result = await auditFixture(200, { '/': `<a href="/products/advanced">Advanced</a>`, '/products/advanced': advancedPdp }, true, ['tracking']);
     const trace = JSON.parse(String(result.trace_steps));
-    expect(result.product_payload_status).toBe('pass');
+    expect(result.product_payload_status).not.toBe('pass');
+    if (result.product_payload_status === 'missing_view_item') {
+      const requests = (result.evidence_bundle as { network: { relevant_requests: Array<{ vendor: string; kind: string; phase: string }> } }).network.relevant_requests;
+      expect(requests).toEqual(expect.arrayContaining([
+        expect.objectContaining({ vendor: 'ga4', kind: 'collection', phase: 'product_pdp_load' })
+      ]));
+    }
     expect((result.evidence_bundle as { network: { observation: { limited_measurement_observed: boolean } } }).network.observation.limited_measurement_observed).toBe(true);
     expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'accept_comparison_completed', reason_code: 'ADVANCED_CONSENT_MODE_OBSERVED' })]));
   }, 45_000);

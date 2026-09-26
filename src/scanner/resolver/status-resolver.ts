@@ -93,6 +93,7 @@ export function resolveProductPayloadStatus(input: {
   site_ga4_detected: boolean | null;
   site_ga4_collection_hit_detected: boolean | null;
   view_item_hits: TrackingRequestEvidence[];
+  pdp_ga4_collection_observed?: boolean;
   runtime_failure?: boolean;
   pdp_discovery_completed?: boolean;
   pdp_observation_complete?: boolean;
@@ -122,17 +123,19 @@ export function resolveProductPayloadStatus(input: {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'PDP_NAV_TIMEOUT', evidence: ['pdp_navigation_failed'] };
   }
 
-  const valid = input.view_item_hits.find((hit) => hit.event === 'view_item' && hit.has_product);
+  const networkViewItems = input.view_item_hits.filter((hit) =>
+    hit.vendor === 'ga4' && hit.kind === 'collection' && hit.event === 'view_item'
+  );
+  const valid = networkViewItems.find((hit) => hit.has_product);
   if (valid) {
-    const sourceEvidence = valid.kind === 'data_layer' ? 'data_layer' : 'ga4_collection';
     return {
       status: 'pass',
       confidence: 'high',
       reason_code: 'GA4_VIEW_ITEM_VALID',
-      evidence: [sourceEvidence, 'view_item', valid.product_id ? 'product_id' : 'product_data']
+      evidence: ['ga4_collection', 'view_item', valid.product_id ? 'product_id' : 'product_data']
     };
   }
-  if (input.view_item_hits.some((hit) => hit.event === 'view_item')) {
+  if (networkViewItems.length > 0) {
     return { status: 'incomplete_view_item', confidence: 'high', reason_code: 'GA4_VIEW_ITEM_INCOMPLETE', evidence: ['view_item'] };
   }
   if (input.runtime_failure) {
@@ -146,13 +149,9 @@ export function resolveProductPayloadStatus(input: {
   if (input.pdp_observation_complete !== true || !requiredCandidatesComplete) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'PDP_OBSERVATION_INCOMPLETE', evidence: ['observation_incomplete'] };
   }
-  // A separate optional consent comparison cannot erase two independently
-  // complete, valid PDP negatives. One candidate (or any incomplete candidate)
-  // still remains conservative when consent evidence is unresolved.
-  const completeNegativeCandidateCount = productCandidates.filter((candidate) =>
-    candidate.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' && candidate.observation_complete === true
-  ).length;
-  if (input.consent_status === 'inconclusive' && completeNegativeCandidateCount < 2) {
+  // Repeated PDP negatives under the same unresolved gate do not establish
+  // observability. A PDP-local collection request does.
+  if (input.consent_status === 'inconclusive' && !input.pdp_ga4_collection_observed) {
     return { status: 'inconclusive', confidence: 'low', reason_code: 'CONSENT_INCONCLUSIVE', evidence: [] };
   }
   if ((input.site_ga4_detected || input.site_ga4_collection_hit_detected) && input.ga4_observation_complete === true) {

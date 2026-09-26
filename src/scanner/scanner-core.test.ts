@@ -361,15 +361,40 @@ describe('PDP candidate selection', () => {
       .toBeGreaterThan(scorePdpCandidate('https://example.com/support/widget', 'example.com'));
   });
 
-  it('rejects an out-of-stock product and accepts a product with a usable cart action', () => {
+  it('keeps a sold-out product valid independently of view_item', () => {
     const unavailable = JSON.parse(readFileSync(path.join(process.cwd(), 'tests/fixtures/mizzen-out-of-stock-pdp.json'), 'utf8'));
     expect(assessPdpCandidate(unavailable.signals)).toEqual({ is_product: true, out_of_stock: true });
+    expect(classifyProductPageRole(unavailable.signals).page_role).toBe('PDP');
     expect(assessPdpCandidate({ ...unavailable.signals, enabled_add_to_cart: true })).toEqual({ is_product: true, out_of_stock: false });
-    expect(pdpCandidateRejectionReason({ is_product: true, out_of_stock: true }, false)).toBe('PDP_OUT_OF_STOCK');
+    expect(pdpCandidateRejectionReason({ is_product: true, out_of_stock: true }, false)).toBeNull();
     expect(pdpCandidateRejectionReason({ is_product: true, out_of_stock: true }, true)).toBeNull();
     expect(pdpCandidateRejectionReason({ is_product: false, out_of_stock: false }, true)).toBeNull();
     expect(isStrongProductPath('https://example.com/product/model-a')).toBe(true);
     expect(isStrongProductPath('https://example.com/shop/replacement-parts')).toBe(false);
+  });
+
+  it('LN-01 observes a sold-out PDP and can report missing view_item', () => {
+    const url = 'https://sold-out.example/products/item';
+    const evidence = baseEvidence('sold-out.example');
+    evidence.selected_modules = ['tracking'];
+    evidence.page.valid = true;
+    evidence.product.executed = true;
+    evidence.product.pdp_candidates = [url];
+    evidence.product.pdp_url = url;
+    evidence.product.navigation_succeeded = true;
+    evidence.product.candidate_outcomes = [{
+      url, final_url: url, page_role: 'PDP', semantic_result: 'VALID_PRODUCT',
+      strong_commerce_signals: ['structured_out_of_stock'], navigation_complete: true,
+      observation_complete: true, outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'
+    }];
+    evidence.network.relevant_requests = [{
+      vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'www.google-analytics.com',
+      path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1,
+      event: 'page_view', measurement_id: 'G-TEST', page_url: url
+    }];
+    expect(replayEvidence(evidence)).toMatchObject({
+      pdp_url_tested: url, product_payload_status: 'missing_view_item'
+    });
   });
 
   it('classifies product listings separately from PDP semantic strength', () => {
@@ -401,6 +426,7 @@ describe('PDP candidate selection', () => {
     } satisfies TrackingRequestEvidence;
     expect(isViewItemForPdp(hit, 'https://www.example.com/product/model-a')).toBe(true);
     expect(isViewItemForPdp(hit, 'https://example.com/product/model-b')).toBe(false);
+    expect(isViewItemForPdp({ ...hit, kind: 'data_layer' }, 'https://www.example.com/product/model-a')).toBe(false);
     expect(isViewItemForPdp({ ...hit, page_url: 'https://example.com/products/model-a' }, 'https://example.com/product/model-a', 'https://example.com/products/model-a')).toBe(true);
     expect(pdpReadinessSatisfied(null, false)).toBe(false);
     expect(pdpReadinessSatisfied({ is_product: true }, false)).toBe(true);
@@ -1286,6 +1312,69 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     expect(result.finding_confidence?.product.reason_code).toBe('GA4_NO_VIEW_ITEM');
   });
 
+  it.each([1, 2, 3])('LN-01 keeps %i complete PDP negatives inconclusive under unresolved gating', (count) => {
+    const fixture = JSON.parse(readFileSync(path.join(process.cwd(), 'tests/fixtures/ln-01-tracking-truth.json'), 'utf8'));
+    const urls: string[] = fixture.pdp_urls.slice(0, count);
+    const evidence = baseEvidence('ln-01.example');
+    evidence.selected_modules = ['tracking'];
+    evidence.page.valid = true;
+    evidence.consent.tracking_enablement = 'inconclusive';
+    evidence.product.executed = true;
+    evidence.product.pdp_candidates = urls;
+    evidence.product.pdp_url = urls[urls.length - 1];
+    evidence.product.navigation_succeeded = true;
+    evidence.product.candidate_outcomes = urls.map((url) => ({
+      url, final_url: url, page_role: 'PDP' as const, semantic_result: 'VALID_PRODUCT' as const,
+      navigation_complete: true, observation_complete: true, outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' as const
+    }));
+    evidence.network.relevant_requests = [{
+      vendor: 'ga4', kind: 'script', collector: 'third_party', host: 'www.googletagmanager.com',
+      path: '/gtag/js', method: 'GET', phase: 'consent_initial_load', timestamp: 1, measurement_id: 'G-TEST'
+    }];
+    const result = replayEvidence(evidence);
+    expect(result.product_payload_status).toBe('inconclusive');
+    expect(result.finding_confidence?.product.reason_code).toBe('CONSENT_INCONCLUSIVE');
+    expect(result.evidence_bundle?.decision_summary?.find((item) => item.decision_name === 'product_payload')?.observation_complete).toBe(false);
+  });
+
+  it('LN-01 allows a PDP-local GA4 collection negative with complete request observation', () => {
+    const fixture = JSON.parse(readFileSync(path.join(process.cwd(), 'tests/fixtures/ln-01-tracking-truth.json'), 'utf8'));
+    const url: string = fixture.pdp_urls[0];
+    const evidence = baseEvidence('ln-01.example');
+    evidence.selected_modules = ['consent', 'tracking'];
+    evidence.page.valid = true;
+    evidence.consent.executed = true;
+    evidence.consent.tracking_enablement = 'inconclusive';
+    evidence.consent.acceptance_attempted = true;
+    evidence.consent.acceptance_verified = false;
+    evidence.product.executed = true;
+    evidence.product.pdp_candidates = [url];
+    evidence.product.pdp_url = url;
+    evidence.product.navigation_succeeded = true;
+    evidence.product.candidate_outcomes = [{
+      url, final_url: url, page_role: 'PDP', semantic_result: 'VALID_PRODUCT',
+      navigation_complete: true, observation_complete: true, outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'
+    }];
+    evidence.network.relevant_requests = [fixture.pdp_page_view];
+    evidence.network.observation!.data_layer_capture_completed = false;
+    evidence.network.observation!.performance_capture_completed = false;
+    const result = replayEvidence(evidence);
+    expect(result.product_payload_status).toBe('missing_view_item');
+    expect(result.finding_confidence?.product.reason_code).toBe('GA4_NO_VIEW_ITEM');
+    expect(result.evidence_bundle?.decision_summary?.find((item) => item.decision_name === 'product_payload')?.observation_complete).toBe(true);
+
+    const otherPdp = structuredClone(evidence);
+    otherPdp.network.relevant_requests[0].page_url = fixture.pdp_urls[1];
+    expect(replayEvidence(otherPdp).product_payload_status).toBe('inconclusive');
+
+    const otherPdpViewItem = structuredClone(evidence);
+    otherPdpViewItem.product.ga4_view_item_hits = [{
+      ...fixture.pdp_page_view, event: 'view_item', page_url: fixture.pdp_urls[1],
+      has_product: true, product_id: 'other-product'
+    }];
+    expect(replayEvidence(otherPdpViewItem).product_payload_status).toBe('missing_view_item');
+  });
+
   it('builds the complete sanitized debug package manifest', () => {
     const evidence = baseEvidence();
     evidence.runtime.screenshots.push({ name: 'home page.jpg', mime_type: 'image/jpeg', content_base64: 'aGVsbG8=' });
@@ -1366,7 +1455,7 @@ describe('status resolver and consistency', () => {
     }).status).toBe('pass');
   });
 
-  it('resolves a valid dataLayer view_item as a product pass without inventing a collection hit', () => {
+  it('retains a dataLayer view_item as implementation evidence without GA4 detection or a product pass', () => {
     const collector = new EvidenceCollector({ auditId: 'datalayer', domain: 'example.com', geo: 'USA', mode: 'normal' });
     const evidence = collector.bundle;
     evidence.page.valid = true;
@@ -1376,14 +1465,18 @@ describe('status resolver and consistency', () => {
     evidence.product.pdp_candidates = ['https://example.com/product/model'];
     evidence.product.pdp_url = 'https://example.com/product/model';
     evidence.product.navigation_succeeded = true;
+    evidence.product.observation!.minimum_observation_satisfied = true;
     Object.assign(evidence.network.observation!, { request_listener_active: true, request_capture_completed: true, data_layer_capture_completed: true, performance_capture_completed: true });
     const entry = JSON.parse(readFileSync(path.join(process.cwd(), 'tests/fixtures/listenlively-m2-datalayer.json'), 'utf8'));
     collector.captureDataLayerViewItem({ entry, pageUrl: evidence.product.pdp_url, phase: 'product_pdp_load', timestamp: 1 });
     const result = replayEvidence(evidence);
-    expect(result.product_payload_status).toBe('pass');
-    expect(result.site_ga4_detected).toBe(true);
+    expect(result.product_payload_status).toBe('ga4_not_detected');
+    expect(result.site_ga4_detected).toBe(false);
     expect(result.site_ga4_collection_hit_detected).toBe(false);
-    expect(result.finding_confidence?.product.evidence).toContain('data_layer');
+    expect(result.site_ga4_measurement_ids).toEqual([]);
+    expect(result.finding_confidence?.product.evidence).toEqual(expect.arrayContaining(['DATALAYER_VIEW_ITEM_OBSERVED', 'PRODUCT_EVENT_MODEL_OBSERVED']));
+    expect(result.evidence_bundle?.product.data_layer_view_item_hits).toHaveLength(1);
+    expect(result.evidence_bundle?.decision_summary?.find((item) => item.decision_name === 'product_payload')?.evidence_codes).toContain('DATALAYER_VIEW_ITEM_OBSERVED');
   });
 
   it('keeps the sanitized ListenLively M1 network view_item through collection and shared replay', () => {
@@ -1611,7 +1704,7 @@ describe('decision hardening regression pack', () => {
     evidence.product.applicability = 'inconclusive'; evidence.product.pdp_candidates = ['https://promotion.example/products/a', 'https://promotion.example/products/b']; evidence.product.pdp_url = evidence.product.pdp_candidates[1]; evidence.product.navigation_succeeded = true;
     evidence.product.candidate_outcomes = [
       { url: evidence.product.pdp_candidates[0], outcome: 'INVALID_PRODUCT', semantic_result: 'INVALID_PRODUCT', observation_complete: true },
-      { url: evidence.product.pdp_url, outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM', semantic_result: 'VALID_PRODUCT', observation_complete: true }
+      { url: evidence.product.pdp_url, page_role: 'PDP', outcome: 'VALID_PRODUCT_WITH_VIEW_ITEM', semantic_result: 'VALID_PRODUCT', navigation_complete: true, observation_complete: true }
     ];
     evidence.product.ga4_view_item_hits = [{ vendor: 'ga4', kind: 'collection', collector: 'third_party', host: 'analytics.google.com', path: '/g/collect', method: 'POST', phase: 'product_pdp_load', timestamp: 1, event: 'view_item', has_product: true, product_id: 'sku' }];
     const result = replayEvidence(evidence);

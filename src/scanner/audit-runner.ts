@@ -780,7 +780,6 @@ export function pdpCandidateRejectionReason(
 ) {
   if (hasValidViewItem) return null;
   if (!assessment.is_product) return 'PDP_PRODUCT_SIGNALS_MISSING';
-  if (assessment.out_of_stock) return 'PDP_OUT_OF_STOCK';
   return null;
 }
 
@@ -800,7 +799,7 @@ function matchesPdpUrl(pageUrl: string | undefined, candidateUrl: string, finalP
 }
 
 export function isViewItemForPdp(hit: TrackingRequestEvidence, candidateUrl: string, finalPdpUrl = candidateUrl) {
-  if (hit.vendor !== 'ga4' || hit.event !== 'view_item' || !hit.has_product) return false;
+  if (hit.vendor !== 'ga4' || hit.kind !== 'collection' || hit.event !== 'view_item' || !hit.has_product) return false;
   return matchesPdpUrl(hit.page_url, candidateUrl, finalPdpUrl);
 }
 
@@ -2740,7 +2739,6 @@ export async function runStorefrontAudit(
         const candidateStarted = Date.now();
         let candidateNavigationElapsedMs = 0;
         const viewItemStart = evidence.product.ga4_view_item_hits.length;
-        const dataLayerViewItemStart = (evidence.product.data_layer_view_item_hits || []).length;
         addTrace('pdp_navigation_started', {
           pdp_url: safeUrl(pdpUrl),
           candidate_attempt: candidateIndex + 1,
@@ -2870,10 +2868,7 @@ export async function runStorefrontAudit(
           }
           const candidateNetworkViewItemHits = () => evidence.product.ga4_view_item_hits.slice(viewItemStart)
             .filter((hit) => isViewItemForPdp(hit, pdpUrl, finalPdpUrl));
-          const candidateDataLayerViewItemHits = () => (evidence.product.data_layer_view_item_hits || []).slice(dataLayerViewItemStart)
-            .filter((hit) => isViewItemForPdp(hit, pdpUrl, finalPdpUrl));
-          const candidateViewItemHits = () => [...candidateNetworkViewItemHits(), ...candidateDataLayerViewItemHits()];
-          let candidateHits = candidateViewItemHits();
+          let candidateHits = candidateNetworkViewItemHits();
           const finalPdpUrlValid = Boolean(
             productPatternPdpCandidate(finalPdpUrl, effectiveDomain) || twoLevelPdpCandidate(finalPdpUrl, effectiveDomain)
           );
@@ -2903,26 +2898,26 @@ export async function runStorefrontAudit(
             }, { module: 'product', severity: 'info' });
             continue;
           }
-          const needsTrackingEvidence = assessmentUnavailable || assessment.out_of_stock ||
+          const needsTrackingEvidence = assessmentUnavailable ||
             !assessment.pdp_semantic_strength && !candidateHits.some((hit) => hit.has_product);
           const extendedGraceEligible = isStrongPdpGraceCandidate(candidate, assessment);
           if (needsTrackingEvidence && !candidateHits.some((hit) => hit.has_product) && extendedGraceEligible) {
             pdpOperation = 'pdp_candidate_tracking_observation';
             addTrace('pdp_candidate_tracking_observation_started', {
               pdp_url: safeUrl(pdpUrl), wait_ms: PDP_POST_LOAD_OBSERVATION_MS,
-              reason: assessment.out_of_stock ? 'Out-of-stock signal can be overridden by a valid view_item' : 'Strong product path lacks conventional DOM product signals'
+              reason: 'Strong product path lacks conventional DOM product signals'
             });
             const candidateObservationStart = Date.now();
             let readinessPolls = 0;
             while (Date.now() - candidateObservationStart < PDP_POST_LOAD_OBSERVATION_MS) {
-              candidateHits = candidateViewItemHits();
+              candidateHits = candidateNetworkViewItemHits();
               if (candidateHits.some((hit) => hit.has_product)) break;
               // JS storefronts frequently hydrate product DOM after commit. Poll
               // boundedly so either DOM or a network view_item wins the race.
               if (readinessPolls++ % 5 === 0 && !assessmentUnavailable) {
                 try {
                   assessment = await inspectPdpCandidate(pdpPage);
-                  if (assessment.is_product && !assessment.out_of_stock) break;
+                  if (assessment.is_product) break;
                 } catch (error) {
                   assessmentUnavailable = true;
                   addTrace('pdp_candidate_assessment_failed', {
@@ -2937,7 +2932,7 @@ export async function runStorefrontAudit(
             const candidateDataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector);
             if (candidateDataLayerCaptured > 0) {
               addTrace('ga4_data_layer_view_item_captured', { phase: 'product_pdp_load', count: candidateDataLayerCaptured });
-              candidateHits = candidateViewItemHits();
+              candidateHits = candidateNetworkViewItemHits();
             }
             if (!candidateHits.some((hit) => hit.has_product) && !assessmentUnavailable) {
               try {
@@ -2990,7 +2985,7 @@ export async function runStorefrontAudit(
             addTrace('pdp_candidate_rejected', { pdp_url: safeUrl(pdpUrl), reason_code: rejectionReason });
             continue;
           }
-          if (hasValidCandidateViewItem && (assessment.out_of_stock || !assessment.is_product)) {
+          if (hasValidCandidateViewItem && !assessment.is_product) {
             addTrace('pdp_candidate_accepted_from_view_item', {
               pdp_url: safeUrl(pdpUrl), reason_code: 'GA4_VIEW_ITEM_VALID',
               dom_product_signals_present: assessment.is_product, out_of_stock_signal_present: assessment.out_of_stock
@@ -3023,9 +3018,7 @@ export async function runStorefrontAudit(
           pdpOperation = 'pdp_performance_capture';
           const pdpTimingRecovered = await capturePerformanceTrackingRequests(pdpPage, 'product_pdp_load', evidenceCollector);
           if (pdpTimingRecovered > 0) addTrace('performance_tracking_requests_recovered', { phase: 'product_pdp_load', count: pdpTimingRecovered });
-          let finalNetworkViewItems = candidateNetworkViewItemHits();
-          let finalDataLayerViewItems = candidateDataLayerViewItemHits();
-          let finalViewItems = [...finalNetworkViewItems, ...finalDataLayerViewItems];
+          let finalViewItems = candidateNetworkViewItemHits();
           let candidateHasViewItem = finalViewItems.some((hit) => hit.has_product);
           const strongAlternateQueued = candidateQueue.slice(candidateIndex + 1, maxPdpCandidates)
             .some(isMeaningfulAlternate);
@@ -3047,7 +3040,7 @@ export async function runStorefrontAudit(
                 reserve_reason: strongAlternateQueued ? 'reserve_unavailable' : 'no_meaningful_alternate'
               });
               while (Date.now() - observationStart < PDP_POST_LOAD_OBSERVATION_MS) {
-                const latest = candidateViewItemHits();
+                const latest = candidateNetworkViewItemHits();
                 if (latest.some((hit) => hit.has_product)) break;
                 await wait(100, pdpPage);
                 checkProductBudget();
@@ -3056,9 +3049,7 @@ export async function runStorefrontAudit(
               await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector);
               pdpOperation = 'pdp_performance_capture';
               await capturePerformanceTrackingRequests(pdpPage, 'product_pdp_load', evidenceCollector);
-              finalNetworkViewItems = candidateNetworkViewItemHits();
-              finalDataLayerViewItems = candidateDataLayerViewItemHits();
-              finalViewItems = [...finalNetworkViewItems, ...finalDataLayerViewItems];
+              finalViewItems = candidateNetworkViewItemHits();
               candidateHasViewItem = finalViewItems.some((hit) => hit.has_product);
             }
           }
@@ -3085,7 +3076,7 @@ export async function runStorefrontAudit(
             view_item_detected: candidateHasViewItem,
             strong_commerce_signals: Object.entries(assessment.signals).filter(([key, value]) => value && ['json_ld_product', 'og_product', 'product_form', 'enabled_add_to_cart', 'structured_in_stock', 'structured_out_of_stock', 'disabled_sold_out_control'].includes(key)).map(([key]) => key),
             supporting_signals: Object.entries(assessment.signals).filter(([key, value]) => value && ['visible_product_heading', 'visible_price', 'unavailable_message'].includes(key)).map(([key]) => key),
-            reason_code: candidateHasViewItem ? 'GA4_VIEW_ITEM_VALID' : 'GA4_NO_VIEW_ITEM',
+            reason_code: candidateHasViewItem ? 'GA4_VIEW_ITEM_VALID' : 'PDP_VIEW_ITEM_NOT_OBSERVED',
             outcome: candidateHasViewItem ? 'VALID_PRODUCT_WITH_VIEW_ITEM' : 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM'
           };
           recordCandidateOutcome(candidateOutcome);
@@ -3140,9 +3131,8 @@ export async function runStorefrontAudit(
             outcome.outcome === 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' && outcome.observation_complete === true
           ).length;
           if (completeNegativeCandidates >= 2) {
-            addTrace('pdp_negative_evidence_sufficient', {
-              completed_candidates: completeNegativeCandidates,
-              reason_code: 'GA4_NO_VIEW_ITEM'
+            addTrace('pdp_negative_observation_limit_reached', {
+              completed_candidates: completeNegativeCandidates
             });
             break;
           }
