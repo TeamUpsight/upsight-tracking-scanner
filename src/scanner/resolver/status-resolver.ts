@@ -178,6 +178,10 @@ export function resolveOverallStatus(input: {
 }): { status: 'pass' | 'warning' | 'fail' | 'inconclusive'; confidence: Confidence } {
   const selected = input.selected_modules || ['consent', 'tracking', 'server_side'];
   if (input.error_category !== 'none') return { status: 'inconclusive', confidence: 'low' };
+  const fail = selected.includes('consent') && (input.consent_status === 'consent_leakage' || input.consent_status === 'prior_consent_violation' || input.consent_status === 'missing') ||
+    selected.includes('tracking') && (input.product_status === 'missing_view_item' || input.product_status === 'incomplete_view_item') ||
+    selected.includes('server_side') && input.server_status === 'partial_or_misconfigured';
+  if (fail) return { status: 'fail', confidence: 'high' };
   const moduleStatuses = [
     selected.includes('consent') ? input.consent_status : undefined,
     selected.includes('tracking') ? input.product_status : undefined,
@@ -186,10 +190,6 @@ export function resolveOverallStatus(input: {
   if (moduleStatuses.some((value) => value === 'inconclusive' || value === 'not_tested' || value === null)) {
     return { status: 'inconclusive', confidence: 'low' };
   }
-  const fail = selected.includes('consent') && (input.consent_status === 'consent_leakage' || input.consent_status === 'prior_consent_violation' || input.consent_status === 'missing') ||
-    selected.includes('tracking') && (input.product_status === 'missing_view_item' || input.product_status === 'incomplete_view_item') ||
-    selected.includes('server_side') && input.server_status === 'partial_or_misconfigured';
-  if (fail) return { status: 'fail', confidence: 'high' };
   const warning = selected.includes('tracking') && (input.product_status === 'ga4_not_detected' || input.product_status === 'pdp_not_found') ||
     selected.includes('server_side') && input.server_status === 'not_detected' ||
     selected.includes('consent') && input.consent_status === 'not_detected';

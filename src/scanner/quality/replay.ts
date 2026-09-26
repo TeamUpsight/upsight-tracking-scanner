@@ -95,7 +95,7 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
   const serverSelected = selected_modules.includes('server_side');
   const requests = evidence.network.relevant_requests;
   const requestObservationComplete = serverRequestObservationComplete(evidence.network.observation);
-  const networkObservationComplete = requestObservationComplete &&
+  const networkObservationComplete = requestObservationComplete && evidence.network.relevant_requests_truncated !== true &&
     evidence.network.observation?.request_capture_completed === true &&
     evidence.network.observation?.data_layer_capture_completed === true &&
     evidence.network.observation?.performance_capture_completed === true;
@@ -146,7 +146,7 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
       banner_visible: evidence.consent.banner_visible
     })
     : { provider: null as CmpProvider | null, confidence: 'low' as const, evidence: [], banner_visible: null, reason_code: 'CMP_NOT_TESTED' };
-  const cmp = evidence.consent.resolved_provider !== undefined
+  const cmp = consentSelected && evidence.consent.resolved_provider !== undefined
     ? { provider: evidence.consent.resolved_provider, confidence: evidence.consent.resolved_provider_confidence || 'medium' as const, evidence: evidence.consent.resolved_provider_evidence || detectedCmp.evidence, banner_visible: detectedCmp.banner_visible, reason_code: evidence.consent.resolved_provider === 'Unknown' ? 'CMP_PROVIDER_UNKNOWN' : 'CMP_PROVIDER_IDENTIFIED' }
     : detectedCmp;
 
@@ -198,12 +198,12 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     : candidateOutcomes.length === 0 && evidence.product.observation?.minimum_observation_satisfied === true &&
       evidence.product.observation.transport_failure !== true && evidence.product.observation.timeout !== true;
   const ga4ProductObservationComplete = candidateObservationComplete &&
-    (trackingObservationEligible || (pdpGa4CollectionObserved && requestObservationComplete));
+    (trackingObservationEligible || (pdpGa4CollectionObserved && requestObservationComplete && evidence.network.relevant_requests_truncated !== true));
   const product = trackingSelected ? resolveProductPayloadStatus({
     executed: evidence.product.executed,
     page_valid: evidence.page.valid,
     pdp_found: evidence.product.pdp_candidates.length > 0 || Boolean(evidence.product.pdp_url),
-    pdp_navigation_succeeded: evidence.product.navigation_succeeded,
+    pdp_navigation_succeeded: Boolean(confirmedPdpCandidate || evidence.product.navigation_succeeded),
     consent_status: trackingEnablementValid ? consent.status : 'inconclusive',
     site_ga4_detected: ga4Installed ? true : trackingObservationEligible ? false : null,
     site_ga4_collection_hit_detected: ga4Collections.length > 0 ? true : trackingObservationEligible ? false : null,
@@ -254,16 +254,16 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
       consent: { status: consent.status, confidence: consent.confidence, evidence: consent.evidence, reason_code: consent.reason_code },
       ga4: {
         detected: trackingSelected && evidence.page.valid === true ? ga4Installed ? true : trackingObservationEligible ? false : null : null,
-        confidence: ga4Collections.length > 0 ? 'high' : ga4.length > 0 ? 'medium' : 'low',
-        evidence: ga4Collections.length > 0 ? ['network_hit'] : ga4.length > 0 ? ['script'] : [],
-        reason_code: evidence.page.valid !== true ? 'GA4_NOT_TESTED' : ga4Collections.length > 0 ? 'GA4_COLLECTION_DETECTED' : ga4.length > 0 ? 'GA4_SCRIPT_ONLY' : trackingObservationEligible ? 'GA4_NOT_DETECTED' : 'GA4_OBSERVATION_INCOMPLETE'
+        confidence: trackingSelected && ga4Collections.length > 0 ? 'high' : trackingSelected && ga4.length > 0 ? 'medium' : 'low',
+        evidence: !trackingSelected ? [] : ga4Collections.length > 0 ? ['network_hit'] : ga4.length > 0 ? ['script'] : [],
+        reason_code: !trackingSelected || evidence.page.valid !== true ? 'GA4_NOT_TESTED' : ga4Collections.length > 0 ? 'GA4_COLLECTION_DETECTED' : ga4.length > 0 ? 'GA4_SCRIPT_ONLY' : trackingObservationEligible ? 'GA4_NOT_DETECTED' : 'GA4_OBSERVATION_INCOMPLETE'
       },
-      product: { status: product.status, confidence: product.confidence, evidence: [...product.evidence, ...(dataLayerViewItems.length > 0 ? ['DATALAYER_VIEW_ITEM_OBSERVED', 'PRODUCT_EVENT_MODEL_OBSERVED'] : [])], reason_code: product.reason_code },
+      product: { status: product.status, confidence: product.confidence, evidence: trackingSelected ? [...product.evidence, ...(dataLayerViewItems.length > 0 ? ['DATALAYER_VIEW_ITEM_OBSERVED', 'PRODUCT_EVENT_MODEL_OBSERVED'] : [])] : [], reason_code: product.reason_code },
       meta: {
         detected: trackingSelected && evidence.page.valid === true ? metaInstalled ? true : trackingObservationEligible ? false : null : null,
-        confidence: metaCollections.length > 0 ? 'high' : metaInstalled ? 'medium' : 'low',
-        evidence: metaCollections.length > 0 ? ['network_hit'] : meta.length > 0 ? ['script'] : metaInstallationSignals.map((signal) => signal.source),
-        reason_code: evidence.page.valid !== true || !trackingEnablementValid ? 'META_NOT_TESTED' : metaCollections.length > 0 ? 'META_COLLECTION_DETECTED' : metaInstalled ? 'META_SCRIPT_ONLY' : trackingObservationEligible ? 'META_NOT_DETECTED' : 'META_OBSERVATION_INCOMPLETE'
+        confidence: trackingSelected && metaCollections.length > 0 ? 'high' : trackingSelected && metaInstalled ? 'medium' : 'low',
+        evidence: !trackingSelected ? [] : metaCollections.length > 0 ? ['network_hit'] : meta.length > 0 ? ['script'] : metaInstallationSignals.map((signal) => signal.source),
+        reason_code: !trackingSelected || evidence.page.valid !== true || !trackingEnablementValid ? 'META_NOT_TESTED' : metaCollections.length > 0 ? 'META_COLLECTION_DETECTED' : metaInstalled ? 'META_SCRIPT_ONLY' : trackingObservationEligible ? 'META_NOT_DETECTED' : 'META_OBSERVATION_INCOMPLETE'
       },
       server_side: { status: server.status, confidence: server.status === 'first_party_collection_detected' ? 'high' : server.status === 'inconclusive' ? 'low' : 'medium', evidence: server.evidence_codes, reason_code: server.reason_code }
     },
@@ -295,7 +295,6 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
   corrected.overall_status = finalOverall.status;
   corrected.overall_confidence = finalOverall.confidence;
   corrected.reason_codes = [...new Set([
-    ...(corrected.reason_codes || []),
     ...Object.entries(corrected.finding_confidence || {})
       .filter(([name]) => (name === 'cmp' || name === 'consent') ? consentSelected : (name === 'ga4' || name === 'meta' || name === 'product') ? trackingSelected : name === 'server_side' ? serverSelected : false)
       .map(([, finding]) => finding.reason_code).filter(Boolean)
@@ -316,12 +315,12 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
     };
   };
   evidence.decision_summary = [
-    decision('consent', corrected.consent_status ?? null, corrected.finding_confidence?.consent, consentSelected, evidence.consent.post_reject_observation_completed),
-    decision('cmp', corrected.cmp_provider ?? null, corrected.finding_confidence?.cmp, consentSelected, evidence.consent.executed),
-    decision('product_payload', corrected.product_payload_status ?? null, corrected.finding_confidence?.product, evidence.product.applicability === 'applicable', ga4ProductObservationComplete),
-    decision('ga4', corrected.site_ga4_detected ?? null, corrected.finding_confidence?.ga4, trackingSelected, trackingObservationEligible),
-    decision('meta', corrected.site_meta_detected ?? null, corrected.finding_confidence?.meta, trackingSelected, trackingObservationEligible),
-    decision('server_side', corrected.server_side_status ?? null, corrected.finding_confidence?.server_side, serverSelected, evidence.server_side.passive_classification_completed === true && requestObservationComplete)
+    decision('consent', corrected.consent_status ?? null, corrected.finding_confidence?.consent, consentSelected, consentSelected ? evidence.consent.post_reject_observation_completed : null),
+    decision('cmp', corrected.cmp_provider ?? null, corrected.finding_confidence?.cmp, consentSelected, consentSelected ? evidence.consent.executed : null),
+    decision('product_payload', corrected.product_payload_status ?? null, corrected.finding_confidence?.product, trackingSelected && evidence.product.applicability === 'applicable', trackingSelected ? ga4ProductObservationComplete : null),
+    decision('ga4', corrected.site_ga4_detected ?? null, corrected.finding_confidence?.ga4, trackingSelected, trackingSelected ? trackingObservationEligible : null),
+    decision('meta', corrected.site_meta_detected ?? null, corrected.finding_confidence?.meta, trackingSelected, trackingSelected ? trackingObservationEligible : null),
+    decision('server_side', corrected.server_side_status ?? null, corrected.finding_confidence?.server_side, serverSelected, serverSelected ? evidence.server_side.passive_classification_completed === true && requestObservationComplete : null)
   ];
   const violations = [...new Set([...accessViolations, ...consistency.violations])];
   corrected.consistency_violations = violations;

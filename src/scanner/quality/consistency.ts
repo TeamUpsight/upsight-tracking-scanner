@@ -42,7 +42,7 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
   const violations: string[] = accessEvidenceViolations(evidence);
   let priority = 0;
   const requestObservationComplete = serverRequestObservationComplete(evidence.network.observation);
-  const networkObservationComplete = requestObservationComplete &&
+  const networkObservationComplete = requestObservationComplete && evidence.network.relevant_requests_truncated !== true &&
     evidence.network.observation?.request_capture_completed === true &&
     evidence.network.observation?.data_layer_capture_completed === true &&
     evidence.network.observation?.performance_capture_completed === true;
@@ -105,7 +105,10 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
   corrected.finding_confidence = confidence;
 
   if (includesAuditModule(evidence.selected_modules, 'tracking') && corrected.site_ga4_detected === true && corrected.product_payload_status === 'ga4_not_detected') {
-    corrected.product_payload_status = corrected.consent_status === 'inconclusive' ? 'inconclusive' : 'missing_view_item';
+    corrected.product_payload_status = 'inconclusive';
+    corrected.finding_confidence = { ...corrected.finding_confidence, product: {
+      ...(corrected.finding_confidence?.product || { evidence: [] }), status: 'inconclusive', confidence: 'low', reason_code: 'GA4_PRODUCT_STATUS_CONTRADICTION'
+    } };
     violations.push('SITE_GA4_PRODUCT_STATUS_CONTRADICTION');
     priority += 35;
   }
@@ -114,6 +117,9 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
   if (includesAuditModule(evidence.selected_modules, 'tracking') && metaCollectionSeen && corrected.site_meta_detected === false) {
     corrected.site_meta_detected = true;
     corrected.site_meta_collection_hit_detected = true;
+    corrected.finding_confidence = { ...corrected.finding_confidence, meta: {
+      ...(corrected.finding_confidence?.meta || { evidence: [] }), detected: true, confidence: 'high', reason_code: 'META_COLLECTION_DETECTED'
+    } };
     violations.push('META_COLLECTION_SUMMARY_CONTRADICTION');
     priority += 35;
   }
@@ -132,13 +138,16 @@ export function enforceConsistency(audit: Partial<StorefrontAudit>, evidence: Ev
     }
     if (includesAuditModule(evidence.selected_modules, 'tracking') && corrected.product_payload_status !== 'not_tested') {
       corrected.product_payload_status = 'not_tested';
+      confidence.product = { ...(confidence.product || { confidence: 'low', evidence: [] }), status: 'not_tested', confidence: 'low', reason_code: 'PRODUCT_NOT_TESTED' };
       violations.push('INVALID_PAGE_PRODUCT_CONCLUSION');
     }
     if (includesAuditModule(evidence.selected_modules, 'server_side') && (corrected.server_side_status !== 'not_tested' || corrected.ss_collection_type !== 'not_tested')) {
       corrected.server_side_status = 'not_tested';
       corrected.ss_collection_type = 'not_tested';
+      confidence.server_side = { ...(confidence.server_side || { confidence: 'low', evidence: [] }), status: 'not_tested', confidence: 'low', reason_code: 'SERVER_NOT_TESTED' };
       violations.push('INVALID_PAGE_SERVER_CONCLUSION');
     }
+    corrected.finding_confidence = confidence;
     if (includesAuditModule(evidence.selected_modules, 'tracking')) {
       const findingConfidence = { ...(corrected.finding_confidence || {}) };
       for (const key of ['ga4', 'meta'] as const) {

@@ -570,7 +570,7 @@ export class AuditDatabase {
       return result.rows;
     }
     if (!this.useMemory()) throw new Error('Database is unavailable and memory storage is not enabled.');
-    return this.memoryDb.filter((audit) => audit.group_label === groupLabel).map(toAuditExport);
+    return this.memoryDb.filter((audit) => audit.group_label === groupLabel).slice(0, 5000).map(toAuditExport);
   }
 
   async getAllAuditSummariesForReview(limit = 5000): Promise<StorefrontAudit[]> {
