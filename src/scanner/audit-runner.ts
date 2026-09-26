@@ -1162,6 +1162,15 @@ export async function captureDataLayerViewItems(page: Page, phase: string, evide
   return captured;
 }
 
+export function requestCaptureChannelCompleted(
+  observation: EvidenceBundle['network']['observation'],
+  browserConnected: boolean,
+  unsafeRequestBlocked: boolean
+): boolean {
+  return observation?.request_listener_active === true && browserConnected && !unsafeRequestBlocked &&
+    !observation.capture_channel_errors.includes('request_capture_interrupted');
+}
+
 export async function runStorefrontAudit(
   params: {
     audit_id: string | number;
@@ -1501,13 +1510,6 @@ export async function runStorefrontAudit(
   };
 
   const finalizeScanOnce = async () => lifecycle.run(async () => {
-    if (evidence.network.observation) {
-      const productObservation = evidence.product.observation;
-      evidence.network.observation.request_capture_completed = Boolean(
-        evidence.network.observation.request_listener_active && !unsafeRequestBlocked &&
-        (!trackingSelected || (productObservation?.minimum_observation_satisfied && !productObservation.transport_failure && !productObservation.timeout))
-      );
-    }
     if (evidence.page.valid === null) {
       evidenceCollector.setPage({ valid: false, accessCategory: finalError === 'none' ? 'unknown_error' : finalError });
     } else if (finalError !== 'none') {
@@ -1547,6 +1549,11 @@ export async function runStorefrontAudit(
     // immediately before canonical replay.
     if (consentSelected && consentV2Enabled) await settleSharedConsentObservation('finalization');
     if (consentSelected && consentV2Enabled && sharedConsentObservation) applyMergedConsentObservation(consentV2);
+    if (evidence.network.observation) {
+      evidence.network.observation.request_capture_completed = requestCaptureChannelCompleted(
+        evidence.network.observation, browser?.isConnected() === true, unsafeRequestBlocked
+      );
+    }
     await closeSession();
     const completedEvidence = evidenceCollector.complete(startedMs);
     const replayed = replayEvidence(completedEvidence);
@@ -1592,33 +1599,38 @@ export async function runStorefrontAudit(
     };
     evidence.network.observation.request_listener_active = true;
     browserContext.on('request', (request: Request) => {
-      const requestUrl = request.url();
-      if (/(?:[?&](?:gcs|gcd)=[^&#]*|consent(?:_mode)?=(?:denied|default))/i.test(`${requestUrl}&${request.postData() || ''}`)) {
-        evidence.network.observation!.limited_measurement_observed = true;
-      }
-      if (/challenge|turnstile|captcha|datadome|akamai|perimeterx|humansecurity|cdn-cgi|px-captcha/i.test(requestUrl)) {
-        const sanitized = safeUrl(requestUrl);
-        if (sanitized && accessNetworkSignals.size < 30) accessNetworkSignals.add(sanitized);
-      }
-      if (/cookielaw\.org|onetrust\.com|otSDKStub\.js|Optanon\.js|cookiebot|didomi|usercentrics|osano|iubenda|privacy-bar|tracking-consent|shopify\.com\/privacy/i.test(requestUrl)) {
-        const sanitized = safeUrl(requestUrl);
-        if (sanitized && cmpNetworkSignals.size < 100) cmpNetworkSignals.add(sanitized);
-      }
-      const capturedTracking = evidenceCollector.captureRequests({
-        url: requestUrl,
-        body: request.postData() || '',
-        method: request.method(),
-        phase: currentPhase,
-        timestamp: Date.now(),
-        source: request.serviceWorker() ? 'service_worker' : 'page',
-        ...pageProvenance.forRequest(request)
-      });
-      if (consentV2Enabled && isSharedPreChoicePhase(currentPhase)) {
-        const captured = capturedTracking.length ? capturedTracking : captureConsentTrackingRequests({ url: requestUrl, post_data: request.postData(), resource_type: request.resourceType(), method: request.method() });
-        for (const event of captured) sharedConsentRequests.append({ ...event, phase: currentPhase });
-        const body = request.postData() || '';
-        if (isGA4BatchTruncated(body) && (captured.some((event) => event.vendor === 'ga4') || /(?:^|[&])tid=G-[A-Z0-9]+/i.test(body))) sharedConsentRequests.truncated = true;
-        sharedConsentGcm.observeMeasurementRequests({ url: requestUrl, body: request.postData() || undefined, timestamp: captured[0]?.timestamp });
+      try {
+        const requestUrl = request.url();
+        if (/(?:[?&](?:gcs|gcd)=[^&#]*|consent(?:_mode)?=(?:denied|default))/i.test(`${requestUrl}&${request.postData() || ''}`)) {
+          evidence.network.observation!.limited_measurement_observed = true;
+        }
+        if (/challenge|turnstile|captcha|datadome|akamai|perimeterx|humansecurity|cdn-cgi|px-captcha/i.test(requestUrl)) {
+          const sanitized = safeUrl(requestUrl);
+          if (sanitized && accessNetworkSignals.size < 30) accessNetworkSignals.add(sanitized);
+        }
+        if (/cookielaw\.org|onetrust\.com|otSDKStub\.js|Optanon\.js|cookiebot|didomi|usercentrics|osano|iubenda|privacy-bar|tracking-consent|shopify\.com\/privacy/i.test(requestUrl)) {
+          const sanitized = safeUrl(requestUrl);
+          if (sanitized && cmpNetworkSignals.size < 100) cmpNetworkSignals.add(sanitized);
+        }
+        const capturedTracking = evidenceCollector.captureRequests({
+          url: requestUrl,
+          body: request.postData() || '',
+          method: request.method(),
+          phase: currentPhase,
+          timestamp: Date.now(),
+          source: request.serviceWorker() ? 'service_worker' : 'page',
+          ...pageProvenance.forRequest(request)
+        });
+        if (consentV2Enabled && isSharedPreChoicePhase(currentPhase)) {
+          const captured = capturedTracking.length ? capturedTracking : captureConsentTrackingRequests({ url: requestUrl, post_data: request.postData(), resource_type: request.resourceType(), method: request.method() });
+          for (const event of captured) sharedConsentRequests.append({ ...event, phase: currentPhase });
+          const body = request.postData() || '';
+          if (isGA4BatchTruncated(body) && (captured.some((event) => event.vendor === 'ga4') || /(?:^|[&])tid=G-[A-Z0-9]+/i.test(body))) sharedConsentRequests.truncated = true;
+          sharedConsentGcm.observeMeasurementRequests({ url: requestUrl, body: request.postData() || undefined, timestamp: captured[0]?.timestamp });
+        }
+      } catch {
+        const errors = evidence.network.observation!.capture_channel_errors;
+        if (!errors.includes('request_capture_interrupted')) errors.push('request_capture_interrupted');
       }
     });
     browserContext.on('response', (response: Response) => {

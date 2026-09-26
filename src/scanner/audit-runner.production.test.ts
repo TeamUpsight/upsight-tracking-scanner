@@ -883,6 +883,21 @@ describe('runStorefrontAudit production browser wiring', () => {
     ]));
   }, 35_000);
 
+  it('CF01 keeps a healthy request channel complete when Tracking finds no PDP', async () => {
+    const result = await auditFixture(200, '<main>Storefront</main>', true, ['tracking', 'server_side']) as unknown as StorefrontAudit;
+    expect(result.evidence_bundle?.network.observation).toMatchObject({ request_listener_active: true, request_capture_completed: true });
+    expect(result.product_payload_status).toBe('inconclusive');
+    expect(result.server_side_status).toBe('not_detected');
+    expect(result.site_ga4_detected).toBeNull();
+  }, 35_000);
+
+  it('CF01 keeps observed first-party Server collection positive without a PDP', async () => {
+    const result = await auditFixture(200, `<main>Storefront</main><script>new Image().src='/g/collect?v=2&tid=G-FIXTURE&en=page_view';</script>`, true, ['tracking', 'server_side']) as unknown as StorefrontAudit;
+    expect(result.evidence_bundle?.network.observation?.request_capture_completed).toBe(true);
+    expect(result.product_payload_status).toBe('inconclusive');
+    expect(result.server_side_status).toBe('first_party_collection_detected');
+  }, 35_000);
+
   it('LN-05 uses a first-party response cookie without a Server-specific reload', async () => {
     let homepageLoads = 0;
     const result = await auditFixture(200, (path) => {

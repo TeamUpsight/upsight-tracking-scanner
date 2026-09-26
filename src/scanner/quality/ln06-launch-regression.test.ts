@@ -5,6 +5,7 @@ import { EvidenceCollector } from '../evidence/evidence-collector';
 import { replayEvidence } from './replay';
 import { resolveOverallStatus } from '../resolver/status-resolver';
 import { classifyCollection } from '../server-side/classify-collection';
+import { requestCaptureChannelCompleted } from '../audit-runner';
 
 const canonicalFields = [
   'consent_status', 'cmp_provider', 'product_payload_status', 'server_side_status', 'ss_collection_type',
@@ -69,6 +70,16 @@ function assertCanonicalConsistency(result: Partial<StorefrontAudit>) {
     if (result.selected_modules?.includes(module as AuditModule)) expect(result.reason_codes).toContain(finding.reason_code);
     else expect(result.reason_codes).not.toContain(finding.reason_code);
   }
+  const cmp = result.finding_confidence?.cmp;
+  const cmpDecision = decisions.get('cmp');
+  const cmpDetected = result.cmp_provider === 'Not Found' ? false : result.cmp_provider ? true : null;
+  expect(cmp?.detected).toBe(result.selected_modules?.includes('consent') ? cmpDetected : null);
+  expect(cmpDecision?.confidence).toBe(cmp?.confidence);
+  expect(cmpDecision?.reason_code).toBe(cmp?.reason_code);
+  expect(cmpDecision?.evidence_codes).toEqual(cmp?.evidence);
+  if (result.cmp_provider === null) expect(cmp?.reason_code).not.toBe('CMP_PROVIDER_IDENTIFIED');
+  if (result.cmp_provider === 'Not Found') expect(cmp?.reason_code).toBe('CMP_NOT_DETECTED');
+  if (result.cmp_provider === 'Unknown') expect(cmp?.reason_code).toBe('CMP_PROVIDER_UNKNOWN');
   expect(result.overall_status).toBe(resolveOverallStatus({
     consent_status: result.consent_status ?? null, product_status: result.product_payload_status ?? null,
     server_status: result.server_side_status ?? null, collection_type: result.ss_collection_type ?? null,
@@ -108,6 +119,150 @@ const cases: Case[] = [
 ];
 
 describe('LN-06 canonical launch matrix', () => {
+  it.each([
+    { name: 'raw OneTrust with null V2 identity', raw: ['OptanonWrapper', 'Shopify.trackingConsent'], resolved: null, expected: 'OneTrust', reason: 'CMP_SCRIPT_ONLY' },
+    { name: 'generic IAB TCF with null V2 identity', raw: ['__tcfapi'], resolved: null, expected: 'IAB TCF', reason: 'CMP_IAB_TCF_GENERIC' },
+    { name: 'no provider with null V2 identity', raw: [], resolved: null, expected: null, reason: 'CMP_OBSERVATION_INCOMPLETE' },
+    { name: 'explicit positive V2 identity', raw: ['OptanonWrapper'], resolved: 'Cookiebot', expected: 'Cookiebot', reason: 'CMP_PROVIDER_IDENTIFIED' },
+    { name: 'explicit Unknown identity', raw: ['OptanonWrapper'], resolved: 'Unknown', expected: 'Unknown', reason: 'CMP_PROVIDER_UNKNOWN' }
+  ] as const)('CF01 CMP $name', ({ raw, resolved, expected, reason }) => {
+    const source = bundle(['consent']);
+    source.consent.window_globals = [...raw];
+    source.consent.resolved_provider = resolved;
+    const result = replayEvidence(source);
+    expect(result.cmp_provider).toBe(expected);
+    expect(result.finding_confidence?.cmp?.reason_code).toBe(reason);
+    assertCanonicalConsistency(result);
+  });
+
+  it('CF01 keeps resolved Not Found only for completed, unblocked no-CMP evidence', () => {
+    const complete = bundle(['consent']);
+    complete.consent.resolved_provider = 'Not Found';
+    complete.consent.resolved_provider_evidence = ['NO_CMP_DETECTED'];
+    const result = replayEvidence(complete);
+    expect(result.cmp_provider).toBe('Not Found');
+    expect(result.finding_confidence?.cmp).toMatchObject({ detected: false, reason_code: 'CMP_NOT_DETECTED' });
+    assertCanonicalConsistency(result);
+
+    complete.consent.resolved_provider_evidence = [];
+    const unsupportedAbsence = replayEvidence(complete);
+    expect(unsupportedAbsence.cmp_provider).toBeNull();
+    expect(unsupportedAbsence.finding_confidence?.cmp?.reason_code).toBe('CMP_OBSERVATION_INCOMPLETE');
+    assertCanonicalConsistency(unsupportedAbsence);
+    complete.consent.resolved_provider_evidence = ['NO_CMP_DETECTED'];
+
+    complete.consent.window_globals = ['OptanonWrapper'];
+    const withPositive = replayEvidence(complete);
+    expect(withPositive.cmp_provider).toBe('OneTrust');
+    assertCanonicalConsistency(withPositive);
+
+    complete.consent.window_globals = [];
+    complete.page.valid = false;
+    complete.access.valid_storefront = false;
+    complete.page.access_category = 'access_blocked';
+    const blocked = replayEvidence(complete);
+    expect(blocked.cmp_provider).not.toBe('Not Found');
+    expect(blocked.finding_confidence?.cmp?.reason_code).not.toBe('CMP_PROVIDER_IDENTIFIED');
+    assertCanonicalConsistency(blocked);
+  });
+
+  it.each([
+    { name: 'script and inconclusive enablement', collection: false, gated: true, incomplete: false, reason: 'META_SCRIPT_ONLY' },
+    { name: 'collection and later incomplete capture', collection: true, gated: false, incomplete: true, reason: 'META_COLLECTION_DETECTED' },
+    { name: 'no evidence with incomplete capture', collection: false, gated: false, incomplete: true, reason: 'META_OBSERVATION_INCOMPLETE' },
+    { name: 'no evidence with gated enablement', collection: false, gated: true, incomplete: false, reason: 'META_NOT_TESTED' }
+  ] as const)('CF01 Meta $name', ({ collection, gated, incomplete, reason }) => {
+    const source = bundle(['tracking']);
+    if (collection) source.network.relevant_requests.push({ ...request(), vendor: 'meta', pixel_id: 'PIXEL', measurement_id: undefined });
+    else if (reason === 'META_SCRIPT_ONLY') source.network.installation_signals.push({ vendor: 'meta', source: 'inline_script', identifiers: [], phase: 'homepage' });
+    if (gated) source.consent.tracking_enablement = 'inconclusive';
+    if (incomplete) source.network.observation!.request_capture_completed = false;
+    const result = replayEvidence(source);
+    expect(result.finding_confidence?.meta?.reason_code).toBe(reason);
+    expect(result.site_meta_detected).toBe(collection || reason === 'META_SCRIPT_ONLY' ? true : null);
+    assertCanonicalConsistency(result);
+  });
+
+  it('CF01 Meta remains not tested after invalid access or unselected Tracking', () => {
+    const invalid = bundle(['tracking']);
+    invalid.page.valid = false;
+    invalid.access.valid_storefront = false;
+    invalid.page.access_category = 'access_blocked';
+    invalid.network.installation_signals.push({ vendor: 'meta', source: 'inline_script', identifiers: [], phase: 'homepage' });
+    expect(replayEvidence(invalid).finding_confidence?.meta?.reason_code).toBe('META_NOT_TESTED');
+    const unselected = bundle(['server_side']);
+    unselected.network.installation_signals.push({ vendor: 'meta', source: 'inline_script', identifiers: [], phase: 'homepage' });
+    expect(replayEvidence(unselected).finding_confidence?.meta?.reason_code).toBe('META_NOT_TESTED');
+  });
+
+  it('CF01 keeps request capture independent of Product timeout and PDP discovery', () => {
+    const timedOut = bundle(['tracking', 'server_side']);
+    timedOut.product.observation!.timeout = true;
+    timedOut.product.observation!.minimum_observation_satisfied = false;
+    timedOut.network.observation!.request_capture_completed = requestCaptureChannelCompleted(timedOut.network.observation, true, false);
+    expect(timedOut.network.observation!.request_capture_completed).toBe(true);
+    const timeoutResult = replayEvidence(timedOut);
+    expect(timeoutResult.product_payload_status).toBe('inconclusive');
+    expect(timeoutResult.server_side_status).toBe('not_detected');
+    expect(timeoutResult.site_ga4_detected).not.toBe(false);
+    assertCanonicalConsistency(timeoutResult);
+
+    const noPdp = bundle(['tracking', 'server_side']);
+    noPdp.product.observation!.minimum_observation_satisfied = false;
+    noPdp.network.observation!.request_capture_completed = requestCaptureChannelCompleted(noPdp.network.observation, true, false);
+    const noPdpResult = replayEvidence(noPdp);
+    expect(noPdpResult.product_payload_status).toBe('inconclusive');
+    expect(noPdpResult.server_side_status).toBe('not_detected');
+    assertCanonicalConsistency(noPdpResult);
+
+    const serverOnly = bundle(['server_side']);
+    serverOnly.network.observation!.request_capture_completed = requestCaptureChannelCompleted(serverOnly.network.observation, true, false);
+    expect(serverOnly.network.observation!.request_capture_completed).toBe(noPdp.network.observation!.request_capture_completed);
+    expect(replayEvidence(serverOnly).server_side_status).toBe(noPdpResult.server_side_status);
+  });
+
+  it('CF01 retains Server positives through Product failure while requiring its own boundary for absence', () => {
+    const source = bundle(['tracking', 'server_side']);
+    source.product.observation!.timeout = true;
+    source.product.observation!.minimum_observation_satisfied = false;
+    add(source, request('first_party'));
+    source.network.observation!.request_capture_completed = requestCaptureChannelCompleted(source.network.observation, true, false);
+    const positive = replayEvidence(source);
+    expect(positive.server_side_status).toBe('first_party_collection_detected');
+    expect(positive.product_payload_status).toBe('inconclusive');
+    assertCanonicalConsistency(positive);
+
+    source.network.relevant_requests = [];
+    source.network.observation!.capture_channel_errors.push('request_capture_interrupted');
+    source.network.observation!.request_capture_completed = requestCaptureChannelCompleted(source.network.observation, true, false);
+    expect(source.network.observation!.request_capture_completed).toBe(false);
+    expect(replayEvidence(source).server_side_status).toBe('inconclusive');
+    source.network.observation!.capture_channel_errors = [];
+    expect(requestCaptureChannelCompleted(source.network.observation, false, false)).toBe(false);
+    expect(requestCaptureChannelCompleted(source.network.observation, true, true)).toBe(false);
+  });
+
+  it('CF01 requires Product coverage for Tracking negatives after request completion', () => {
+    const source = bundle(['tracking', 'server_side']);
+    source.product.observation!.minimum_observation_satisfied = false;
+    source.network.observation!.request_capture_completed = requestCaptureChannelCompleted(source.network.observation, true, false);
+    expect(replayEvidence(source).product_payload_status).not.toBe('ga4_not_detected');
+    pdp(source);
+    source.product.observation!.minimum_observation_satisfied = true;
+    const complete = replayEvidence(source);
+    expect(complete.product_payload_status).toBe('ga4_not_detected');
+    expect(complete.server_side_status).toBe('not_detected');
+    assertCanonicalConsistency(complete);
+  });
+
+  it('CF01 retains the LN-05 Server evidence ceiling', () => {
+    const possible = new Set(['not_tested', 'not_detected', 'first_party_collection_detected', 'inconclusive']);
+    for (const source of [bundle(['server_side']), bundle(['tracking', 'server_side'])]) {
+      expect(possible.has(replayEvidence(source).server_side_status!)).toBe(true);
+      add(source, request('first_party'));
+      expect(replayEvidence(source).server_side_status).toBe('first_party_collection_detected');
+    }
+  });
   it.each(cases)('$name: replay is deterministic, immutable and internally consistent', ({ selected, change, expected }) => {
     const source = bundle(selected);
     change(source);

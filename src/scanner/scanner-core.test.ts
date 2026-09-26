@@ -97,10 +97,12 @@ describe('audit module selection', () => {
     evidence.server_side.first_party_collection_count = 1;
     evidence.consent.executed = false;
     const result = replayEvidence(evidence);
-    expect(result).toMatchObject({ scan_status: 'completed', consent_status: 'not_tested', server_side_status: 'not_tested', overall_status: 'warning' });
+    expect(result).toMatchObject({ scan_status: 'completed', consent_status: 'not_tested', server_side_status: 'not_tested', overall_status: 'inconclusive' });
     expect(result.consistency_violations).toEqual([]);
     expect(result.failure_fingerprints).not.toContain('SERVER_FP_COLLECTOR');
-    expect(qaPrioritySignals(result, evidence, result.consistency_violations || []).map((signal) => signal.code)).not.toContain('MODULE_RESULT_INCOMPLETE');
+    expect(qaPrioritySignals(result, evidence, result.consistency_violations || [])).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'MODULE_RESULT_INCOMPLETE', label: '1 module inconclusive or not tested' })
+    ]));
   });
 
   it('uses a normalized replay copy, defaults legacy module selections, and leaves evidence untouched', () => {
@@ -1245,7 +1247,7 @@ describe('lifecycle, proxy, and evidence guardrails', () => {
     }];
     const result = replayEvidence(evidence);
     expect(result.site_meta_detected).toBe(true);
-    expect(result.site_meta_collection_hit_detected).toBe(false);
+    expect(result.site_meta_collection_hit_detected).toBeNull();
     expect(result.finding_confidence?.meta).toMatchObject({ detected: true, confidence: 'medium', reason_code: 'META_SCRIPT_ONLY' });
   });
 
