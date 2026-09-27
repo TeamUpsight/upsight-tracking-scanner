@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import { chromium } from 'playwright-core';
+import type { Page } from 'playwright-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { diagnosticScreenshotDeltaMs, runStorefrontAudit, type AuditRunnerDependencies } from './audit-runner';
 import type { StorefrontAudit } from '../types';
@@ -67,7 +68,7 @@ async function auditFixture(
   consentV2Enabled = true,
   selected_modules: Array<'consent' | 'tracking' | 'server_side'> = ['consent'],
   actionsEnabled = consentV2Enabled,
-  dependencies: Pick<AuditRunnerDependencies, 'createFreshConsentContext' | 'launchBrowser' | 'runGpcExperiment'> = {},
+  dependencies: Partial<AuditRunnerDependencies> = {},
   scanMode: 'normal' | 'diagnostic' = 'normal',
   geo: 'USA' | 'EU' | 'UK' = 'EU'
 ) {
@@ -749,6 +750,147 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect((result.evidence_bundle as { product: { candidate_outcomes: Array<{ outcome: string }> } }).product.candidate_outcomes)
       .toEqual(expect.arrayContaining([expect.objectContaining({ outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM' })]));
   }, 45_000);
+
+  it('PRODUCT-DEADLINE-01 bounds late PDP page creation and still finalizes passive Server evidence', async () => {
+    let releaseLatePage: (() => void) | undefined;
+    const orphanClose = vi.fn(async () => {});
+    const orphan = { close: orphanClose } as unknown as Page;
+    const result = await auditFixture(200, {
+      '/': `<a href="/products/widget">Widget</a><script>new Image().src='/g/collect?v=2&tid=G-FIXTURE&en=page_view';</script>`,
+      '/g/collect': { body: '', status: 204 },
+      '/products/widget': '<form action="/cart/add"><button>Add to cart</button></form>'
+    }, false, ['tracking', 'server_side'], false, {
+      productBudgetMs: 6_000,
+      productOperation: (stage, operation) => stage === 'product_pdp_page_creation'
+        ? new Promise((resolve) => { releaseLatePage = () => resolve(orphan as never); }) as ReturnType<typeof operation>
+        : operation()
+    }) as unknown as StorefrontAudit;
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    expect(result).toMatchObject({ scan_status: 'partial', error_category: 'none', server_side_status: 'first_party_collection_detected', product_payload_status: 'inconclusive' });
+    expect(result.evidence_bundle?.runtime.failed_phase).toBe('product_pdp_page_creation');
+    expect(result.evidence_bundle?.product.product_runtime).toMatchObject({ product_timeout_stage: 'product_pdp_page_creation', product_budget_ms: 6_000 });
+    expect(result.evidence_bundle?.product.product_runtime?.product_total_ms).toBeLessThan(7_000);
+    expect(trace.filter((item) => item.step === 'scan_finalized')).toHaveLength(1);
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'server_relevant_requests_summarized' })]));
+    expect(releaseLatePage).toBeDefined();
+    releaseLatePage!();
+    await vi.waitFor(() => expect(orphanClose).toHaveBeenCalledTimes(1));
+  }, 35_000);
+
+  it('PRODUCT-DEADLINE-02 lets selected Consent and Server continue after PDP page creation stalls', async () => {
+    const result = await auditFixture(200, {
+      '/': `<a href="/products/widget">Widget</a><script>new Image().src='/g/collect?v=2&tid=G-FIXTURE&en=page_view';</script>`,
+      '/g/collect': { body: '', status: 204 },
+      '/products/widget': '<form action="/cart/add"><button>Add to cart</button></form>'
+    }, true, ['consent', 'tracking', 'server_side'], false, {
+      productBudgetMs: 6_000,
+      productOperation: (stage, operation) => stage === 'product_pdp_page_creation' ? new Promise<never>(() => {}) : operation()
+    }) as unknown as StorefrontAudit;
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    expect(result.scan_status).toBe('partial');
+    expect(result.error_category).toBe('none');
+    expect(result.product_payload_status).toBe('inconclusive');
+    expect(result.server_side_status).toBe('first_party_collection_detected');
+    expect(trace.filter((item) => item.step === 'scan_finalized')).toHaveLength(1);
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'server_relevant_requests_summarized' })]));
+  }, 45_000);
+
+  it('PRODUCT-DEADLINE-03 bounds candidate assessment and Product page content', async () => {
+    const html = { '/': '<a href="/products/widget">Widget</a>', '/products/widget': '<form action="/cart/add"><button>Add to cart</button></form>' };
+    const assessment = await auditFixture(200, html, false, ['tracking'], false, {
+      productBudgetMs: 6_000,
+      productOperation: (stage, operation) => stage === 'product_pdp_assessment' ? new Promise<never>(() => {}) : operation()
+    }) as unknown as StorefrontAudit;
+    expect(assessment).toMatchObject({ scan_status: 'partial', error_category: 'none', product_payload_status: 'inconclusive' });
+    expect(assessment.evidence_bundle?.runtime.failed_phase).toBe('product_pdp_assessment');
+    expect(assessment.evidence_bundle?.product.product_runtime?.product_total_ms).toBeLessThan(7_000);
+    const content = await auditFixture(200, html, false, ['tracking'], false, {
+      productBudgetMs: 100,
+      productOperation: (stage, operation) => stage === 'product_discovery' ? new Promise<never>(() => {}) : operation()
+    }) as unknown as StorefrontAudit;
+    expect(content).toMatchObject({ scan_status: 'partial', error_category: 'none', product_payload_status: 'inconclusive' });
+    expect(content.evidence_bundle?.runtime.failed_phase).toBe('product_discovery');
+    expect(content.evidence_bundle?.product.product_runtime?.product_total_ms).toBeLessThan(1_000);
+  }, 45_000);
+
+  it('PRODUCT-DEADLINE-04 skips a candidate when its required observation cannot fit', async () => {
+    const result = await auditFixture(200, {
+      '/': '<a href="/products/widget">Widget</a>',
+      '/products/widget': '<form action="/cart/add"><button>Add to cart</button></form>'
+    }, false, ['tracking'], false, { productBudgetMs: 4_000 }) as unknown as StorefrontAudit;
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string; candidate_attempt?: number; required_ms?: number }>;
+    expect(result.product_payload_status).toBe('inconclusive');
+    expect(result.evidence_bundle?.product.candidate_attempted_count).toBe(0);
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_candidate_skipped_insufficient_budget', candidate_attempt: 1, required_ms: 4_250 })]));
+  }, 35_000);
+
+  it('PRODUCT-DEADLINE-05 keeps positive GA4 and Product evidence when an optional screenshot stalls', async () => {
+    let diagnosticsCalls = 0;
+    const result = await auditFixture(200, {
+      '/': '<a href="/products/widget">Widget</a>',
+      '/products/widget': `<form action="/cart/add"><button>Add to cart</button></form>
+        <script>new Image().src='/g/collect?v=2&tid=G-FIXTURE&en=view_item&pr1=idwidget~nmWidget';</script>`,
+      '/g/collect': { body: '', status: 204 }
+    }, false, ['tracking'], false, {
+      productBudgetMs: 6_000,
+      productOperation: (stage, operation) => {
+        if (stage === 'product_pdp_diagnostics' && ++diagnosticsCalls === 3) return new Promise<never>(() => {});
+        return operation();
+      }
+    }, 'diagnostic') as unknown as StorefrontAudit;
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    expect(diagnosticsCalls).toBeGreaterThanOrEqual(3);
+    expect(result).toMatchObject({ scan_status: 'completed', error_category: 'none', product_payload_status: 'pass', site_ga4_collection_hit_detected: true });
+    expect(result.evidence_bundle?.product.ga4_view_item_hits.length).toBeGreaterThan(0);
+    expect(result.evidence_bundle?.product.product_runtime?.product_total_ms).toBeLessThan(6_000);
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'pdp_optional_diagnostics_deferred' })]));
+  }, 35_000);
+
+  it('PRODUCT-DEADLINE-06 preserves an earlier confirmed PDP when the next candidate stalls', async () => {
+    let assessments = 0;
+    const product = '<form action="/cart/add"><button>Add to cart</button></form>';
+    const result = await auditFixture(200, {
+      '/': '<a href="/products/a">A</a><a href="/products/b">B</a>',
+      '/products/a': product,
+      '/products/b': product
+    }, false, ['tracking'], false, {
+      productBudgetMs: 9_000,
+      productOperation: (stage, operation) => {
+        if (stage === 'product_pdp_assessment' && ++assessments === 2) return new Promise<never>(() => {});
+        return operation();
+      }
+    }) as unknown as StorefrontAudit;
+    expect(result).toMatchObject({ scan_status: 'partial', error_category: 'none', product_payload_status: 'inconclusive' });
+    expect(result.pdp_url_tested).toContain('/products/a');
+    expect(result.evidence_bundle?.product.final_pdp_url).toContain('/products/a');
+    expect(result.evidence_bundle?.product.candidate_outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ outcome: 'VALID_PRODUCT_COMPLETE_NO_VIEW_ITEM', observation_complete: true }),
+      expect.objectContaining({ outcome: 'TIMEOUT', observation_complete: false })
+    ]));
+    expect(result.evidence_bundle?.product.product_runtime?.product_total_ms).toBeLessThan(10_000);
+  }, 35_000);
+
+  it('PRODUCT-DEADLINE-07 retains global scan_timeout when the global deadline is independently exhausted', async () => {
+    const realNow = Date.now.bind(Date);
+    let exhaustGlobal = false;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + (exhaustGlobal ? 100_000 : 0));
+    try {
+      const result = await auditFixture(200, '<a href="/products/widget">Widget</a>', false, ['tracking'], false, {
+        productBudgetMs: 100,
+        productOperation: (stage, operation) => {
+          if (stage === 'product_discovery') {
+            exhaustGlobal = true;
+            return new Promise<never>(() => {});
+          }
+          return operation();
+        }
+      }) as unknown as StorefrontAudit;
+      expect(result).toMatchObject({ scan_status: 'failed', error_category: 'scan_timeout', terminal_reason_code: 'SCAN_TIMEOUT' });
+      expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'scan_finalized' })]));
+    } finally {
+      now.mockRestore();
+    }
+  }, 35_000);
 
   it('ACCEPT-E2E-01 runs clean-context Accept for Tracking-only and retains post-Accept view_item', async () => {
     const gatedPdp = `<script>window.OneTrust={AllowAll(){}};</script><script src="/otSDKStub.js"></script>

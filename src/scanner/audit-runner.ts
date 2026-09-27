@@ -122,6 +122,9 @@ export interface AuditRunnerDependencies {
   consentGeoVerified?: boolean | null;
   createFreshConsentContext?: typeof createFreshConsentContext;
   runGpcExperiment?: typeof runGpcExperiment;
+  /** Test-only seams for exercising the absolute Product deadline without a 30-second fixture. */
+  productBudgetMs?: number;
+  productOperation?: <T>(stage: string, operation: () => Promise<T>) => Promise<T>;
 }
 
 class ScanTermination extends Error {
@@ -1624,6 +1627,9 @@ export async function runStorefrontAudit(
     evidence.network.observation.request_listener_active = true;
     browserContext.on('request', (request: Request) => {
       try {
+        // Runtime stages are granular, while request evidence keeps the
+        // established PDP phase used by replay and provenance checks.
+        const requestPhase = currentPhase.startsWith('product_pdp_') ? 'product_pdp_load' : currentPhase;
         const requestUrl = request.url();
         if (/(?:[?&](?:gcs|gcd)=[^&#]*|consent(?:_mode)?=(?:denied|default))/i.test(`${requestUrl}&${request.postData() || ''}`)) {
           evidence.network.observation!.limited_measurement_observed = true;
@@ -1640,14 +1646,14 @@ export async function runStorefrontAudit(
           url: requestUrl,
           body: request.postData() || '',
           method: request.method(),
-          phase: currentPhase,
+          phase: requestPhase,
           timestamp: Date.now(),
           source: request.serviceWorker() ? 'service_worker' : 'page',
           ...pageProvenance.forRequest(request)
         });
-        if (consentV2Enabled && isSharedPreChoicePhase(currentPhase)) {
+        if (consentV2Enabled && isSharedPreChoicePhase(requestPhase)) {
           const captured = capturedTracking.length ? capturedTracking : captureConsentTrackingRequests({ url: requestUrl, post_data: request.postData(), resource_type: request.resourceType(), method: request.method() });
-          for (const event of captured) sharedConsentRequests.append({ ...event, phase: currentPhase });
+          for (const event of captured) sharedConsentRequests.append({ ...event, phase: requestPhase });
           const body = request.postData() || '';
           if (isGA4BatchTruncated(body) && (captured.some((event) => event.vendor === 'ga4') || /(?:^|[&])tid=G-[A-Z0-9]+/i.test(body))) sharedConsentRequests.truncated = true;
           sharedConsentGcm.observeMeasurementRequests({ url: requestUrl, body: request.postData() || undefined, timestamp: captured[0]?.timestamp });
@@ -1658,7 +1664,7 @@ export async function runStorefrontAudit(
       }
     });
     browserContext.on('response', (response: Response) => {
-      const responsePhase = currentPhase;
+      const responsePhase = currentPhase.startsWith('product_pdp_') ? 'product_pdp_load' : currentPhase;
       evidenceCollector.captureResponse({ url: response.url(), status: response.status(), phase: responsePhase });
       const inspection = (async () => {
         try {
@@ -2626,23 +2632,90 @@ export async function runStorefrontAudit(
     const preserveUnansweredPdp = true;
     // Reserve time for selected later modules; this is a local product budget,
     // never a replacement for the global audit deadline.
-    const productDeadline = Math.min(startedMs + timeoutMs - 2_000, productStarted + Math.min(TRACKING_PRODUCT_MODULE_BUDGET_MS, runtimeBudget.requiredAllowance(PDP_MIN_TRACKING_OBSERVATION_MS)));
+    const productDeadline = Math.min(startedMs + timeoutMs - 2_000, productStarted + Math.min(
+      TRACKING_PRODUCT_MODULE_BUDGET_MS,
+      dependencies.productBudgetMs === undefined ? TRACKING_PRODUCT_MODULE_BUDGET_MS : Math.max(1, Math.min(TRACKING_PRODUCT_MODULE_BUDGET_MS, dependencies.productBudgetMs)),
+      runtimeBudget.requiredAllowance(PDP_MIN_TRACKING_OBSERVATION_MS)
+    ));
     const productBudgetRemaining = () => Math.max(0, productDeadline - Date.now());
     const productRuntime = evidence.product.product_runtime!;
     productRuntime.product_budget_ms = Math.max(0, productDeadline - productStarted);
     const checkProductBudget = () => {
       check();
-      if (productBudgetRemaining() <= 0) throw new PhaseTimeout('tracking_product');
+      if (productBudgetRemaining() <= 0) throw new PhaseTimeout(currentPhase);
+    };
+    const withinProductDeadline = async <T>(
+      stage: string,
+      operation: () => Promise<T>,
+      options: { maxMs?: number; optional?: boolean; onLateResult?: (value: T) => void } = {}
+    ): Promise<T> => {
+      currentPhase = stage;
+      checkProductBudget();
+      const remaining = Math.max(1, Math.min(productBudgetRemaining(), options.maxMs ?? Number.POSITIVE_INFINITY));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
+      const pending = Promise.resolve().then(() => dependencies.productOperation
+        ? dependencies.productOperation(stage, operation) : operation());
+      void pending.then((value) => {
+        if (timedOut) options.onLateResult?.(value);
+      }, () => {});
+      try {
+        const result = await Promise.race([
+          pending,
+          new Promise<T>((_, reject) => {
+            timer = setTimeout(() => {
+              timedOut = true;
+              try { check(); } catch (error) { reject(error); return; }
+              if (!options.optional) {
+                productRuntime.product_timeout_stage ||= stage;
+                productRuntime.product_elapsed_ms = Date.now() - productStarted;
+                productRuntime.product_budget_remaining_at_timeout_ms = productBudgetRemaining();
+              }
+              reject(new PhaseTimeout(stage));
+            }, remaining);
+          })
+        ]);
+        try { check(); } catch (error) {
+          options.onLateResult?.(result);
+          throw error;
+        }
+        if (productBudgetRemaining() <= 0) {
+          timedOut = true;
+          options.onLateResult?.(result);
+          throw new PhaseTimeout(stage);
+        }
+        return result;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+    const closeProductPage = async (page: Page | null) => {
+      if (page && page !== homepage && !page.isClosed()) {
+        if (!await closeWithDeadline(() => page.close(), 500)) {
+          addTrace('product_page_cleanup_incomplete', {}, { module: 'product', severity: 'warning' });
+        }
+      }
+    };
+    const createProductPage = async () => {
+      const page = await withinProductDeadline('product_pdp_page_creation', () => context!.newPage(), {
+        onLateResult: (latePage) => { void closeWithDeadline(() => latePage.close(), 500); }
+      });
+      pdpPage = page;
+      await withinProductDeadline('product_pdp_setup', () => page.setViewportSize({ width: 1280, height: 800 }));
+      await withinProductDeadline('product_pdp_setup', () => configureBrowserGeo(context!, page, currentProxyCountry));
+      await withinProductDeadline('product_pdp_setup', () => attachAuthorizedAccessHeader(context!, page, effectiveDomain));
+      return page;
     };
     let confirmedPdpUrl: string | null = null;
     if (trackingSelected) {
+    try {
     evidence.product.executed = true;
     evidence.product.discovery_executed = true;
     currentPhase = 'product_discovery';
     addTrace('product_context_started', { max_pdp_urls_to_audit: 1, max_candidate_attempts: pdpCandidateAttemptLimit });
     let pdpCandidates: DiscoveredPdpCandidate[] = [];
     try {
-      const homepageHtml = await homepage!.content();
+      const homepageHtml = await withinProductDeadline('product_discovery', () => homepage!.content());
       const applicability = classifyProductApplicability({ html: homepageHtml, cmsSignals: evidence.page.cms_signals });
       evidence.product.applicability = applicability.applicability;
       evidence.product.applicability_reason_code = applicability.reason_code;
@@ -2651,11 +2724,9 @@ export async function runStorefrontAudit(
       } else {
         // Inconclusive remains eligible for the existing bounded discovery path;
         // it can never produce a definitive negative downstream.
-        const discovery = await withinPhaseBudget(
-          'product_discovery',
-          Math.max(1, Math.min(productDiscoveryBudgetMs, productBudgetRemaining())),
-          () => discoverPdp(homepage!, effectiveDomain, check, pdpCandidateAttemptLimit, evidence.mode === 'diagnostic')
-        );
+        const discovery = await withinProductDeadline('product_discovery',
+          () => discoverPdp(homepage!, effectiveDomain, checkProductBudget, pdpCandidateAttemptLimit, evidence.mode === 'diagnostic'),
+          { maxMs: productDiscoveryBudgetMs });
         pdpCandidates = discovery.candidates;
         evidence.product.homepage_candidate_count = discovery.homepage_candidate_count;
         evidence.product.sitemap_candidate_count = discovery.sitemap_candidate_count;
@@ -2687,7 +2758,7 @@ export async function runStorefrontAudit(
     } catch (error) {
       if (error instanceof ScanTermination) throw error;
       finalStatus = 'partial';
-      evidence.runtime.failed_phase ||= 'product_discovery';
+      evidence.runtime.failed_phase = 'product_discovery';
       evidence.product.discovery_inconclusive = true;
       addTrace(isPhaseTimeout(error) ? 'product_discovery_budget_exhausted' : 'product_discovery_incomplete', {
         reason_code: isPhaseTimeout(error) ? 'PRODUCT_DISCOVERY_TIMEOUT' : 'PDP_DISCOVERY_INCONCLUSIVE',
@@ -2711,11 +2782,8 @@ export async function runStorefrontAudit(
         evidence.runtime.product_consent_snapshot.attempted = true;
         let beforeEnablement: ConsentStateSnapshot | null = null;
         try {
-          beforeEnablement = await withinPhaseBudget(
-            'product_consent_state_capture',
-            productConsentBudgetMs,
-            () => captureConsentState(homepage!)
-          );
+        beforeEnablement = await withinProductDeadline('product_consent_state_capture',
+          () => captureConsentState(homepage!), { maxMs: productConsentBudgetMs });
           evidence.runtime.product_consent_snapshot.succeeded = true;
           evidence.runtime.product_consent_snapshot.elapsed_ms = Date.now() - productConsentSnapshotStarted;
         } catch (error) {
@@ -2739,11 +2807,9 @@ export async function runStorefrontAudit(
           currentPhase = 'product_consent_enablement';
           let accepted = false;
           try {
-            accepted = await withinPhaseBudget(
-              'product_consent_enablement',
-              productConsentBudgetMs,
-              async () => clickConsentChoice(homepage!, 'accept') || await callConsentApi(homepage!, cmp.provider, 'accept')
-            );
+            accepted = await withinProductDeadline('product_consent_enablement',
+              async () => clickConsentChoice(homepage!, 'accept') || await callConsentApi(homepage!, cmp.provider, 'accept'),
+              { maxMs: productConsentBudgetMs });
           } catch (error) {
             if (error instanceof ScanTermination) throw error;
             finalStatus = 'partial';
@@ -2757,24 +2823,22 @@ export async function runStorefrontAudit(
           check();
           addTrace('product_consent_enablement', { attempted: true, action_taken: accepted, provider: cmp.provider });
           if (accepted) {
-            await wait(500, homepage);
+            await withinProductDeadline('product_consent_enablement', () => wait(500, homepage));
             try {
-              const consentReload = await homepage!.reload({ waitUntil: 'commit', timeout: 12_000 });
-              await waitForDomContentSoft(homepage!, 'product_consent_enablement', 8_000);
-              await wait(2_000, homepage);
+              const consentReload = await withinProductDeadline('product_consent_enablement', () => homepage!.reload({ waitUntil: 'commit', timeout: Math.min(12_000, productBudgetRemaining()) }));
+              await withinProductDeadline('product_consent_enablement', () => waitForDomContentSoft(homepage!, 'product_consent_enablement', Math.min(8_000, productBudgetRemaining())));
+              await withinProductDeadline('product_consent_enablement', () => wait(2_000, homepage));
               addTrace('product_consent_enablement_reloaded', { status: consentReload?.status() || null });
-              const enabledHtml = await homepage!.content();
-              await capturePageTrackingInstallations(homepage!, enabledHtml, 'product_consent_enablement', evidenceCollector);
+              const enabledHtml = await withinProductDeadline('product_consent_enablement', () => homepage!.content());
+              await withinProductDeadline('product_consent_enablement', () => capturePageTrackingInstallations(homepage!, enabledHtml, 'product_consent_enablement', evidenceCollector));
             } catch (error) {
+              if (isPhaseTimeout(error)) throw error;
               addTrace('product_consent_enablement_reload_failed', { reason: String((error as Error).message || error) });
             }
           }
           currentPhase = 'product_consent_state_capture';
-          const afterEnablement = await withinPhaseBudget(
-            'product_consent_state_capture',
-            productConsentBudgetMs,
-            () => captureConsentState(homepage!)
-          ).catch((error) => {
+          const afterEnablement = await withinProductDeadline('product_consent_state_capture',
+            () => captureConsentState(homepage!), { maxMs: productConsentBudgetMs }).catch((error) => {
             if (error instanceof ScanTermination) throw error;
             addTrace('product_consent_state_capture_failed', {
               reason_code: 'PRODUCT_CONSENT_STATE_CAPTURE_FAILED',
@@ -2794,10 +2858,8 @@ export async function runStorefrontAudit(
         }
       }
 
-      pdpPage = await context!.newPage();
-      await pdpPage.setViewportSize({ width: 1280, height: 800 }).catch(() => {});
-      await configureBrowserGeo(context!, pdpPage, currentProxyCountry);
-      await attachAuthorizedAccessHeader(context!, pdpPage, effectiveDomain);
+      const nextCandidateReserveMs = PDP_MIN_TRACKING_OBSERVATION_MS + 4_000;
+      if (productBudgetRemaining() >= nextCandidateReserveMs) await createProductPage();
       let selectedPdp = false;
       let pdpNavigationCommitted = false;
       const maxPdpCandidates = Math.min(3, pdpCandidateAttemptLimit);
@@ -2809,7 +2871,6 @@ export async function runStorefrontAudit(
       // This covers committed navigation, a semantic pass, and the required
       // minimum observation for one next meaningful PDP without enlarging the
       // product module or global audit budget.
-      const nextCandidateReserveMs = PDP_MIN_TRACKING_OBSERVATION_MS + 4_000;
       const recordCandidateOutcome = (outcome: NonNullable<EvidenceBundle['product']['candidate_outcomes']>[number]) => {
         evidence.product.candidate_outcomes?.push(outcome);
         evidence.product.candidate_completed_count = (evidence.product.candidate_completed_count || 0) + 1;
@@ -2824,14 +2885,19 @@ export async function runStorefrontAudit(
       for (let candidateIndex = 0; candidateIndex < candidateQueue.length && candidateIndex < maxPdpCandidates; candidateIndex += 1) {
         const candidate = candidateQueue[candidateIndex];
         const pdpUrl = candidate.url;
-        try { checkProductBudget(); } catch (error) {
-          if (!isPhaseTimeout(error)) throw error;
+        if (productBudgetRemaining() < nextCandidateReserveMs) {
           finalStatus = 'partial';
-          evidence.runtime.failed_phase ||= 'product_pdp_load';
-          addTrace('tracking_product_budget_exhausted', { reason_code: 'TRACKING_PRODUCT_TIMEOUT', candidates_attempted: candidateIndex });
+          evidence.product.observation!.timeout = true;
+          evidence.runtime.failed_phase = 'product_pdp_observation';
+          addTrace('pdp_candidate_skipped_insufficient_budget', {
+            candidate_attempt: candidateIndex + 1,
+            remaining_ms: productBudgetRemaining(),
+            required_ms: nextCandidateReserveMs
+          }, { module: 'product', severity: 'warning' });
           break;
         }
-        currentPhase = 'product_pdp_load';
+        checkProductBudget();
+        currentPhase = 'product_pdp_navigation';
         evidence.product.candidate_attempted_count = (evidence.product.candidate_attempted_count || 0) + 1;
         const candidateStarted = Date.now();
         let candidateNavigationElapsedMs = 0;
@@ -2848,10 +2914,10 @@ export async function runStorefrontAudit(
           let pdpResponse: Response | null = null;
           let navigationTimedOut = false;
           try {
-            pdpResponse = await pdpPage!.goto(pdpUrl, {
+            pdpResponse = await withinProductDeadline('product_pdp_navigation', () => pdpPage!.goto(pdpUrl, {
               waitUntil: 'commit',
               timeout: Math.max(1, Math.min(12_000, productBudgetRemaining()))
-            });
+            }));
           } catch (error) {
             if (!isNavigationTimeout(error)) throw error;
             navigationTimedOut = true;
@@ -2874,7 +2940,8 @@ export async function runStorefrontAudit(
             evidence.product.observation!.pdp_navigation_committed = true;
           }
           pdpOperation = 'pdp_access_inspection';
-          const pdpAccess = await inspectPageAccess(pdpPage, pdpResponse, evidence, [...accessNetworkSignals]);
+          const pdpAccess = await withinProductDeadline('product_pdp_access_inspection', () =>
+            inspectPageAccess(pdpPage!, pdpResponse, evidence, [...accessNetworkSignals]));
           // Only a detected bot challenge has a canonical provider reason to
           // preserve. Other invalid HTTP responses retain their established
           // incomplete-observation classification.
@@ -2902,8 +2969,9 @@ export async function runStorefrontAudit(
           let assessmentUnavailable = false;
           let assessment: Awaited<ReturnType<typeof inspectPdpCandidate>>;
           try {
-            assessment = await inspectPdpCandidate(pdpPage);
+            assessment = await withinProductDeadline('product_pdp_assessment', () => inspectPdpCandidate(pdpPage!));
           } catch (error) {
+            if (isPhaseTimeout(error)) throw error;
             assessmentUnavailable = true;
             evidence.runtime.failed_phase ||= 'product_pdp_assessment';
             assessment = {
@@ -2936,16 +3004,18 @@ export async function runStorefrontAudit(
             });
           } else {
             pdpOperation = 'pdp_domcontentloaded';
-            await waitForDomContentSoft(pdpPage, 'product_pdp_load', Math.max(1, Math.min(12_000, productBudgetRemaining())));
+            await withinProductDeadline('product_pdp_navigation', () =>
+              waitForDomContentSoft(pdpPage!, 'product_pdp_load', Math.max(1, Math.min(12_000, productBudgetRemaining()))));
             checkProductBudget();
             pdpOperation = 'pdp_settlement_wait';
-            await wait(Math.min(750, productBudgetRemaining()), pdpPage);
+            await withinProductDeadline('product_pdp_observation', () => wait(Math.min(750, productBudgetRemaining()), pdpPage));
             checkProductBudget();
             pdpOperation = 'pdp_candidate_assessment';
             try {
-              assessment = await inspectPdpCandidate(pdpPage);
+              assessment = await withinProductDeadline('product_pdp_assessment', () => inspectPdpCandidate(pdpPage!));
               assessmentUnavailable = false;
             } catch (error) {
+              if (isPhaseTimeout(error)) throw error;
               assessmentUnavailable = true;
               evidence.runtime.failed_phase ||= 'product_pdp_assessment';
               addTrace('pdp_candidate_assessment_failed', {
@@ -2972,7 +3042,8 @@ export async function runStorefrontAudit(
             productPatternPdpCandidate(finalPdpUrl, effectiveDomain) || twoLevelPdpCandidate(finalPdpUrl, effectiveDomain)
           );
           if (!assessmentUnavailable && assessment.page_role === 'PRODUCT_LISTING') {
-            const children = candidate.promoted_from ? [] : await discoverListingChildren(pdpPage, effectiveDomain, check, finalPdpUrl);
+            const children = candidate.promoted_from ? [] : await withinProductDeadline('product_pdp_assessment', () =>
+              discoverListingChildren(pdpPage!, effectiveDomain, checkProductBudget, finalPdpUrl));
             const promoted = children.filter((child) => !knownCandidateUrls.has(child.url));
             for (const child of promoted) knownCandidateUrls.add(child.url);
             // Insert immediately after the listing so strong card evidence wins
@@ -3015,9 +3086,10 @@ export async function runStorefrontAudit(
               // boundedly so either DOM or a network view_item wins the race.
               if (readinessPolls++ % 5 === 0 && !assessmentUnavailable) {
                 try {
-                  assessment = await inspectPdpCandidate(pdpPage);
+                  assessment = await withinProductDeadline('product_pdp_assessment', () => inspectPdpCandidate(pdpPage!));
                   if (assessment.is_product) break;
                 } catch (error) {
+                  if (isPhaseTimeout(error)) throw error;
                   assessmentUnavailable = true;
                   addTrace('pdp_candidate_assessment_failed', {
                     pdp_url: finalPdpUrl, candidate_attempt: candidateIndex + 1,
@@ -3025,18 +3097,20 @@ export async function runStorefrontAudit(
                   });
                 }
               }
-              await wait(100, pdpPage);
+              await withinProductDeadline('product_pdp_observation', () => wait(100, pdpPage));
               checkProductBudget();
             }
-            const candidateDataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector, pageProvenance);
+            const candidateDataLayerCaptured = await withinProductDeadline('product_pdp_capture', () =>
+              captureDataLayerViewItems(pdpPage!, 'product_pdp_load', evidenceCollector, pageProvenance));
             if (candidateDataLayerCaptured > 0) {
               addTrace('ga4_data_layer_view_item_captured', { phase: 'product_pdp_load', count: candidateDataLayerCaptured });
               candidateHits = candidateNetworkViewItemHits();
             }
             if (!candidateHits.some((hit) => hit.has_product) && !assessmentUnavailable) {
               try {
-                assessment = await inspectPdpCandidate(pdpPage);
+                assessment = await withinProductDeadline('product_pdp_assessment', () => inspectPdpCandidate(pdpPage!));
               } catch (error) {
+                if (isPhaseTimeout(error)) throw error;
                 assessmentUnavailable = true;
                 evidence.runtime.failed_phase ||= 'product_pdp_assessment';
                 addTrace('pdp_candidate_assessment_failed', {
@@ -3092,12 +3166,14 @@ export async function runStorefrontAudit(
           }
 
           pdpOperation = 'pdp_hydration_engagement';
-          await pdpPage.evaluate(() => {
+          await withinProductDeadline('product_pdp_observation', () => pdpPage!.evaluate(() => {
             const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
             window.scrollTo({ top: Math.min(700, Math.round(maxScroll * 0.3)), behavior: 'instant' });
-          }).catch(() => {});
-          await wait(600, pdpPage);
-          await pdpPage.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' })).catch(() => {});
+          })).catch((error) => { if (isPhaseTimeout(error)) throw error; });
+          await withinProductDeadline('product_pdp_observation', () => wait(600, pdpPage));
+          await withinProductDeadline('product_pdp_observation', () =>
+            pdpPage!.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' })))
+            .catch((error) => { if (isPhaseTimeout(error)) throw error; });
           addTrace('pdp_hydration_engagement_completed', { interaction: 'bounded_scroll' });
           pdpOperation = 'pdp_post_load_observation';
           addTrace('pdp_post_load_observation_started', {
@@ -3107,15 +3183,17 @@ export async function runStorefrontAudit(
           const observationStart = Date.now();
           evidence.product.observation!.observation_started_at = observationStart;
           while (Date.now() - observationStart < PDP_MIN_TRACKING_OBSERVATION_MS) {
-            await wait(100, pdpPage);
+            await withinProductDeadline('product_pdp_observation', () => wait(100, pdpPage));
             checkProductBudget();
           }
           const minimumObservationMs = Date.now() - observationStart;
           pdpOperation = 'pdp_data_layer_capture';
-          const dataLayerCaptured = await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector, pageProvenance);
+          const dataLayerCaptured = await withinProductDeadline('product_pdp_capture', () =>
+            captureDataLayerViewItems(pdpPage!, 'product_pdp_load', evidenceCollector, pageProvenance));
           if (dataLayerCaptured > 0) addTrace('ga4_data_layer_view_item_captured', { phase: 'product_pdp_load', count: dataLayerCaptured });
           pdpOperation = 'pdp_performance_capture';
-          const pdpTimingRecovered = await capturePerformanceTrackingRequests(pdpPage, 'product_pdp_load', evidenceCollector);
+          const pdpTimingRecovered = await withinProductDeadline('product_pdp_capture', () =>
+            capturePerformanceTrackingRequests(pdpPage!, 'product_pdp_load', evidenceCollector));
           if (pdpTimingRecovered > 0) addTrace('performance_tracking_requests_recovered', { phase: 'product_pdp_load', count: pdpTimingRecovered });
           let finalViewItems = candidateNetworkViewItemHits();
           let candidateHasViewItem = finalViewItems.some((hit) => hit.has_product);
@@ -3141,13 +3219,15 @@ export async function runStorefrontAudit(
               while (Date.now() - observationStart < PDP_POST_LOAD_OBSERVATION_MS) {
                 const latest = candidateNetworkViewItemHits();
                 if (latest.some((hit) => hit.has_product)) break;
-                await wait(100, pdpPage);
+                await withinProductDeadline('product_pdp_observation', () => wait(100, pdpPage));
                 checkProductBudget();
               }
               pdpOperation = 'pdp_data_layer_capture';
-              await captureDataLayerViewItems(pdpPage, 'product_pdp_load', evidenceCollector, pageProvenance);
+              await withinProductDeadline('product_pdp_capture', () =>
+                captureDataLayerViewItems(pdpPage!, 'product_pdp_load', evidenceCollector, pageProvenance));
               pdpOperation = 'pdp_performance_capture';
-              await capturePerformanceTrackingRequests(pdpPage, 'product_pdp_load', evidenceCollector);
+              await withinProductDeadline('product_pdp_capture', () =>
+                capturePerformanceTrackingRequests(pdpPage!, 'product_pdp_load', evidenceCollector));
               finalViewItems = candidateNetworkViewItemHits();
               candidateHasViewItem = finalViewItems.some((hit) => hit.has_product);
             }
@@ -3207,17 +3287,31 @@ export async function runStorefrontAudit(
             addTrace('product_payload_status_decision', { status: 'pass', reason_code: 'GA4_VIEW_ITEM_VALID' });
           }
           const diagnosticStarted = Date.now();
-          if (productBudgetRemaining() > 750) {
+          if (productBudgetRemaining() > 1_000) {
             pdpOperation = 'pdp_installation_capture';
-            const pdpHtml = await pdpPage.content().catch(() => '');
-            await capturePageTrackingInstallations(pdpPage, pdpHtml, 'product_pdp_load', evidenceCollector);
+            try {
+              const pdpHtml = await withinProductDeadline('product_pdp_diagnostics', () => pdpPage!.content(),
+                { maxMs: Math.min(1_500, productBudgetRemaining() - 500), optional: true });
+              await withinProductDeadline('product_pdp_diagnostics', () =>
+                capturePageTrackingInstallations(pdpPage!, pdpHtml, 'product_pdp_load', evidenceCollector),
+                { maxMs: Math.min(1_500, productBudgetRemaining() - 500), optional: true });
+            } catch (error) {
+              addTrace('pdp_optional_diagnostics_deferred', { candidate_attempt: candidateIndex + 1, remaining_ms: productBudgetRemaining() });
+            }
           } else {
             addTrace('pdp_optional_diagnostics_deferred', { candidate_attempt: candidateIndex + 1, remaining_ms: productBudgetRemaining() });
           }
-          checkProductBudget();
           if (evidence.mode === 'diagnostic' && productBudgetRemaining() > 1_000) {
-            const image = await pdpPage.screenshot({ type: 'jpeg', quality: 55, fullPage: false }).catch(() => null);
+            const image = await withinProductDeadline('product_pdp_diagnostics', () =>
+              pdpPage!.screenshot({ type: 'jpeg', quality: 55, fullPage: false }),
+              { maxMs: Math.min(1_000, productBudgetRemaining() - 500), optional: true })
+              .catch(() => {
+                addTrace('pdp_optional_diagnostics_deferred', { candidate_attempt: candidateIndex + 1, remaining_ms: productBudgetRemaining() });
+                return null;
+              });
             if (image) evidenceCollector.addScreenshot({ name: 'pdp.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
+          } else if (evidence.mode === 'diagnostic') {
+            addTrace('pdp_optional_diagnostics_deferred', { candidate_attempt: candidateIndex + 1, remaining_ms: productBudgetRemaining() });
           }
           candidateOutcome.diagnostic_overhead_ms = Date.now() - diagnosticStarted;
           productRuntime.diagnostic_overhead_ms += candidateOutcome.diagnostic_overhead_ms;
@@ -3241,7 +3335,12 @@ export async function runStorefrontAudit(
           if (error instanceof ScanTermination) throw error;
           if (isPhaseTimeout(error)) {
             finalStatus = 'partial';
-            evidence.runtime.failed_phase ||= 'product_pdp_load';
+            productRuntime.candidate_total_ms += Date.now() - candidateStarted;
+            if (candidateNavigationElapsedMs === 0) productRuntime.candidate_navigation_ms += Date.now() - candidateStarted;
+            evidence.runtime.failed_phase = error.phase;
+            productRuntime.product_timeout_stage ||= error.phase;
+            productRuntime.product_elapsed_ms ||= Date.now() - productStarted;
+            productRuntime.product_budget_remaining_at_timeout_ms ??= productBudgetRemaining();
             recordCandidateOutcome({
               url: safeUrl(pdpPage?.url()) || safeUrl(pdpUrl) || pdpUrl,
               final_url: safeUrl(pdpPage?.url()) || safeUrl(pdpUrl) || null,
@@ -3251,6 +3350,7 @@ export async function runStorefrontAudit(
             });
             evidence.product.observation!.timeout = true;
             addTrace('tracking_product_budget_exhausted', { reason_code: 'TRACKING_PRODUCT_TIMEOUT', candidate_attempt: candidateIndex + 1 });
+            await closeProductPage(pdpPage);
             break;
           }
           const accessBlocked = error instanceof PdpAccessBlocked ? error.decision : null;
@@ -3290,12 +3390,10 @@ export async function runStorefrontAudit(
               rotated_session: true
             });
             try {
-              await connectSession(proxyAttempt, false, proxyModeOverride);
-              pdpPage = await context!.newPage();
-              await pdpPage.setViewportSize({ width: 1280, height: 800 }).catch(() => {});
-              await configureBrowserGeo(context!, pdpPage, currentProxyCountry);
-              await attachAuthorizedAccessHeader(context!, pdpPage, effectiveDomain);
+                await withinProductDeadline('product_pdp_setup', () => connectSession(proxyAttempt, false, proxyModeOverride));
+                await createProductPage();
             } catch (retryError) {
+              if (isPhaseTimeout(retryError)) throw retryError;
               addTrace('pdp_proxy_retry_connection_failed', {
                 failure_code: classifyBrowserConnectionError(retryError),
                 retry_port: lastProxyPort
@@ -3305,18 +3403,16 @@ export async function runStorefrontAudit(
           } else if (candidateIndex + 1 < maxPdpCandidates) {
             try {
               if (pdpPage !== homepage && homepage && !homepage.isClosed()) {
-                if (!pdpPage.isClosed()) await pdpPage.close();
+                await closeProductPage(pdpPage);
                 pdpPage = homepage;
                 addTrace('pdp_navigation_fallback_to_homepage', { candidate_attempt: candidateIndex + 1 });
               } else {
-                if (!pdpPage.isClosed()) await pdpPage.close();
-                pdpPage = await context!.newPage();
-                await pdpPage.setViewportSize({ width: 1280, height: 800 }).catch(() => {});
-                await configureBrowserGeo(context!, pdpPage, currentProxyCountry);
-                await attachAuthorizedAccessHeader(context!, pdpPage, effectiveDomain);
+                await closeProductPage(pdpPage);
+                await createProductPage();
                 addTrace('pdp_page_recreated_after_navigation_failure', { candidate_attempt: candidateIndex + 1 });
               }
             } catch (recreateError) {
+              if (isPhaseTimeout(recreateError)) throw recreateError;
               addTrace('pdp_page_recreation_failed', {
                 candidate_attempt: candidateIndex + 1,
                 error_family: runtimeErrorFamily(recreateError)
@@ -3336,9 +3432,21 @@ export async function runStorefrontAudit(
         });
       }
     }
-    evidence.runtime.module_durations_ms.product = Date.now() - productStarted;
-    productRuntime.product_total_ms = evidence.runtime.module_durations_ms.product;
-    if (productRuntime.discovery_ms === 0) productRuntime.discovery_ms = Math.min(productRuntime.product_total_ms, Date.now() - productStarted);
+    } catch (error) {
+      if (!isPhaseTimeout(error)) throw error;
+      finalStatus = 'partial';
+      evidence.runtime.failed_phase = error.phase;
+      productRuntime.product_timeout_stage ||= error.phase;
+      productRuntime.product_elapsed_ms ||= Date.now() - productStarted;
+      productRuntime.product_budget_remaining_at_timeout_ms ??= productBudgetRemaining();
+      evidence.product.observation!.timeout = true;
+      addTrace('tracking_product_budget_exhausted', { reason_code: 'TRACKING_PRODUCT_TIMEOUT', stage: error.phase });
+    } finally {
+      if (productRuntime.product_timeout_stage || productBudgetRemaining() <= 0) await closeProductPage(pdpPage);
+      evidence.runtime.module_durations_ms.product = Date.now() - productStarted;
+      productRuntime.product_total_ms = evidence.runtime.module_durations_ms.product;
+      if (productRuntime.discovery_ms === 0) productRuntime.discovery_ms = Math.min(productRuntime.product_total_ms, Date.now() - productStarted);
+    }
     } else {
       addTrace('tracking_module_skipped');
     }

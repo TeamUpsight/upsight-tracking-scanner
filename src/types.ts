@@ -379,6 +379,9 @@ export interface EvidenceBundle {
       diagnostic_overhead_ms: number;
       product_total_ms: number;
       product_budget_ms: number;
+      product_timeout_stage?: string;
+      product_elapsed_ms?: number;
+      product_budget_remaining_at_timeout_ms?: number;
     };
     /** PDP crawling is skipped when completed storefront evidence proves it is not commerce. */
     applicability?: ProductApplicability;

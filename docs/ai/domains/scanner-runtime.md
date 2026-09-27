@@ -44,6 +44,8 @@ Runtime JSON records each Browserless CDP connection duration (up to 32 stored d
 
 Product candidates carry a bounded page role (`PDP`, `PRODUCT_LISTING`, `NON_PRODUCT`, or `UNKNOWN`) after navigation. Confirmed listings record their evidence, promote at most two strong child product links once, and never receive PDP hydration grace. A confirmed PDP always receives the minimum observation and capture checkpoint; it receives the remaining grace only when no meaningful alternate PDP is queued. Candidate counters are authoritative only at discovery, queue, navigation-start, promotion, and outcome boundaries; `product_runtime` records bounded allocation telemetry without changing canonical replay decisions.
 
+Product browser work uses one absolute deadline capped at 30 seconds. The runner guards discovery, PDP page creation and setup, candidate navigation/inspection/observation/capture, and optional diagnostics against that deadline. A late page created after timeout is closed with a bounded cleanup call; the shared browser/context remains available for selected Consent and passive Server work. Candidate admission requires the minimum tracking observation plus setup and cleanup reserve. Product timeout stages and elapsed budget are recorded in `product_runtime`, while a skipped candidate or timed-out operation leaves absence inconclusive and preserves earlier positive evidence.
+
 ## Common modification points
 
 - Connection/plan errors: `classifyBrowserConnectionError` and bounded connection loop.
