@@ -31,6 +31,12 @@ vi.mock('./version', async (importOriginal) => {
   return { ...actual, PDP_POST_LOAD_OBSERVATION_MS: 1_000, PDP_MIN_TRACKING_OBSERVATION_MS: 250 };
 });
 
+vi.mock('./url-safety', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./url-safety')>();
+  return { ...actual, resolvesOnlyToPublicAddresses: (host: string) => host === 'fixture.example'
+    ? Promise.resolve(true) : actual.resolvesOnlyToPublicAddresses(host) };
+});
+
 const resolvedFixtureHost = async () => ({ status: 'resolved' as const, sources: { fixture: 'resolved' as const } });
 
 type FixtureRoute = string | null | { body: string; status: number; headers?: Record<string, string> };
@@ -96,9 +102,77 @@ async function auditFixture(
   return updates.at(-1) || {};
 }
 
-afterEach(() => { provenanceFixture.certified = true; vi.unstubAllEnvs(); });
+afterEach(() => { provenanceFixture.certified = true; vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+async function browserlessRoutingFixture(modules: Array<'consent' | 'tracking' | 'server_side'>, failedConnections = 0) {
+  vi.stubEnv('BROWSER_PROVIDER', 'browserless');
+  vi.stubEnv('BROWSERLESS_TOKEN', 'fixture-token');
+  vi.stubEnv('CONSENT_V2_ENABLED', 'false');
+  vi.stubEnv('DECODO_PROXY_UK', 'http://fixture-user:fixture-password@proxy.example:10001');
+  const fixture = await fixtureServer(200, (path) => path === '/geo'
+    ? '{"country_code":"GB"}' : '<title>Storefront</title><main>Products</main>');
+  vi.stubEnv('PROXY_EGRESS_PROBE_URL', new URL('/geo', fixture.url).toString());
+  const cdpUrls: string[] = [];
+  const connect = vi.spyOn(chromium, 'connectOverCDP').mockImplementation(async (url) => {
+    cdpUrls.push(String(url));
+    if (cdpUrls.length <= failedConnections) throw new Error('Browser connection timed out');
+    return chromium.launch({ headless: true,
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
+      args: ['--host-resolver-rules=MAP fixture.example 127.0.0.1'] });
+  });
+  const updates: Array<Partial<StorefrontAudit>> = [];
+  try {
+    await runStorefrontAudit({ audit_id: 'routing-fixture', domain: 'fixture.example', tested_geos: 'UK',
+      selected_modules: modules }, async (update) => { updates.push(update); }, {
+      storefrontUrl: fixture.url, resolveHostname: resolvedFixtureHost, consentGeoVerified: true
+    });
+  } finally {
+    connect.mockRestore();
+    await closeServer(fixture.server);
+  }
+  return { result: updates.at(-1) as StorefrontAudit, cdpUrls: cdpUrls.map((url) => new URL(url)) };
+}
 
 describe('runStorefrontAudit production browser wiring', () => {
+  it('starts Tracking and Server directly, skips geo probing, and uses no fallback on success', async () => {
+    const { result, cdpUrls } = await browserlessRoutingFixture(['tracking', 'server_side']);
+    expect(result.scan_status, JSON.stringify({ error: result.error_category, reason: result.terminal_reason_code,
+      steps: JSON.parse(String(result.trace_steps)) })).toBe('completed');
+    expect(result.runtime_metrics).toMatchObject({ proxy_initial_provider: 'browserless_direct',
+      proxy_final_provider: 'browserless_direct', proxy_fallback_used: false,
+      browserless_session_count: 1 });
+    expect(result.evidence_bundle?.runtime.proxy_country_verified).toBe(false);
+    expect(result.consent_status).toBe('not_tested');
+    expect(cdpUrls).toHaveLength(1);
+    expect(cdpUrls[0].searchParams.has('externalProxyServer')).toBe(false);
+    expect(cdpUrls[0].searchParams.has('proxy')).toBe(false);
+    expect(JSON.parse(String(result.trace_steps)).some((step: { step: string }) => step.step === 'proxy_egress_verified')).toBe(false);
+    expect(JSON.stringify(result)).not.toMatch(/fixture-token|fixture-password|wss:\/\//);
+  }, 45_000);
+
+  it('escalates connection failures from direct to datacenter and then Decodo without Consent semantics', async () => {
+    const { result, cdpUrls } = await browserlessRoutingFixture(['server_side'], 2);
+    expect(result.scan_status).toBe('completed');
+    expect(cdpUrls).toHaveLength(3);
+    expect(cdpUrls[0].searchParams.has('proxy')).toBe(false);
+    expect(cdpUrls[1].searchParams.get('proxy')).toBe('datacenter');
+    expect(cdpUrls[2].searchParams.has('externalProxyServer')).toBe(true);
+    expect(result.runtime_metrics).toMatchObject({ proxy_initial_provider: 'browserless_direct',
+      proxy_final_provider: 'decodo', proxy_fallback_used: true, proxy_fallback_recovered: true,
+      browserless_session_count: 1 });
+    expect(result.consent_status).toBe('not_tested');
+  }, 45_000);
+
+  it('keeps a combined Consent audit on verified Decodo transport for the successful run', async () => {
+    const { result, cdpUrls } = await browserlessRoutingFixture(['consent', 'tracking', 'server_side']);
+    expect(result.scan_status).toBe('completed');
+    expect(cdpUrls).toHaveLength(1);
+    expect(cdpUrls[0].searchParams.has('externalProxyServer')).toBe(true);
+    expect(result.runtime_metrics).toMatchObject({ proxy_initial_provider: 'decodo',
+      proxy_final_provider: 'decodo', proxy_country_verified: true, proxy_fallback_used: false });
+    expect(result.evidence_bundle?.access.proxy_attempts.map((attempt) => attempt.provider)).toEqual(['decodo']);
+    expect(JSON.stringify(result)).not.toMatch(/fixture-token|fixture-password|wss:\/\//);
+  }, 45_000);
   it('WP12B-RUNNER-01 adds clean USA GPC evidence without changing canonical decisions', async () => {
     const html = '<script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script>' +
       '<script type="application/json" src="https://consent.cookiebot.com/uc.js"></script>' +

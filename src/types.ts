@@ -164,7 +164,7 @@ export type AccessChallengeType =
   | 'unknown_challenge';
 
 export interface ProxyAccessAttemptEvidence {
-  provider: 'decodo' | 'browserless_residential';
+  provider: 'browserless_direct' | 'browserless_datacenter' | 'decodo' | 'browserless_residential';
   geo: 'USA' | 'EU' | 'UK';
   port: number | null;
   attempt: number;
@@ -261,8 +261,8 @@ export interface EvidenceBundle {
     final_url: string | null;
     http_status: number | null;
     access_attempt_count: number;
-    initial_provider: 'decodo' | 'browserless_residential' | null;
-    final_provider: 'decodo' | 'browserless_residential' | null;
+    initial_provider: 'browserless_direct' | 'browserless_datacenter' | 'decodo' | 'browserless_residential' | null;
+    final_provider: 'browserless_direct' | 'browserless_datacenter' | 'decodo' | 'browserless_residential' | null;
     proxy_fallback_used: boolean;
     proxy_fallback_recovered: boolean;
     challenge_detected: boolean;
@@ -444,6 +444,10 @@ export interface EvidenceBundle {
     total_duration_ms: number | null;
     browserless_connect_ms: number | null;
     browserless_session_ms: number | null;
+    browserless_session_count?: number;
+    browserless_session_total_ms?: number;
+    browserless_session_durations_ms?: number[];
+    browserless_estimated_time_units?: number;
     browserless_host: string | null;
     browserless_session_timeout_ms: number | null;
     browser_connection_failure_code: string | null;
@@ -457,12 +461,12 @@ export interface EvidenceBundle {
     proxy_egress_reachable: boolean;
     proxy_ip_hash: string | null;
     proxy_retry_recovered: boolean;
-    proxy_initial_provider?: 'decodo' | 'browserless_residential';
-    proxy_final_provider?: 'decodo' | 'browserless_residential';
+    proxy_initial_provider?: 'browserless_direct' | 'browserless_datacenter' | 'decodo' | 'browserless_residential';
+    proxy_final_provider?: 'browserless_direct' | 'browserless_datacenter' | 'decodo' | 'browserless_residential';
     proxy_fallback_used?: boolean;
     proxy_fallback_recovered?: boolean;
     proxy_fallback_candidate?: boolean;
-    proxy_attempts?: Array<{ provider: 'decodo' | 'browserless_residential'; attempt: number; configured_port: number | null; connection_ms?: number; failure_reason?: string; egress_reachable?: boolean; target_result?: string }>;
+    proxy_attempts?: Array<{ provider: 'browserless_direct' | 'browserless_datacenter' | 'decodo' | 'browserless_residential'; attempt: number; configured_port: number | null; connection_ms?: number; failure_reason?: string; egress_reachable?: boolean; target_result?: string }>;
     browser_locale: string | null;
     browser_timezone: string | null;
     browser_profile_country?: string | null;

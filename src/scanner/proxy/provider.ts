@@ -1,7 +1,30 @@
 import { browserGeoProfile } from '../browser-session';
+import type { AuditModule } from '../../types';
 import { buildBrowserlessCdpUrl, countryForGeo, getExternalProxyForGeo, getProxyCountryHint, parseProxyUrl } from './decodo';
 
-export type ProxyProvider = 'decodo' | 'browserless_residential';
+export type ProxyProvider = 'browserless_direct' | 'browserless_datacenter' | 'decodo' | 'browserless_residential';
+
+export function initialProxyProvider(modules: AuditModule[]): ProxyProvider {
+  return modules.includes('consent') ? 'decodo' : 'browserless_direct';
+}
+
+export function nextNonConsentProvider(provider: ProxyProvider, residentialEnabled: boolean, isBulk = false): ProxyProvider | null {
+  if (provider === 'browserless_direct') return 'browserless_datacenter';
+  if (provider === 'browserless_datacenter') return 'decodo';
+  if (provider === 'decodo' && residentialEnabled && !isBulk) return 'browserless_residential';
+  return null;
+}
+
+export function shouldProbeProxyEgress(input: {
+  provider: ProxyProvider;
+  consentSelected: boolean;
+  diagnostic: boolean;
+  configured: boolean;
+  neutral: boolean;
+}): boolean {
+  return input.provider !== 'browserless_direct' &&
+    (input.neutral || input.consentSelected || input.diagnostic || input.configured);
+}
 export type ProxyFailureClassification =
   | 'PROXY_PROVIDER_UNREACHABLE'
   | 'PROXY_EXTERNAL_TUNNEL_FAILED'
@@ -45,9 +68,10 @@ export function buildProxyAttemptPlan(input: {
       host: input.browserlessHost,
       token: input.browserlessToken,
       route: 'stealth',
-      // Browserless Residential has its own proxy configuration. Do not add an external proxy.
+      // Built-in Browserless proxies must not be combined with an external proxy.
       externalProxyServer: externalProxyServer || undefined,
-      builtInProxy: input.provider === 'browserless_residential' ? 'residential' : undefined,
+      builtInProxy: input.provider === 'browserless_residential' ? 'residential'
+        : input.provider === 'browserless_datacenter' ? 'datacenter' : undefined,
       proxyCountry: input.provider === 'browserless_residential' ? country : undefined,
       proxySticky: input.provider === 'browserless_residential',
       proxyLocaleMatch: input.provider === 'browserless_residential',

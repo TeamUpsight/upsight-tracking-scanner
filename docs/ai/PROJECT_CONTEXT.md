@@ -13,7 +13,7 @@ React operations UI
   -> Express REST API + optional internal token
   -> process-local domain-aware queue
   -> runStorefrontAudit()
-  -> Browserless CDP session using configured Decodo geo proxy
+  -> module-selected Browserless CDP transport (direct for Tracking/Server; Decodo geo for Consent)
   -> bounded normalized Evidence Bundle
   -> shared detectors and status resolvers
   -> consistency/fingerprint/QA-priority finalization
@@ -30,7 +30,7 @@ The UI does not use a routing or global-state library. `src/App.tsx` owns view s
 3. **Conservative failure semantics.** Invalid access, blocking, timeout, or incomplete modules resolve to `inconclusive` or `not_tested`, never a confident negative finding.
 4. **Finalize once.** Ordinary paths pass through `FinalizeOnce`, merge evidence, run replay/consistency/fingerprints, persist ordered updates, and emit one `scan_finalized` trace event.
 5. **Bounded and sanitized evidence.** Normal mode is lean; diagnostic mode retains more bounded request/CMP/timing/screenshot evidence. Secrets, cookie values, raw authorization headers, raw proxy IPs, and full sensitive URLs are excluded.
-6. **Access escalation is constrained.** BrowserQL challenge solving and Browserless provider fallbacks are manual, opt-in, plan/cost-sensitive, and never used for bulk scans.
+6. **Access escalation is constrained.** Tracking/Server access or transport failure follows a bounded direct → datacenter → Decodo ladder. Browserless Residential remains the final configured fallback; Consent starts on verified Decodo geo egress. BrowserQL challenge solving remains manual and outside bulk scans.
 
 ## Major domains
 

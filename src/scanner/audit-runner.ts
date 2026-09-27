@@ -60,9 +60,13 @@ import {
 import {
   buildProxyAttemptPlan,
   classifyConfirmedTunnelFailure,
+  initialProxyProvider as selectInitialProxyProvider,
+  nextNonConsentProvider,
+  shouldProbeProxyEgress,
   shouldRetryBrowserlessResidential,
   type ProxyProvider
 } from './proxy/provider';
+import { BrowserlessSessionAccounting } from './proxy/session-accounting';
 import { calculateQaPriority, generateFailureFingerprints } from './quality/fingerprints';
 import { replayEvidence } from './quality/replay';
 import { sanitizeValue } from './quality/sanitize';
@@ -1171,6 +1175,19 @@ export function requestCaptureChannelCompleted(
     !observation.capture_channel_errors.includes('request_capture_interrupted');
 }
 
+export function finalizeRequestCaptureChannel(
+  observation: EvidenceBundle['network']['observation'],
+  browserConnected: boolean,
+  unsafeRequestBlocked: boolean
+) {
+  if (!observation) return;
+  if (observation.request_listener_active && !browserConnected &&
+    !observation.capture_channel_errors.includes('BROWSER_DISCONNECTED_BEFORE_FINALIZATION')) {
+    observation.capture_channel_errors.push('BROWSER_DISCONNECTED_BEFORE_FINALIZATION');
+  }
+  observation.request_capture_completed = requestCaptureChannelCompleted(observation, browserConnected, unsafeRequestBlocked);
+}
+
 export async function runStorefrontAudit(
   params: {
     audit_id: string | number;
@@ -1221,6 +1238,11 @@ export async function runStorefrontAudit(
   const selectedModules = selectedAuditModules(params.selected_modules);
   const runtimeBudget = new AuditRuntimeBudget(startedMs, timeoutMs, selectedModules);
   const consentSelected = selectedModules.includes('consent');
+  const browserlessTransportAvailable = (process.env.BROWSER_PROVIDER || 'browserless') === 'browserless' &&
+    Boolean(process.env.BROWSERLESS_TOKEN);
+  const residentialFallbackEnabled = consentSelected
+    ? process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED !== 'false'
+    : process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED === 'true' || params.proxy_provider === 'browserless_residential';
   const consentV2Controls = certificationSafeConsentV2RolloutControls(consentV2RolloutControls(), buildMetadata.certification_eligible);
   const consentV2Enabled = consentV2Controls.enabled;
   const trackingSelected = selectedModules.includes('tracking');
@@ -1255,7 +1277,8 @@ export async function runStorefrontAudit(
   let authoritativeSharedHomepage: { page: Page; context: BrowserContext; host: string } | null = null;
   let consentV2Ran = false;
   let pdpPage: Page | null = null;
-  let browserConnectedAt: number | null = null;
+  const browserlessSessions = new BrowserlessSessionAccounting();
+  let canonicalSessionId: number | null = null;
   let currentPhase = 'initialization';
   let finalStatus: ScanStatus = 'completed';
   let finalError: ErrorCategory = 'none';
@@ -1263,9 +1286,9 @@ export async function runStorefrontAudit(
   let lastInterimUpdate = 0;
   const orderedUpdates = new OrderedAuditUpdates<Partial<StorefrontAudit>>(onUpdate);
   let proxyAttempt = 0;
-  let currentProxyProvider: ProxyProvider = params.proxy_provider === 'browserless_residential' ? 'browserless_residential' : 'decodo';
+  let currentProxyProvider: ProxyProvider = selectInitialProxyProvider(selectedModules);
   const initialProxyProvider: ProxyProvider = currentProxyProvider;
-  let proxyFallbackUsed = currentProxyProvider === 'browserless_residential';
+  let proxyFallbackUsed = false;
   let proxyFallbackRecovered = false;
   let neutralProbeSucceeded: boolean | undefined;
   let browserlessFallbackRetried = false;
@@ -1506,6 +1529,8 @@ export async function runStorefrontAudit(
     if (context) await close('canonical_context', () => context!.close());
     context = null;
     if (browser) await close('browser', () => browser!.close());
+    if (canonicalSessionId !== null) browserlessSessions.finish(canonicalSessionId);
+    canonicalSessionId = null;
     browser = null;
   };
 
@@ -1515,7 +1540,6 @@ export async function runStorefrontAudit(
     } else if (finalError !== 'none') {
       evidenceCollector.setPage({ accessCategory: finalError });
     }
-    if (browserConnectedAt !== null) evidence.runtime.browserless_session_ms = Date.now() - browserConnectedAt;
     evidence.runtime.proxy_retry_count = proxyAttempt;
     evidence.runtime.proxy_port = lastProxyPort;
     evidence.runtime.proxy_initial_provider = initialProxyProvider;
@@ -1550,11 +1574,11 @@ export async function runStorefrontAudit(
     if (consentSelected && consentV2Enabled) await settleSharedConsentObservation('finalization');
     if (consentSelected && consentV2Enabled && sharedConsentObservation) applyMergedConsentObservation(consentV2);
     if (evidence.network.observation) {
-      evidence.network.observation.request_capture_completed = requestCaptureChannelCompleted(
-        evidence.network.observation, browser?.isConnected() === true, unsafeRequestBlocked
-      );
+      finalizeRequestCaptureChannel(evidence.network.observation, browser?.isConnected() === true, unsafeRequestBlocked);
     }
     await closeSession();
+    browserlessSessions.finishAll();
+    Object.assign(evidence.runtime, browserlessSessions.snapshot());
     const completedEvidence = evidenceCollector.complete(startedMs);
     const replayed = replayEvidence(completedEvidence);
     if (completedEvidence.mode === 'diagnostic') {
@@ -1764,7 +1788,8 @@ export async function runStorefrontAudit(
 
   const verifyProxyEgress = async (neutral = false) => {
     if (!homepage || !context) return;
-    const shouldProbe = neutral || consentSelected || evidence.mode === 'diagnostic' || process.env.PROXY_EGRESS_PROBE === 'true';
+    const shouldProbe = shouldProbeProxyEgress({ provider: currentProxyProvider, consentSelected,
+      diagnostic: evidence.mode === 'diagnostic', configured: process.env.PROXY_EGRESS_PROBE === 'true', neutral });
     if (!shouldProbe || process.env.BROWSER_PROVIDER === 'local') return;
     const probeUrl = neutral
       ? (process.env.PROXY_NEUTRAL_PROBE_URL || 'https://example.com/')
@@ -1832,17 +1857,17 @@ export async function runStorefrontAudit(
     }
   };
 
-  const connectSession = async (attempt: number, solveCaptchas = false, proxyModeOverride?: string) => {
+  const connectSession = async (attempt: number, solveCaptchas = false, proxyModeOverride?: ProxyProvider) => {
     check();
+    lastTunnelPhase = 'connect';
     await settleSharedConsentObservation('session_replacement');
     await closeSession();
     const provider = process.env.BROWSER_PROVIDER || 'browserless';
     let cdpUrl = '';
     let proxy = '';
     if (provider === 'browserless' && process.env.BROWSERLESS_TOKEN) {
-      const proxyMode = proxyModeOverride || 'decodo';
-      currentProxyProvider = proxyMode === 'browserless_residential' ? 'browserless_residential' : 'decodo';
-      if (currentProxyProvider === 'browserless_residential') {
+      currentProxyProvider = proxyModeOverride || initialProxyProvider;
+      if (currentProxyProvider !== 'decodo') {
         const plan = buildProxyAttemptPlan({ provider: currentProxyProvider, geo, attempt, portOffset: proxyPortOffset,
           browserlessHost: process.env.BROWSERLESS_HOST || 'chrome.browserless.io', browserlessToken: process.env.BROWSERLESS_TOKEN,
           sessionTimeoutMs: browserlessSessionTimeoutMs });
@@ -1891,7 +1916,7 @@ export async function runStorefrontAudit(
       proxyPort: lastProxyPort,
       proxySession: 'fresh',
       browserSession: 'fresh',
-      context: currentProxyProvider === 'browserless_residential' ? 'browserless_default' : 'fresh',
+      context: currentProxyProvider === 'browserless_residential' || currentProxyProvider === 'browserless_datacenter' ? 'browserless_default' : 'fresh',
       locale: browserGeoProfile(currentProxyCountry).locale,
       timezone: browserGeoProfile(currentProxyCountry).timezoneId,
       attempt: attempt + 1
@@ -1938,7 +1963,8 @@ export async function runStorefrontAudit(
         failure_code: failureCode
       });
       if (isConfirmedTunnelFailure(error)) lastTunnelPhase = 'connect';
-      if (!isProxyFailure(error)) {
+      if (!isProxyFailure(error) && (currentProxyProvider === 'decodo' ||
+        ['BROWSERLESS_AUTH_REJECTED', 'BROWSERLESS_EXTERNAL_PROXY_PLAN_REQUIRED'].includes(failureCode))) {
         throw new ScanTermination('browser_error', 'failed', safeBrowserConnectionFailureReason(failureCode));
       }
       throw error;
@@ -1948,7 +1974,12 @@ export async function runStorefrontAudit(
     const lastAttempt = evidence.runtime.proxy_attempts?.at(-1);
     if (lastAttempt) lastAttempt.connection_ms = connectDuration;
     evidenceCollector.updateAccessProxyAttempt(attempt + 1, { connect_duration_ms: connectDuration });
-    browserConnectedAt = Date.now();
+    if (provider === 'browserless') {
+      canonicalSessionId = browserlessSessions.start();
+      const sessionId = canonicalSessionId;
+      const connectedBrowser = browser;
+      connectedBrowser.on('disconnected', () => browserlessSessions.finish(sessionId));
+    }
     evidence.runtime.browserless_connect_ms = connectDuration;
     recordProxyConnect(geo, lastProxyPort, connectDuration);
     persistProxyMetric({ kind: 'connect', geo, port: lastProxyPort, duration_ms: connectDuration });
@@ -1990,7 +2021,10 @@ export async function runStorefrontAudit(
     evidence.runtime.captcha_solved = handoff.captchaSolved;
     browser = await chromium.connectOverCDP(handoff.browserWSEndpoint, { timeout: 30_000 });
     evidenceCollector.updateAccessProxyAttempt(attempt + 1, { connect_duration_ms: Date.now() - handoffStarted });
-    browserConnectedAt = Date.now();
+    canonicalSessionId = browserlessSessions.start();
+    const sessionId = canonicalSessionId;
+    const connectedBrowser = browser;
+    connectedBrowser.on('disconnected', () => browserlessSessions.finish(sessionId));
     await configureConnectedSession(true);
     evidence.runtime.bql_escalation_succeeded = true;
     addTrace('browserql_escalation_handoff_ready', {
@@ -2035,8 +2069,9 @@ export async function runStorefrontAudit(
     }
 
     const maxProxyRetries = params.is_bulk ? bulkProxyRetryLimit() : singleProxyRetryLimit();
+    let decodoRetryCount = 0;
     let solveCaptchas = false;
-    let proxyModeOverride: ProxyProvider | undefined = params.proxy_provider;
+    let proxyModeOverride: ProxyProvider = initialProxyProvider;
     let browserQlEscalated = false;
     let response: Response | null = null;
     while (true) {
@@ -2056,11 +2091,30 @@ export async function runStorefrontAudit(
         evidence.runtime.last_successful_phase = 'consent_initial_load';
         check();
       } catch (error) {
+        if (browserlessTransportAvailable && !consentSelected &&
+          (currentProxyProvider === 'browserless_direct' || currentProxyProvider === 'browserless_datacenter') &&
+          !(error instanceof ScanTermination) &&
+          (lastTunnelPhase === 'connect' || isProxyFailure(error) || isNavigationTimeout(error) ||
+            /net::ERR_|Target page, context or browser has been closed|Target closed/i.test(String((error as Error)?.message || error)))) {
+          const next = nextNonConsentProvider(currentProxyProvider, false);
+          if (next) {
+            const previous = currentProxyProvider;
+            evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, {
+              target_result: 'failed', failure_classification: lastTunnelPhase === 'connect'
+                ? classifyBrowserConnectionError(error) : classifyNavigationError(error)
+            });
+            proxyFallbackUsed = true;
+            proxyModeOverride = next;
+            proxyAttempt += 1;
+            addTrace('proxy_provider_fallback_started', { from: previous, to: next, attempt: proxyAttempt + 1 });
+            continue;
+          }
+        }
         if (isConfirmedTunnelFailure(error) && currentProxyProvider === 'decodo') {
           addTrace('proxy_target_tunnel_failed', {
             provider: 'decodo', attempt: proxyAttempt + 1, configured_port: lastProxyPort, phase: lastTunnelPhase
           });
-          if (proxyAttempt > 0 && process.env.PROXY_NEUTRAL_PROBE_ENABLED !== 'false') await verifyProxyEgress(true);
+          if (decodoRetryCount > 0 && process.env.PROXY_NEUTRAL_PROBE_ENABLED !== 'false') await verifyProxyEgress(true);
           const classification = classifyConfirmedTunnelFailure(lastTunnelPhase, neutralProbeSucceeded);
           evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, {
             target_result: 'failed', failure_classification: classification
@@ -2077,12 +2131,13 @@ export async function runStorefrontAudit(
           recordProxyError(geo, lastProxyPort);
           persistProxyMetric({ kind: 'error', geo, port: lastProxyPort });
           const proxyTransition = decideAccessTransition({
-            event: 'proxy_failure', isBulk: params.is_bulk, decodoAttempts: proxyAttempt,
+            event: 'proxy_failure', isBulk: params.is_bulk, decodoAttempts: decodoRetryCount,
             maxDecodoRetries: maxProxyRetries,
-            fallbackEnabled: process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED !== 'false',
+            fallbackEnabled: residentialFallbackEnabled,
             challengeSolvingEnabled: false
           });
           if (proxyTransition === 'retry_decodo') {
+            decodoRetryCount += 1;
             const previousPort = lastProxyPort;
             proxyAttempt += 1;
             const retryProxy = getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset);
@@ -2131,6 +2186,16 @@ export async function runStorefrontAudit(
           evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, {
             target_result: 'failed', failure_classification: classification
           });
+          if (!consentSelected && currentProxyProvider === 'decodo') {
+            const next = nextNonConsentProvider(currentProxyProvider, residentialFallbackEnabled, Boolean(params.is_bulk));
+            if (next) {
+              proxyFallbackUsed = true;
+              proxyModeOverride = next;
+              proxyAttempt += 1;
+              addTrace('proxy_provider_fallback_started', { from: 'decodo', to: next, attempt: proxyAttempt + 1 });
+              continue;
+            }
+          }
           const transientFallbackFailure = currentProxyProvider === 'browserless_residential' &&
             ['PROXY_TUNNEL_FAILED', 'PROXY_CONNECTION_RESET', 'PROXY_CONNECTION_FAILED'].includes(rawFailure);
           if (shouldRetryBrowserlessResidential({
@@ -2203,7 +2268,7 @@ export async function runStorefrontAudit(
       }
 
       const bqlEnabled = process.env.BROWSERLESS_CHALLENGE_SOLVING_ENABLED === 'true';
-      if (access.category === 'bot_protection' && params.enable_captcha_solving && !params.is_bulk && bqlEnabled &&
+      if (consentSelected && access.category === 'bot_protection' && params.enable_captcha_solving && !params.is_bulk && bqlEnabled &&
         !browserQlEscalated && proxyAttempt < maxProxyRetries) {
         browserQlEscalated = true;
         evidenceCollector.setAccess({ challenge_solver_used: true, challenge_solver_result: 'inconclusive' });
@@ -2259,15 +2324,28 @@ export async function runStorefrontAudit(
           retry_after_ms: access.retryAfterMs,
           bot_provider: access.botProvider
         });
+        if (browserlessTransportAvailable && !consentSelected &&
+          ['rate_limited', 'bot_protection', 'access_blocked'].includes(access.category)) {
+          const next = nextNonConsentProvider(currentProxyProvider, residentialFallbackEnabled, Boolean(params.is_bulk));
+          if (next) {
+            const previous = currentProxyProvider;
+            proxyFallbackUsed = true;
+            proxyModeOverride = next;
+            proxyAttempt += 1;
+            addTrace('proxy_provider_fallback_started', { from: previous, to: next, reason_code: access.reasonCode });
+            continue;
+          }
+        }
         const accessTransition = decideAccessTransition({
           event: access.category === 'rate_limited' ? 'rate_limited' : access.category === 'bot_protection' ? 'challenge' : 'unrecoverable',
           isBulk: params.is_bulk,
-          decodoAttempts: proxyAttempt,
+          decodoAttempts: decodoRetryCount,
           maxDecodoRetries: maxProxyRetries,
-          fallbackEnabled: process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED !== 'false',
+          fallbackEnabled: residentialFallbackEnabled,
           challengeSolvingEnabled: Boolean(params.enable_captcha_solving && bqlEnabled)
         });
         if (currentProxyProvider === 'decodo' && accessTransition === 'retry_decodo') {
+          decodoRetryCount += 1;
           const previousPort = lastProxyPort;
           proxyAttempt += 1;
           const retryPort = parseProxyUrl(getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset)).port;
@@ -2300,9 +2378,9 @@ export async function runStorefrontAudit(
         evidence.runtime.proxy_retry_recovered = true;
         addTrace('proxy_retry_succeeded', { provider: currentProxyProvider, attempt: proxyAttempt + 1, configured_port: lastProxyPort });
       }
-      if (proxyFallbackUsed && String(currentProxyProvider) === 'browserless_residential') {
+      if (proxyFallbackUsed) {
         proxyFallbackRecovered = true;
-        addTrace('proxy_provider_fallback_succeeded', { provider: 'browserless_residential', recovery: true });
+        addTrace('proxy_provider_fallback_succeeded', { provider: currentProxyProvider, recovery: true });
       }
       break;
     }
@@ -3194,7 +3272,7 @@ export async function runStorefrontAudit(
           recordCandidateOutcome({ url: safeUrl(pdpUrl) || pdpUrl, final_url: evidence.product.final_pdp_url, rank: candidateIndex + 1, score: candidate.score, source: candidate.source, sources: candidate.sources, promoted_from: candidate.promoted_from || null, page_role: 'UNKNOWN', navigation_complete: false, observation_complete: false, reason_code: accessBlocked ? accessBlocked.reasonCode : outcome === 'TIMEOUT' ? 'PDP_NAV_TIMEOUT' : outcome === 'TRANSPORT_FAILED' ? connectionFailure : 'PDP_OBSERVATION_INCOMPLETE', outcome });
           if (outcome === 'TRANSPORT_FAILED') evidence.product.observation!.transport_failure = true;
           if (outcome === 'TIMEOUT') evidence.product.observation!.timeout = true;
-          if (isProxyFailure(error) && proxyAttempt < maxProxyRetries) {
+          if (isProxyFailure(error) && currentProxyProvider === 'decodo' && proxyAttempt < maxProxyRetries) {
             const previousPort = lastProxyPort;
             recordProxyError(geo, previousPort);
             persistProxyMetric({ kind: 'error', geo, port: previousPort });
@@ -3445,8 +3523,12 @@ export async function runStorefrontAudit(
           diagnostics.gpc_experiment = await (dependencies.runGpcExperiment || runGpcExperiment)({
             browser, url: finalUrl, targetHost: effectiveDomain, proxyCountry: currentProxyCountry,
             ...(gpcExperimentCdpUrl ? { browserEnvironment: { provider: 'browserless' as const, route: 'standard' as const },
-              openBrowserSession: (profile: 'off' | 'on') =>
-              openBrowserlessGpcExperimentSession(gpcExperimentCdpUrl!, profile) } : {}),
+              openBrowserSession: async (profile: 'off' | 'on') => {
+                const session = await openBrowserlessGpcExperimentSession(gpcExperimentCdpUrl!, profile);
+                const sessionId = browserlessSessions.start();
+                session.browser.on('disconnected', () => browserlessSessions.finish(sessionId));
+                return session;
+              } } : {}),
             controls: consentV2Controls, navigationTimeoutMs: 6_000, armBudgetMs, budgetMs: armBudgetMs * 2,
             inspectAccess: (page, response) => inspectPageAccess(page, response),
             verifyEgress: async (experimentContext) => {

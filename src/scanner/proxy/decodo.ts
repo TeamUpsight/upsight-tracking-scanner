@@ -251,7 +251,7 @@ export function buildBrowserlessCdpUrl(options: {
   solveCaptchas?: boolean;
   timeoutMs?: number;
   browserLocale?: string;
-  builtInProxy?: 'residential';
+  builtInProxy?: 'datacenter' | 'residential';
   proxyCountry?: string;
   proxySticky?: boolean;
   proxyLocaleMatch?: boolean;
