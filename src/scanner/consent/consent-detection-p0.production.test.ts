@@ -1,0 +1,167 @@
+import { chromium, type Browser, type Page } from 'playwright-core';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { captureBrowserConsentFacts } from './browser-context-builders';
+import { detectGenericConsentMechanism } from './generic-consent-detector';
+import { chooseGeoInterstitialTarget, resolveGeoInterstitial } from './geo-interstitial';
+import { cmpAbsenceEarned, runConsentV2Session } from './v2-session';
+
+let browser: Browser;
+beforeAll(async () => { browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, headless: true }); });
+afterAll(async () => { await browser?.close(); });
+
+async function fixture(html: string, inspect: (page: Page) => Promise<void>) {
+  const page = await browser.newPage();
+  try { await page.setContent(html); await inspect(page); } finally { await page.close(); }
+}
+
+async function geoFixture(html: string, inspect: (page: Page) => Promise<void>) {
+  const page = await browser.newPage();
+  try {
+    await page.route('https://shop.example.test/**', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: html }));
+    await page.goto('https://shop.example.test/');
+    await inspect(page);
+  } finally { await page.close(); }
+}
+
+const banner = `<div class="x7-prompt" style="position:fixed;bottom:0;left:0;width:680px;height:180px;background:white;z-index:9999">
+  We use cookies and personal data to improve your experience.
+  <button>Accept All</button><button>Reject All</button><button>Manage Preferences</button>
+</div>`;
+const geo = (regional: string, alternative = '<button>No, I prefer the Global website</button>') =>
+  `<div class="x7-prompt" role="dialog" style="position:fixed;top:20px;left:20px;width:550px;height:240px;background:white">
+  Welcome. It looks like you are in the United States. Would you like to visit your local site?
+  ${regional}${alternative}</div>`;
+const input = { geo: 'USA' as const, geo_verified: true, page_valid: true, appearance_wait_ms: 450 };
+
+describe('Consent Detection P0 browser fixtures', () => {
+  it('never earns absence from an initial empty capture before the appearance window completes', () => {
+    const capture = { completion: 'skipped' } as Parameters<typeof cmpAbsenceEarned>[1];
+    const facts = { generic: { surfaces: [], text_read_diagnostics: { dom_text_read_error_count: 0, control_text_read_error_count: 0 } } } as unknown as Parameters<typeof cmpAbsenceEarned>[2];
+    const generic = { status: 'not_detected' } as Parameters<typeof cmpAbsenceEarned>[3];
+    const selection = { provider: undefined, candidates: [], conflict: false } as Parameters<typeof cmpAbsenceEarned>[4];
+    const frameworks = { tcf: 'not_present', gpp: 'not_present' } as Parameters<typeof cmpAbsenceEarned>[5];
+    expect(cmpAbsenceEarned(input, capture, facts, generic, selection, frameworks)).toBe(false);
+    expect(cmpAbsenceEarned(input, { ...capture, completion: 'appearance_absent' }, facts, generic, selection, frameworks)).toBe(true);
+    expect(cmpAbsenceEarned({ ...input, geo_interstitial_unresolved: true }, { ...capture, completion: 'appearance_absent' }, facts, generic, selection, frameworks)).toBe(false);
+  });
+
+  it('observes a delayed arbitrary-class custom banner and attributes an unknown custom CMP', async () => {
+    await fixture(`<script>setTimeout(() => document.body.insertAdjacentHTML('beforeend', ${JSON.stringify(banner)}), 180)</script>`, async (page) => {
+      const result = await runConsentV2Session(page, { ...input, diagnostic: true });
+      expect(result.result.mechanisms).toEqual(expect.arrayContaining([expect.objectContaining({ mechanism: 'custom', provider: expect.objectContaining({ attribution: 'unknown_candidate' }) })]));
+      expect(result.result.banner.visibility).toBe('visible');
+      expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+      expect(result.telemetry.consent_appearance_wait_result).toBe('appeared');
+    });
+  });
+
+  it('finds a fixed custom banner without cookie or consent markers in its class or id', async () => {
+    await fixture(banner, async (page) => {
+      const facts = await captureBrowserConsentFacts(page);
+      expect(facts.generic.surfaces).toEqual(expect.arrayContaining([expect.objectContaining({ visible: true, strong_presentation: true, privacy_or_cookie_semantics: true, intent: 'consent' })]));
+      expect(detectGenericConsentMechanism(facts.generic.surfaces as any, facts.generic.controls).status).toBe('detected');
+    });
+  });
+
+  it('finds the same arbitrary-class custom banner in an open shadow root', async () => {
+    await fixture(`<div id="host"></div><script>document.querySelector('#host').attachShadow({mode:'open'}).innerHTML=${JSON.stringify(banner)}</script>`, async (page) => {
+      const facts = await captureBrowserConsentFacts(page);
+      expect(facts.generic.surfaces).toEqual(expect.arrayContaining([expect.objectContaining({ location: 'shadow_dom', strong_presentation: true, privacy_or_cookie_semantics: true })]));
+      expect(detectGenericConsentMechanism(facts.generic.surfaces as any, facts.generic.controls).status).toBe('detected');
+    });
+  });
+
+  it('earns absence only after a completed appearance window', async () => {
+    await fixture('<main><h1>Ordinary shop</h1></main>', async (page) => {
+      const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 90 });
+      expect(result.telemetry.consent_appearance_wait_result).toBe('absent');
+      expect(result.result.reason_codes).toContain('NO_CMP_DETECTED');
+    });
+  });
+
+  it('keeps unreadable delayed privacy presentation inconclusive', async () => {
+    await fixture(`<script>setTimeout(() => { const el=document.createElement('div'); el.className='x7-prompt'; el.style='position:fixed;width:400px;height:160px';
+      Object.defineProperty(el,'innerText',{get(){throw new Error('fixture')}}); Object.defineProperty(el,'textContent',{get(){throw new Error('fixture')}});
+      document.body.appendChild(el); }, 70)</script>`, async (page) => {
+      const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 300 });
+      expect(result.result.reason_codes).toContain('DETECTION_INCONCLUSIVE');
+      expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+    });
+  });
+
+  it.each([
+    ['newsletter', 'Subscribe to our newsletter. Enter your email.'],
+    ['login', 'Sign in to your account.'],
+    ['age gate', 'Confirm your age. Are you 18?']
+  ])('does not make a %s modal a CMP', async (_name, copy) => {
+    await fixture(`<div class="x7-prompt" style="position:fixed;width:400px;height:180px">${copy}<button>Continue</button></div>`, async (page) => {
+      const facts = await captureBrowserConsentFacts(page);
+      expect(detectGenericConsentMechanism(facts.generic.surfaces as any, facts.generic.controls).status).toBe('not_detected');
+    });
+  });
+
+  it('classifies the sanitized USA/Global selector and activates one USA control', async () => {
+    await geoFixture('<main>Global catalog</main>' + geo(`<button onclick="history.pushState({},'', '/us'); document.querySelector('main').textContent='USA catalog'; this.parentElement.remove()">YES, TAKE ME TO THE USA SITE</button>`), async (page) => {
+      const facts = await captureBrowserConsentFacts(page);
+      expect(facts.generic.surfaces[0]).toMatchObject({ intent: 'country_selector', privacy_or_cookie_semantics: false });
+      const decision = await resolveGeoInterstitial(page, facts, 'USA', 'US', true, (url) => new URL(url).hostname === 'shop.example.test', 800);
+      expect(decision).toMatchObject({ resolution: 'resolved', target_match: 'exact', action_taken: true });
+      expect(page.url()).toBe('https://shop.example.test/us');
+    });
+  });
+
+  it('detects a delayed regional custom CMP after one geo navigation epoch', async () => {
+    await geoFixture('<main>Global catalog</main>' + geo('<button id="us-choice">YES, TAKE ME TO THE USA SITE</button>') +
+      `<script>document.querySelector('#us-choice').addEventListener('click', () => {
+        history.pushState({},'', '/us'); document.querySelector('main').textContent='USA catalog'; document.querySelector('.x7-prompt').remove();
+        setTimeout(() => document.body.insertAdjacentHTML('beforeend', ${JSON.stringify(banner)}), 90);
+      });</script>`, async (page) => {
+      const decision = await resolveGeoInterstitial(page, await captureBrowserConsentFacts(page), 'USA', 'US', true, (url) => new URL(url).hostname === 'shop.example.test', 800);
+      expect(decision.resolution).toBe('resolved');
+      const result = await runConsentV2Session(page, input);
+      expect(result.result.mechanisms.some((mechanism) => mechanism.mechanism === 'custom')).toBe(true);
+      expect(result.result.banner.visibility).toBe('visible');
+      expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+    });
+  });
+
+  it('leaves ambiguous and unsafe geo targets unresolved without clicking', async () => {
+    await fixture(geo('<button>Take me to USA</button><button>Visit US site</button>'), async (page) => {
+      const decision = await resolveGeoInterstitial(page, await captureBrowserConsentFacts(page), 'USA', 'US', true, () => true, 800);
+      expect(decision).toMatchObject({ resolution: 'ambiguous', action_taken: false });
+      const result = await runConsentV2Session(page, { ...input, geo_interstitial_unresolved: true, appearance_wait_ms: 70 });
+      expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+    });
+    await fixture(geo('<a href="http://127.0.0.1/internal">Take me to USA</a>'), async (page) => {
+      const decision = await resolveGeoInterstitial(page, await captureBrowserConsentFacts(page), 'USA', 'US', true, (url) => new URL(url).hostname !== '127.0.0.1', 800);
+      expect(decision).toMatchObject({ resolution: 'target_unverified', action_taken: false });
+      const result = await runConsentV2Session(page, { ...input, geo_interstitial_unresolved: true, geo_interstitial_target_unverified: true, appearance_wait_ms: 70 });
+      expect(result.result.reason_codes).toContain('GEO_INTERSTITIAL_TARGET_UNVERIFIED');
+      expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+    });
+  });
+
+  it('maps an EU selector only to the verified exact country', async () => {
+    await fixture(`<div role="dialog" style="position:fixed;width:450px;height:160px">Choose your country to visit your local site.
+      <button>Take me to Germany</button><button>Take me to France</button><button>Global site</button></div>`, async (page) => {
+      const facts = await captureBrowserConsentFacts(page);
+      expect(chooseGeoInterstitialTarget(facts, 'EU', 'DE', true)).toMatchObject({ detected: true, match: 'exact', control: { accessible_name: 'Take me to Germany' } });
+      expect(chooseGeoInterstitialTarget(facts, 'EU', 'ES', true)).toMatchObject({ detected: true, match: 'none', control: null });
+    });
+  });
+
+  it('does not accept a regional navigation that returns an HTTP error', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.route('https://shop.example.test/**', (route) => route.fulfill({
+        status: route.request().url().endsWith('/us') ? 404 : 200,
+        contentType: 'text/html',
+        body: route.request().url().endsWith('/us') ? '<main>Not found</main>' : '<main>Global shop</main>' + geo('<a href="/us">Take me to USA</a>')
+      }));
+      await page.goto('https://shop.example.test/');
+      const decision = await resolveGeoInterstitial(page, await captureBrowserConsentFacts(page), 'USA', 'US', true,
+        (url) => new URL(url).hostname === 'shop.example.test', 1_500);
+      expect(decision).toMatchObject({ action_taken: true, resolution: 'target_unverified' });
+    } finally { await page.close(); }
+  });
+});

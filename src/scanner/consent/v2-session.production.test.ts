@@ -14,7 +14,7 @@ const rollout: ConsentV2RolloutControls = {
   providers: Object.fromEntries(['onetrust', 'cookiebot', 'usercentrics', 'didomi', 'cookieyes', 'sourcepoint', 'shopify', 'generic'].map((provider) => [provider, { detection_enabled: true, actions_enabled: false }])) as ConsentV2RolloutControls['providers']
 };
 
-const input: ConsentV2SessionInput = { geo: 'EU', geo_verified: true, page_valid: true, rollout };
+const input: ConsentV2SessionInput = { geo: 'EU', geo_verified: true, page_valid: true, rollout, appearance_wait_ms: 80 };
 const actionRollout: ConsentV2RolloutControls = {
   ...rollout,
   actions_enabled: true,
@@ -363,7 +363,7 @@ describe('Consent V2 production session wiring', () => {
       expect.objectContaining({ role: 'link', accessible_name: 'Review privacy choices', visible: true, enabled: true, direct_actionable_target: true, consent_scope_corroborated: true })
     ]));
     expect(result.result.available_actions.some((action) => action.availability === 'direct')).toBe(false);
-  });
+  }, 10_000);
 
   it('WP11.7-CONTROL-BOUND-01 retains visible primary controls after earlier hidden controls exhaust the DOM-order bound', async () => {
     const page = await browser.newPage();
@@ -1442,7 +1442,7 @@ describe('Consent V2 production session wiring', () => {
     expect(early.diagnostic_observation?.readiness).toMatchObject({ triggered: true, completion: 'positive_ui_ready' });
     expect((early.diagnostic_observation?.readiness?.elapsed_ms || 4000)).toBeLessThan(1000);
     const skipped = await audit('<main>Ordinary editorial page</main>', { ...input, diagnostic: true });
-    expect(skipped.diagnostic_observation?.readiness).toMatchObject({ triggered: false, completion: 'skipped' });
+    expect(skipped.diagnostic_observation?.readiness).toMatchObject({ triggered: true, reason: 'absence_observation', completion: 'appearance_absent' });
   }, 10_000);
 
   it('CMP-READINESS-SHARED-01 uses the same bounded readiness capture for the homepage path', async () => {

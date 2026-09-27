@@ -300,7 +300,9 @@ export async function runGpcExperiment(input: {
         return navigated;
       });
       const observed = await stage('observation', async () => {
-        const consent = await captureSharedConsentObservation(page, controls, false, 'USA');
+        // The GPC arm has its own 3-second observation budget and does not
+        // assert CMP absence. Preserve its existing immediate empty capture.
+        const consent = await captureSharedConsentObservation(page, controls, false, 'USA', false, false);
         prepared.markInitialObservationCompleted();
         const framework = await observeConsentFrameworksInPage(page);
         const access = await input.inspectAccess(page, response);

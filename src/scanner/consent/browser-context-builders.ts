@@ -67,7 +67,7 @@ export interface BrowserConsentFacts {
   gpc_acknowledgement_observed: boolean;
   generic: {
     surfaces: Array<{ id: string; surface_type: 'banner' | 'dialog' | 'drawer'; visible: boolean; privacy_or_cookie_semantics: boolean; text_evidence_available?: boolean; intent: string; consent_management_topology: boolean; strong_presentation: boolean; location: 'main_frame' | 'shadow_dom'; shadow_depth: number }>;
-    controls: Array<{ id?: string; surface_id: string; visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string; role?: 'button' | 'link' | 'input' | 'other'; direct_actionable_target?: boolean; location: 'main_frame' | 'shadow_dom' | 'child_frame'; shadow_depth: number }>;
+    controls: Array<{ id?: string; surface_id: string; visible: boolean; enabled: boolean; actionable: boolean; accessible_name: string; role?: 'button' | 'link' | 'input' | 'other'; href?: string | null; direct_actionable_target?: boolean; location: 'main_frame' | 'shadow_dom' | 'child_frame'; shadow_depth: number }>;
     text_read_diagnostics?: { dom_text_read_error_count: number; control_text_read_error_count: number; dom_text_fallback_used: boolean };
   };
   usercentrics: {
@@ -326,11 +326,11 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     };
     const enabled = (control: Element) => !(control as HTMLButtonElement).disabled && control.getAttribute('aria-disabled') !== 'true';
     const knownConsentAction = (name: string) => [
-      'accept all', 'accept cookies', 'allow all', 'accept', 'alle akzeptieren', 'alles akzeptieren', 'tout accepter',
+      'accept all', 'accept cookies', 'allow all', 'accept', 'agree', 'alle akzeptieren', 'alles akzeptieren', 'tout accepter',
       'reject all', 'decline all', 'deny all', 'reject', 'decline', 'alle ablehnen', 'alles ablehnen', 'continuer sans accepter',
       'only necessary', 'necessary only', 'nur notwendige',
-      'preferences', 'manage preferences', 'cookie settings', 'manage cookie settings', 'cookie preferences',
-      'manage cookie preferences', 'privacy preferences', 'customize', 'einstellungen', 'einstellungen verwalten', 'personnaliser',
+      'preferences', 'manage preferences', 'manage choices', 'cookie settings', 'privacy settings', 'manage cookie settings', 'cookie preferences',
+      'manage cookie preferences', 'privacy preferences', 'customize', 'save choices', 'save preferences', 'einstellungen', 'einstellungen verwalten', 'personnaliser',
       'do not sell my personal information', 'do not sell or share my personal information', 'do not sell or share',
       'opt out of sale', 'opt out of sharing', 'opt out of targeted advertising', 'opt out of profiling',
       'your privacy choices', 'your california privacy choices', 'limit the use of my sensitive personal information'
@@ -362,37 +362,60 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         const name = accessibleName(control);
         const role = normalizedRole(control);
         return { visible: controlVisible, enabled: controlEnabled, actionable: name.length > 0,
-          accessible_name: name, role, direct_actionable_target: true, index };
+          accessible_name: name, role, href: role === 'link' ? control.getAttribute('href')?.slice(0, 500) || null : null, direct_actionable_target: true, index };
       }).sort((left, right) => {
         const priority = (control: { visible: boolean; enabled: boolean }) => control.visible && control.enabled ? 0 : control.visible ? 1 : 2;
         return priority(left) - priority(right) || left.index - right.index;
       }).slice(0, 30).map(({ index: _index, ...control }) => control);
     };
     currentStage = 'generic_surface_enumeration';
-    const genericSurfaces = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i]')).slice(0, 30);
+    const surfaceSelector = '[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i], [class*="privacy" i], [id*="privacy" i]';
+    const genericSurfaces = Array.from(document.querySelectorAll(surfaceSelector)).filter((element) => element !== document.body && element !== document.documentElement).slice(0, 20);
+    // Presentation-first fallback: inspect a bounded DOM census, retaining only
+    // visible overlay containers. Text classification remains surface-scoped.
+    const presentationCandidates = Array.from(document.querySelectorAll('*')).slice(0, 600);
+    for (const element of presentationCandidates) {
+      if (genericSurfaces.length >= 30) break;
+      if (!(element instanceof HTMLElement) || genericSurfaces.includes(element) || /^(HTML|BODY|MAIN)$/.test(element.tagName)) continue;
+      currentStage = 'generic_surface_style';
+      const style = getComputedStyle(element);
+      if (style.position !== 'fixed' && style.position !== 'sticky' && !(style.position === 'absolute' && Number.parseInt(style.zIndex, 10) >= 1000)) continue;
+      if (!visible(element)) continue;
+      const box = element.getBoundingClientRect();
+      if (box.width >= window.innerWidth * 0.98 && box.height >= window.innerHeight * 0.98 && element.getAttribute('role') !== 'dialog') continue;
+      genericSurfaces.push(element);
+    }
+    currentStage = 'generic_surface_enumeration';
     const genericSurfaceTexts: string[] = [];
     const genericSurfaceFacts = genericSurfaces.map((surface, index) => {
       currentStage = 'generic_surface_text';
       const textRead = safeElementText(surface);
       const text = normal(textRead.text);
       genericSurfaceTexts.push(text);
-      const actionText = controls(surface, true).map((control) => normal(control.accessible_name)).join(' ');
+       const surfaceControls = controls(surface, true);
+       const actionText = surfaceControls.map((control) => normal(control.accessible_name)).join(' ');
       currentStage = 'generic_surface_classification';
-      const privacyOrCookieSemantics = /cookie|consent|privacy|tracking|do not sell|opt out of (?:sale|sharing|targeted advertising|profiling)|sensitive personal information/.test(text);
+       const privacyOrCookieSemantics = /cookie|consent|privacy|tracking|personal data|personal information|manage choices|manage preferences|do not sell|opt out of (?:sale|sharing|targeted advertising|profiling)/.test(text);
       const consentTopology = privacyOrCookieSemantics && /accept|allow/.test(actionText) && /reject|decline|deny/.test(actionText);
-      const hasSettingsPath = /manage (?:cookie )?(?:settings|preferences)|cookie (?:settings|preferences)|privacy preferences/.test(actionText);
+       const hasSettingsPath = /manage (?:cookie )?(?:settings|preferences|choices)|(?:cookie|privacy) (?:settings|preferences)|customize/.test(actionText);
       const hasAcknowledgement = /(?:^|\s)(?:acknowledge|ok|okay|continue|got it|close)(?:\s|$)/.test(actionText);
       const consentManagementTopology = privacyOrCookieSemantics && hasSettingsPath && hasAcknowledgement;
       // Action topology on a cookie/privacy surface outranks incidental words
       // such as newsletter, country, location, or email.
-      const intent = consentTopology ? 'consent'
+       const locationStatement = /looks like you are in|detected your location|visit your local (?:site|page)|switch to your local (?:site|page)/.test(text);
+       const countryPrompt = /choose (?:your )?(?:country|region|location)|select (?:your )?(?:country|region|location)|(?:country|region|location) selector/.test(text);
+       const regionalAction = /(?:take me to|visit|continue to|switch to).{0,45}(?:local|usa|us site|united states|uk|united kingdom|great britain|germany|deutschland|france|global)/.test(actionText);
+       const globalAlternative = /(?:global|international|current) (?:web)?site|prefer the global/.test(actionText);
+       const geoTopology = regionalAction && (locationStatement || globalAlternative || (countryPrompt && surfaceControls.filter((control) => control.visible && control.actionable).length >= 2));
+       const intent = geoTopology ? 'country_selector'
+         : consentTopology ? 'consent'
         : /newsletter/.test(text) ? 'newsletter'
         : /email (?:address|updates|signup|sign up)|subscribe/.test(text) ? 'email_capture'
           : /sign in|log in/.test(text) ? 'login'
             : /create account|register/.test(text) ? 'account_creation'
               : /age gate|confirm (?:your )?age|are you (?:18|21)/.test(text) ? 'age_gate'
-                : /country|region selector/.test(text) ? 'country_selector'
-                  : /location selector|choose (?:your )?location/.test(text) ? 'location_selector'
+                 : countryPrompt && regionalAction && surfaceControls.filter((control) => control.visible && control.actionable).length >= 2 ? 'country_selector'
+                   : /location selector|choose (?:your )?location/.test(text) && regionalAction && surfaceControls.filter((control) => control.visible && control.actionable).length >= 2 ? 'location_selector'
                     : /currency selector|choose (?:your )?currency/.test(text) ? 'currency_selector'
                       : /privacy policy/.test(text) && !/reject|decline|manage preferences|cookie settings/.test(text) ? 'privacy_policy_only'
                         : /privacy notice|we value your privacy/.test(text) && !/reject|decline|manage preferences|cookie settings/.test(text) ? 'ordinary_notice'
@@ -401,7 +424,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       const style = surface instanceof HTMLElement ? getComputedStyle(surface) : null;
       const surfaceVisible = visible(surface);
       currentStage = 'generic_surface_classification';
-      return { id: `surface-${index}`, surface_type: (surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' ? 'dialog' : 'banner') as 'banner' | 'dialog', visible: surfaceVisible, privacy_or_cookie_semantics: privacyOrCookieSemantics, text_evidence_available: textRead.available, intent, consent_management_topology: consentManagementTopology, strong_presentation: surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky', location: 'main_frame' as 'main_frame' | 'shadow_dom', shadow_depth: 0 };
+       return { id: `surface-${index}`, surface_type: (surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' ? 'dialog' : 'banner') as 'banner' | 'dialog', visible: surfaceVisible, privacy_or_cookie_semantics: privacyOrCookieSemantics && !geoTopology, text_evidence_available: textRead.available, intent, consent_management_topology: consentManagementTopology && !geoTopology, strong_presentation: surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky' || (style?.position === 'absolute' && Number.parseInt(style.zIndex, 10) >= 1000), location: 'main_frame' as 'main_frame' | 'shadow_dom', shadow_depth: 0 };
     });
     const genericControls = genericSurfaces.flatMap((surface, index) => controls(surface, true).map((control) => ({ ...control, surface_id: `surface-${index}`, location: 'main_frame' as 'main_frame' | 'shadow_dom', shadow_depth: 0 })));
     // This is deliberately provider-first: two independent Cookiebot-specific
@@ -427,13 +450,12 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
         .map((control) => ({ surface_id: surfaceFact.id, visible: true, enabled: true, actionable: true, accessible_name: accessibleName(control), role: normalizedRole(control), direct_actionable_target: true, location: 'main_frame' as const, shadow_depth: 0 }))
         .filter((control) => control.accessible_name.length > 0 && knownConsentAction(control.accessible_name));
     }).slice(0, 30) : [];
-    const generic = { surfaces: genericSurfaceFacts, controls: [...genericControls, ...cookiebotCustomControls], text_read_diagnostics: { dom_text_read_error_count: 0, control_text_read_error_count: 0, dom_text_fallback_used: false } };
+    const generic: BrowserConsentFacts['generic'] = { surfaces: genericSurfaceFacts, controls: [...genericControls, ...cookiebotCustomControls], text_read_diagnostics: { dom_text_read_error_count: 0, control_text_read_error_count: 0, dom_text_fallback_used: false } };
     const gpcAcknowledgementObserved = genericSurfaces.some((_surface, index) => {
       if (!genericSurfaceFacts[index]?.visible || !genericSurfaceFacts[index]?.privacy_or_cookie_semantics) return false;
       const text = genericSurfaceTexts[index] || '';
       return /(?:global privacy control|(?:^|\s)gpc(?:\s|$))/.test(text) && /honor|honour|recognize|acknowledge|respect/.test(text);
     });
-    const surfaceSelector = '[role="dialog"], [aria-modal="true"], [class*="consent" i], [id*="consent" i], [class*="cookie" i], [id*="cookie" i], [class*="privacy" i], [id*="privacy" i]';
     const bridgeEntries: Array<{ element: Element; fact: typeof genericSurfaceFacts[number] }> = genericSurfaces.map((element, index) => ({ element, fact: genericSurfaceFacts[index] }));
     currentStage = 'shadow_dom';
     const roots: Array<{ root: Document | ShadowRoot; depth: number }> = [{ root: document, depth: 0 }];
@@ -444,13 +466,17 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
       let inspected = 0;
       for (let node = walker.nextNode(); node && inspected < 600; node = walker.nextNode(), inspected += 1) {
         const element = node as Element;
-        if (depth > 0 && generic.surfaces.length < 30 && element.matches(surfaceSelector)) {
+        const shadowStyle = depth > 0 && element instanceof HTMLElement ? getComputedStyle(element) : null;
+        const shadowPresentation = shadowStyle?.position === 'fixed' || shadowStyle?.position === 'sticky';
+        if (depth > 0 && generic.surfaces.length < 30 && element !== document.body && element !== document.documentElement &&
+          (element.matches(surfaceSelector) || shadowPresentation) && visible(element)) {
           const textRead = safeElementText(element);
           const text = normal(textRead.text);
           const marker = normal(`${element.id} ${element.getAttribute('class') || ''}`);
-          const privacy = /cookie|consent|privacy|tracking/.test(`${text} ${marker}`);
-          const style = element instanceof HTMLElement ? getComputedStyle(element) : null;
-          const fact = { id: `surface-${generic.surfaces.length}`, surface_type: element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true' ? 'dialog' as const : 'banner' as const, visible: visible(element), privacy_or_cookie_semantics: privacy, text_evidence_available: textRead.available, intent: privacy ? 'consent' : 'unknown', consent_management_topology: false, strong_presentation: element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky', location: 'shadow_dom' as const, shadow_depth: depth };
+          const actionText = controls(element, true).map((control) => normal(control.accessible_name)).join(' ');
+          const geo = /looks like you are in|visit your local (?:site|page)|choose (?:your )?(?:country|region)/.test(text) && /take me to|visit|continue to|switch to/.test(actionText);
+          const privacy = !geo && /cookie|consent|privacy|tracking|personal data|personal information/.test(`${text} ${marker}`);
+          const fact = { id: `surface-${generic.surfaces.length}`, surface_type: element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true' ? 'dialog' as const : 'banner' as const, visible: true, privacy_or_cookie_semantics: privacy, text_evidence_available: textRead.available, intent: geo ? 'country_selector' : privacy ? 'consent' : 'unknown', consent_management_topology: false, strong_presentation: element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true' || shadowPresentation, location: 'shadow_dom' as const, shadow_depth: depth };
           generic.surfaces.push(fact); bridgeEntries.push({ element, fact });
         }
         if (element.shadowRoot && depth < 4 && roots.length < 41) { roots.push({ root: element.shadowRoot, depth: depth + 1 }); shadowHosts += 1; }
@@ -748,14 +774,17 @@ export async function waitForConsentUiReadiness(page: Page, maximumMs: number, r
         const { root, depth } = roots[rootIndex]; const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT); let inspected = 0;
         for (let node = walker.nextNode(); node && inspected < 600; node = walker.nextNode(), inspected += 1) {
           const element = node as Element;
-          if (surfaces.length < 30 && element.matches(selector)) surfaces.push(element);
+          if (surfaces.length < 30 && element !== document.body && element !== document.documentElement &&
+            (element.matches(selector) || (element instanceof HTMLElement && element.tagName !== 'MAIN' && visible(element) &&
+              (['fixed', 'sticky'].includes(getComputedStyle(element).position) ||
+                (getComputedStyle(element).position === 'absolute' && Number.parseInt(getComputedStyle(element).zIndex, 10) >= 1000))))) surfaces.push(element);
           if (element.shadowRoot && depth < 4 && roots.length < 41) { roots.push({ root: element.shadowRoot, depth: depth + 1 }); shadows += 1; }
         }
       }
       const strong = surfaces.filter((surface) => {
         const style = surface instanceof HTMLElement ? getComputedStyle(surface) : null;
         const marker = `${surface.id} ${surface.getAttribute('class') || ''} ${String((surface as HTMLElement).innerText || surface.textContent || '').slice(0, 1200)}`;
-        return visible(surface) && /cookie|consent|privacy|tracking/i.test(marker) && (surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky');
+        return visible(surface) && /cookie|consent|privacy|tracking/i.test(marker) && (surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky' || (style?.position === 'absolute' && Number.parseInt(style.zIndex, 10) >= 1000));
       });
       const composedParent = (element: Element) => element.parentElement || (element.getRootNode() instanceof ShadowRoot ? (element.getRootNode() as ShadowRoot).host : null);
       const scopeFor = (surface: Element) => {
@@ -792,6 +821,69 @@ export async function waitForConsentUiReadiness(page: Page, maximumMs: number, r
       const poll = window.setInterval(check, 250); const timeout = window.setTimeout(() => finish(probe()), maximumMs);
     });
   }, { maximumMs: Math.max(0, Math.min(maximumMs, 4000)), requireSemanticControls });
+}
+
+export interface ConsentAppearanceResult {
+  result: 'appeared' | 'absent' | 'incomplete';
+  elapsed_ms: number;
+}
+
+/** An empty first capture cannot prove absence. This is one bounded observation window. */
+export async function waitForConsentAppearance(page: Page, maximumMs = 3_500): Promise<ConsentAppearanceResult> {
+  const boundedMs = Math.max(50, Math.min(maximumMs, 4_000));
+  const started = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      page.evaluate(async (duration) => {
+        const relevant = () => {
+          const runtime = window as any;
+          if (typeof runtime.__tcfapi === 'function' || typeof runtime.__gpp === 'function' || runtime.Cookiebot || runtime.OneTrust || runtime.UC_UI || runtime.Didomi) return true;
+          const roots: Array<{ root: Document | ShadowRoot; depth: number }> = [{ root: document, depth: 0 }];
+          for (let rootIndex = 0; rootIndex < roots.length && rootIndex < 41; rootIndex += 1) {
+            const { root, depth } = roots[rootIndex];
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+            let inspected = 0;
+            for (let node = walker.nextNode(); node && inspected < 600; node = walker.nextNode(), inspected += 1) {
+              const element = node as HTMLElement;
+              if (element.shadowRoot && depth < 4 && roots.length < 41) roots.push({ root: element.shadowRoot, depth: depth + 1 });
+              if (!(element instanceof HTMLElement) || /^(HTML|BODY|MAIN)$/.test(element.tagName)) continue;
+              const marker = `${element.id} ${element.className && typeof element.className === 'string' ? element.className : ''}`;
+              const known = /cookie|consent|privacy|cybot|didomi|usercentrics/i.test(marker) || element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true';
+              if (!known && inspected > 450) continue;
+              const style = getComputedStyle(element);
+              const box = element.getBoundingClientRect();
+              if (style.display === 'none' || style.visibility === 'hidden' || box.width <= 0 || box.height <= 0) continue;
+              if (!known && style.position !== 'fixed' && style.position !== 'sticky' && !(style.position === 'absolute' && Number.parseInt(style.zIndex, 10) >= 1000)) continue;
+              let text = '';
+              try { text = String(element.textContent || '').slice(0, 1200).toLowerCase(); } catch { return true; }
+              if (/cookie|consent|privacy|tracking|personal data|personal information|looks like you are in|visit your local site|choose your country/.test(text)) return true;
+            }
+          }
+          return false;
+        };
+        if (relevant()) return 'appeared' as const;
+        return await new Promise<'appeared' | 'absent'>((resolve) => {
+          let done = false;
+          const finish = (value: 'appeared' | 'absent') => {
+            if (done) return;
+            done = true;
+            observer.disconnect(); clearInterval(poll); clearTimeout(timeout); resolve(value);
+          };
+          const check = () => { if (relevant()) finish('appeared'); };
+          const observer = new MutationObserver(check);
+          observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'role', 'aria-modal'] });
+          const poll = window.setInterval(check, 250);
+          const timeout = window.setTimeout(() => finish('absent'), duration);
+        });
+      }, boundedMs).then((result) => ({ result, elapsed_ms: Date.now() - started })),
+      new Promise<ConsentAppearanceResult>((resolve) => { timer = setTimeout(() => resolve({ result: 'incomplete', elapsed_ms: Date.now() - started }), boundedMs + 250); })
+    ]);
+  } catch {
+    return { result: 'incomplete', elapsed_ms: Date.now() - started };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 const observation = (facts: BrowserConsentFacts, selector: string) => facts.observations.find((item) => item.selector === selector);

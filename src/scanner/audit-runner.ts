@@ -33,7 +33,8 @@ import {
   navigateFreshConsentContext
 } from './consent/fresh-context';
 import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
-import { installConsentCommandBootstrap } from './consent/browser-context-builders';
+import { captureBrowserConsentFacts, installConsentCommandBootstrap } from './consent/browser-context-builders';
+import { resolveGeoInterstitial, type GeoInterstitialDecision } from './consent/geo-interstitial';
 import { certificationSafeConsentV2RolloutControls, consentV2RolloutControls, legacyAcceptActionEnabled } from './consent/rollout-controls';
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
 import { consentObservationFailure } from './consent/observation-stage';
@@ -1261,6 +1262,7 @@ export async function runStorefrontAudit(
   if (process.env.BROWSER_PROVIDER === 'local' && dependencies.consentGeoVerified === true) {
     evidence.runtime.proxy_country_verified = true;
     evidence.runtime.country_matches_requested_geo = true;
+    evidence.runtime.actual_egress_country = countryForGeo(geo, 0).toUpperCase();
   }
   const sharedConsentRequests = new ConsentRequestBuffer();
   const sharedConsentGcm = new GoogleConsentModeObserver();
@@ -1339,7 +1341,7 @@ export async function runStorefrontAudit(
   };
 
   const legacyProviderForObservation = (provider: SharedConsentObservation['provider']) => ({
-    onetrust: 'OneTrust', cookiebot: 'Cookiebot', usercentrics: 'Usercentrics', didomi: 'Didomi', cookieyes: 'CookieYes', sourcepoint: 'Sourcepoint'
+    onetrust: 'OneTrust', cookiebot: 'Cookiebot', usercentrics: 'Usercentrics', didomi: 'Didomi', cookieyes: 'CookieYes', sourcepoint: 'Sourcepoint', generic: 'Unknown'
   } as const)[provider || ''] || null;
 
   const applyMergedConsentObservation = (fresh: ConsentV2SessionOutput | null) => {
@@ -1356,14 +1358,14 @@ export async function runStorefrontAudit(
     const has = (action: 'accept_all' | 'reject_all' | 'only_necessary' | 'open_preferences') =>
       merged.actions.some((item) => item.action === action && item.availability !== 'not_present' && item.availability !== 'unknown');
     telemetry.provider = merged.provider;
-    telemetry.provider_confidence = merged.provider ? 'high' : null;
+    telemetry.provider_confidence = merged.provider === 'generic' ? 'medium' : merged.provider ? 'high' : null;
     telemetry.provider_conflict = merged.provider_conflict;
     telemetry.banner_visibility = merged.banner.visibility;
     const reject = merged.actions.find((item) => item.action === 'reject_all') || merged.actions.find((item) => item.action === 'only_necessary');
     telemetry.reject_availability = reject?.availability || (fresh ? telemetry.reject_availability : 'unknown');
     telemetry.shared_observation = sharedConsentObservation ? {
       provider: sharedConsentObservation.provider,
-      provider_confidence: sharedConsentObservation.provider ? 'high' : null,
+      provider_confidence: sharedConsentObservation.provider === 'generic' ? 'medium' : sharedConsentObservation.provider ? 'high' : null,
       provider_conflict: sharedConsentObservation.provider_conflict,
       banner_visibility: sharedConsentObservation.banner.visibility,
       accept_available: sharedConsentObservation.actions.some((item) => item.action === 'accept_all' && item.availability !== 'not_present' && item.availability !== 'unknown'),
@@ -1373,7 +1375,12 @@ export async function runStorefrontAudit(
     evidence.runtime.consent_v2 = telemetry;
     evidence.consent.executed = true;
     evidence.consent.resolved_provider = legacyProviderForObservation(merged.provider);
-    evidence.consent.resolved_provider_confidence = merged.provider ? 'high' : 'low';
+    evidence.consent.resolved_provider_confidence = merged.provider === 'generic' ? 'medium' : merged.provider ? 'high' : 'low';
+    if (merged.provider === 'generic') {
+      evidence.consent.resolved_provider_evidence = [...new Set([
+        ...(evidence.consent.resolved_provider_evidence || []).filter((code) => code !== 'NO_CMP_DETECTED'), 'CMP_PROVIDER_UNKNOWN'
+      ])];
+    }
     evidence.consent.banner_visible = merged.banner.visibility === 'visible' ? true : merged.banner.visibility === 'not_visible' ? false : null;
     evidence.consent.accept_action_available = has('accept_all');
     evidence.consent.reject_action_available = has('reject_all') || has('only_necessary');
@@ -1413,14 +1420,17 @@ export async function runStorefrontAudit(
     const mergedProvider = legacyProviderForObservation(merged.provider);
     if (mergedProvider) compatibility.cmp_provider = mergedProvider;
     evidence.consent.resolved_provider = compatibility.cmp_provider;
-    evidence.consent.resolved_provider_confidence = compatibility.cmp_provider ? 'high' : 'low';
-    evidence.consent.resolved_provider_evidence = result.result.reason_codes;
+    evidence.consent.resolved_provider_confidence = compatibility.cmp_provider === 'Unknown' ? 'medium' : compatibility.cmp_provider ? 'high' : 'low';
+    evidence.consent.resolved_provider_evidence = [...new Set([
+      ...result.result.reason_codes.filter((code) => !merged.provider || code !== 'NO_CMP_DETECTED'),
+      ...(merged.provider === 'generic' ? ['CMP_PROVIDER_UNKNOWN'] : [])
+    ])];
     evidence.consent.technical_blocker_reason = compatibility.consent_status === 'inconclusive' ? compatibility.reason_code : undefined;
     evidence.consent.pre_choice_measurement = preChoice;
     evidence.consent.interaction_attempted = result.result.interactions.some((attempt) => attempt.action === 'reject_all' || attempt.action === 'only_necessary');
     evidence.consent.rejection_verified = result.result.rejection_verification.status === 'verified';
     evidence.consent.post_reject_observation_completed = Boolean(result.result.persistence.post_reload_observation_completed);
-    evidence.consent.provider_evidence = result.result.reason_codes;
+    evidence.consent.provider_evidence = evidence.consent.resolved_provider_evidence;
     evidence.consent.banner_visible = merged.banner.visibility === 'visible' ? true : merged.banner.visibility === 'not_visible' ? false : null;
     evidence.consent.accept_action_available = merged.actions.some((action) => action.action === 'accept_all' && action.availability !== 'not_present' && action.availability !== 'unknown');
     evidence.consent.reject_action_available = merged.actions.some((action) => (action.action === 'reject_all' || action.action === 'only_necessary') && action.availability !== 'not_present' && action.availability !== 'unknown');
@@ -2391,15 +2401,62 @@ export async function runStorefrontAudit(
       break;
     }
 
+    const preGeoUrl = homepage!.url();
+    const preGeoHost = new URL(preGeoUrl).hostname;
+    const preGeoExternalAccepted = !isSafeCanonicalRedirect(normalizedDomain, preGeoHost) && isEvidenceBackedExternalRedirect(
+      normalizedDomain, preGeoUrl, response?.status() ?? null, evidence.page.redirect_chain
+    );
+    let geoInterstitial: GeoInterstitialDecision | null = null;
+    let geoObservationIncomplete = false;
+    if (consentSelected && consentV2Enabled) {
+      const geoStageStarted = Date.now();
+      const geoOriginHost = new URL(homepage!.url()).hostname;
+      try {
+        const geoFacts = await withinPhaseBudget('consent_geo_detection', 3_000, () => captureBrowserConsentFacts(homepage!));
+        geoInterstitial = await withinPhaseBudget('consent_geo_resolution', 6_500, () => resolveGeoInterstitial(
+          homepage!, geoFacts, geo, evidence.runtime.actual_egress_country || null,
+          evidence.runtime.proxy_country_verified === true,
+          (url) => {
+            try {
+              return isPublicWebUrl(url) && !isNonStorefrontUrl(url) && isSafeCanonicalRedirect(geoOriginHost, new URL(url).hostname);
+            } catch { return false; }
+          }
+        ));
+        if (geoInterstitial.resolution === 'resolved') {
+          const access = await withinPhaseBudget('consent_geo_access_validation', 2_500, () => inspectPageAccess(homepage!, null));
+          if (access.category !== 'none') geoInterstitial = { ...geoInterstitial, resolution: 'target_unverified', final_url: null };
+        }
+        if (geoInterstitial.action_taken && geoInterstitial.resolution !== 'resolved') {
+          await withinPhaseBudget('consent_geo_restore', 5_000, () => homepage!.goto(preGeoUrl, { waitUntil: 'domcontentloaded', timeout: 4_500 }));
+        }
+        if (geoInterstitial.detected) addTrace('geo_interstitial_observed', {
+          intent: geoInterstitial.intent, target_match: geoInterstitial.target_match,
+          action_taken: geoInterstitial.action_taken, resolution: geoInterstitial.resolution,
+          final_host: geoInterstitial.final_url ? new URL(geoInterstitial.final_url).hostname : null,
+          elapsed_ms: Date.now() - geoStageStarted
+        }, { module: 'consent', severity: geoInterstitial.resolution === 'resolved' ? 'info' : 'warning' });
+      } catch (error) {
+        if (error instanceof ScanTermination) throw error;
+        geoObservationIncomplete = true;
+        addTrace('geo_interstitial_observation_incomplete', { error_family: runtimeErrorFamily(error) }, { module: 'consent', severity: 'warning' });
+      }
+    }
+    const geoUnresolved = geoObservationIncomplete || (geoInterstitial?.detected === true && geoInterstitial.resolution !== 'resolved');
+    let geoTargetUnverified = geoInterstitial?.resolution === 'target_unverified';
+    if (geoInterstitial) evidence.runtime.geo_interstitial = {
+      detected: geoInterstitial.detected, intent: geoInterstitial.intent, target_match: geoInterstitial.target_match,
+      action_taken: geoInterstitial.action_taken, resolution: geoInterstitial.resolution,
+      final_host: geoInterstitial.final_url ? new URL(geoInterstitial.final_url).hostname : null
+    };
     const finalUrl = homepage!.url();
     const finalHost = new URL(finalUrl).hostname;
     const canonicalRedirect = isSafeCanonicalRedirect(normalizedDomain, finalHost);
-    const externalRedirectAccepted = !canonicalRedirect && isEvidenceBackedExternalRedirect(
+    const externalRedirectAccepted = !canonicalRedirect && (isEvidenceBackedExternalRedirect(
       normalizedDomain,
       finalUrl,
       response?.status() ?? null,
       evidence.page.redirect_chain
-    );
+    ) || (geoInterstitial?.resolution === 'resolved' && preGeoExternalAccepted && isSafeCanonicalRedirect(preGeoHost, finalHost)));
     if ((!canonicalRedirect && !externalRedirectAccepted) || isNonStorefrontUrl(finalUrl)) {
       evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, { target_result: 'blocked', failure_classification: 'GENERIC_WAF_CHALLENGE' });
       evidenceCollector.setPage({ valid: false, statusCode: response?.status() || null, finalUrl: safeUrl(finalUrl), accessCategory: 'access_blocked' });
@@ -2439,6 +2496,26 @@ export async function runStorefrontAudit(
       });
     }
     addTrace('homepage_shared_observation_started', { status: response?.status(), final_url: safeUrl(finalUrl) });
+    const resolvedHomepageUrl = finalUrl;
+    const freshGeoUnresolved = async (page: Page) => {
+      if (geoInterstitial?.resolution !== 'resolved') return geoUnresolved;
+      const facts = await withinPhaseBudget('consent_fresh_geo_detection', 3_000, () => captureBrowserConsentFacts(page));
+      const targetHost = new URL(resolvedHomepageUrl).hostname;
+      const decision = await withinPhaseBudget('consent_fresh_geo_resolution', 6_500, () => resolveGeoInterstitial(
+        page, facts, geo, evidence.runtime.actual_egress_country || null, evidence.runtime.proxy_country_verified === true,
+        (url) => {
+          try { return isPublicWebUrl(url) && !isNonStorefrontUrl(url) && isSafeCanonicalRedirect(targetHost, new URL(url).hostname); }
+          catch { return false; }
+        }
+      ));
+      if (!decision.detected) return false;
+      if (decision.resolution === 'target_unverified') geoTargetUnverified = true;
+      const unresolved = decision.resolution !== 'resolved' || !decision.final_url || new URL(decision.final_url).hostname !== targetHost;
+      if (unresolved && decision.action_taken) await withinPhaseBudget('consent_fresh_geo_restore', 5_000, () =>
+        page.goto(resolvedHomepageUrl, { waitUntil: 'domcontentloaded', timeout: 4_500 }));
+      addTrace('consent_fresh_geo_resolution', { resolution: decision.resolution, target_match: decision.target_match, action_taken: decision.action_taken, host_matches_authority: !unresolved }, { module: 'consent', severity: unresolved ? 'warning' : 'info' });
+      return unresolved;
+    };
     const authoritativeHomepagePage = homepage!;
     const authoritativeHomepageContext = context!;
     authoritativeSharedHomepage = { page: authoritativeHomepagePage, context: authoritativeHomepageContext, host: finalHost };
@@ -2463,7 +2540,7 @@ export async function runStorefrontAudit(
           await wait(HOMEPAGE_OBSERVATION_MS, authoritativeHomepagePage);
           const captureStartedAt = Date.now();
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
-          const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic', geo);
+           const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic', geo, geoUnresolved);
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
           sharedConsentObservation = observed;
           sharedConsentObservationStatus = 'completed';
@@ -2559,7 +2636,8 @@ export async function runStorefrontAudit(
         consentCapture = await prepareConsentV2Session(consentHomepage);
         consentCapture.markNavigationStarted();
         freshConsentFailureStage = 'target_navigation';
-        const navigation = await navigateFreshConsentContext(consentHomepage, storefrontUrl, { timings: consentTimings });
+        const navigation = await navigateFreshConsentContext(consentHomepage, resolvedHomepageUrl, { timings: consentTimings });
+        const freshGeoIncomplete = await freshGeoUnresolved(consentHomepage);
         if (navigation.dom_content_loaded) consentCapture.markDOMContentLoaded();
         consentCapture.markInitialObservationCompleted();
         freshConsentFailureStage = 'access_validation';
@@ -2572,13 +2650,14 @@ export async function runStorefrontAudit(
           page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
           timings: consentTimings,
           rollout: consentV2Controls,
-          access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic'
+          access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic', geo_interstitial_unresolved: freshGeoIncomplete,
+          geo_interstitial_target_unverified: geoTargetUnverified
         }, consentCapture);
         consentV2Ran = true;
         evidence.runtime.consent_v2 = consentV2.telemetry;
         const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
         cmp = {
-          provider: compatibility.cmp_provider || (readiness.status === 'ready' ? 'Not Found' : 'Unknown'),
+          provider: compatibility.cmp_provider || (readiness.status === 'ready' && consentV2.result.reason_codes.includes('NO_CMP_DETECTED') ? 'Not Found' : 'Unknown'),
           confidence: compatibility.cmp_provider ? 'high' : 'low',
           evidence: consentV2.result.reason_codes,
           banner_visible: consentV2.result.banner.visibility === 'visible',
@@ -3461,7 +3540,7 @@ export async function runStorefrontAudit(
     // Consent V2 remains the owner of reject verification. It is now fed a
     // confirmed PDP and runs after the shared baseline rather than starving it.
     if (consentSelected && consentV2Enabled && !consentV2Ran) {
-      const consentTarget = confirmedPdpUrl || storefrontUrl;
+      const consentTarget = confirmedPdpUrl || resolvedHomepageUrl;
       const available = trackingSelected ? runtimeBudget.optionalAllowance() : runtimeBudget.requiredAllowance(0);
       if (available < 2_000) {
         finalStatus = 'partial';
@@ -3485,6 +3564,7 @@ export async function runStorefrontAudit(
           const navigation = await withinPhaseBudget('consent_pdp_navigation', Math.min(available, 12_000), () =>
             navigateFreshConsentContext(consentHomepage!, consentTarget, { timings: consentTimings })
           );
+          const freshGeoIncomplete = await freshGeoUnresolved(consentHomepage);
           if (navigation.dom_content_loaded) consentCapture.markDOMContentLoaded();
           consentCapture.markInitialObservationCompleted();
           const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
@@ -3492,7 +3572,8 @@ export async function runStorefrontAudit(
           consentV2 = await withinPhaseBudget('consent_pdp_reject', Math.min(available, 15_000), () => runConsentV2Session(consentHomepage!, {
             geo, geo_verified: freshConsent.geo.verified,
             page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
-            timings: consentTimings, rollout: consentV2Controls, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic',
+            timings: consentTimings, rollout: consentV2Controls, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic', geo_interstitial_unresolved: freshGeoIncomplete,
+            geo_interstitial_target_unverified: geoTargetUnverified,
             rollout_key: normalizedDomain
           }, consentCapture!));
           consentV2Ran = true;

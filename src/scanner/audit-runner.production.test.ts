@@ -135,6 +135,29 @@ async function browserlessRoutingFixture(modules: Array<'consent' | 'tracking' |
 }
 
 describe('runStorefrontAudit production browser wiring', () => {
+  it.each([
+    ['Consent only', ['consent']],
+    ['Consent, Tracking, Server', ['consent', 'tracking', 'server_side']]
+  ] as const)('CONSENT-GEO-P0 resolves a regional selector before shared and fresh evidence: %s', async (_label, modules) => {
+    const regional = `<title>Regional shop</title><main>Regional products</main><script>setTimeout(() => {
+      document.body.insertAdjacentHTML('beforeend', '<div class="x7-prompt" style="position:fixed;bottom:0;width:600px;height:180px;background:white">We use cookies and personal data. <button>Accept All</button><button>Reject All</button><button>Manage Preferences</button></div>');
+    }, 180)</script>`;
+    const selector = `<title>Welcome</title><main>Global shop</main><div class="x7-prompt" role="dialog" style="position:fixed;width:520px;height:180px;background:white">
+      It looks like you are in the United States. Would you like to visit your local site?
+      <a href="/us">YES, TAKE ME TO THE USA SITE</a><button>No, I prefer the Global website</button></div>`;
+    const result = await auditFixture(200, (path) => path === '/us' ? regional : selector,
+      true, [...modules], false, { productBudgetMs: 1_000 }, 'diagnostic', 'USA') as unknown as StorefrontAudit;
+    const evidence = result.evidence_bundle!;
+    expect(evidence.runtime.geo_interstitial).toMatchObject({ detected: true, intent: 'country_selector', target_match: 'exact', action_taken: true, resolution: 'resolved', final_host: 'fixture.example' });
+    expect(evidence.page.final_url).toContain('/us');
+    expect(evidence.runtime.consent_v2?.provider).toBe('generic');
+    expect(result.cmp_provider).toBe('Unknown');
+    expect(evidence.consent.banner_visible).toBe(true);
+    expect(evidence.consent.resolved_provider_evidence).toContain('CMP_PROVIDER_UNKNOWN');
+    expect(evidence.consent.resolved_provider_evidence).not.toContain('NO_CMP_DETECTED');
+    expect(evidence.diagnostic_observability?.consent_observations.map((observation) => observation.context)).toEqual(expect.arrayContaining(['shared', 'fresh']));
+  }, 45_000);
+
   it('starts Tracking and Server directly, skips geo probing, and uses no fallback on success', async () => {
     const { result, cdpUrls } = await browserlessRoutingFixture(['tracking', 'server_side']);
     expect(result.scan_status, JSON.stringify({ error: result.error_category, reason: result.terminal_reason_code,

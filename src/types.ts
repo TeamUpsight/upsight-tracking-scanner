@@ -203,7 +203,7 @@ export interface EvidenceBundle {
       control_text_read_error_count?: number;
       dom_text_fallback_used?: boolean;
       capture_stage_durations_ms?: { browser_facts: number; framework_observation: number; provider_context: number; provider_selection: number; provider_operations: number; semantic_discovery: number; ui_readiness: number; accessibility_census: number; total: number };
-      readiness?: { triggered: boolean; reason: string | null; started_at_ms: number | null; completed_at_ms: number | null; elapsed_ms: number; completion: 'positive_ui_ready' | 'timeout' | 'skipped'; initial: { provider_count: number; strong_surface_count: number; semantic_control_count: number }; final: { provider_count: number; strong_surface_count: number; semantic_control_count: number; open_shadow_roots: number; provider_root_visible: boolean }; reason_codes: string[] };
+      readiness?: { triggered: boolean; reason: string | null; started_at_ms: number | null; completed_at_ms: number | null; elapsed_ms: number; completion: 'positive_ui_ready' | 'timeout' | 'skipped' | 'appearance_absent' | 'appearance_incomplete'; initial: { provider_count: number; strong_surface_count: number; semantic_control_count: number }; final: { provider_count: number; strong_surface_count: number; semantic_control_count: number; open_shadow_roots: number; provider_root_visible: boolean }; reason_codes: string[] };
       provider_selection: {
         selected_provider: string | null;
         provider_conflict: boolean;
@@ -460,6 +460,7 @@ export interface EvidenceBundle {
     proxy_country_verified: boolean;
     requested_geo?: 'USA' | 'EU' | 'UK';
     actual_egress_country?: string | null;
+    geo_interstitial?: { detected: boolean; intent: 'country_selector' | 'location_selector' | null; target_match: 'exact' | 'ambiguous' | 'none'; action_taken: boolean; resolution: 'not_present' | 'resolved' | 'ambiguous' | 'target_unverified' | 'action_failed' | 'transition_incomplete'; final_host: string | null };
     country_matches_requested_geo?: boolean | null;
     proxy_egress_reachable: boolean;
     proxy_ip_hash: string | null;
@@ -495,6 +496,9 @@ export interface EvidenceBundle {
       measurement?: import('./scanner/consent/tracking-consistency').ConsentMeasurementSummary;
       /** Whether fresh Consent V2 semantics completed, independently of shared measurement capture. */
       session_status?: 'completed' | 'unavailable';
+      consent_appearance_wait_triggered?: boolean;
+      consent_appearance_wait_ms?: number;
+      consent_appearance_wait_result?: 'appeared' | 'absent' | 'incomplete' | 'not_required';
       /** Bounded passive homepage facts, retained separately from fresh-session completion. */
       shared_observation?: {
         provider: string | null;

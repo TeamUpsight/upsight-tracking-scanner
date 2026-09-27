@@ -10,7 +10,7 @@ export type ConsentObservationOperation =
   | 'captureBrowserConsentFacts' | 'observeConsentFrameworksInPage'
   | 'buildProviderContexts' | 'selectProvider' | 'providerOperations'
   | 'discoverProviderSemanticControls' | 'discoverUsercentricsSemanticControls'
-  | 'waitForConsentUiReadiness' | 'captureDiagnosticConsentControlCensus' | 'captureUsercentricsMainFrameCensus'
+  | 'waitForConsentUiReadiness' | 'waitForConsentAppearance' | 'captureDiagnosticConsentControlCensus' | 'captureUsercentricsMainFrameCensus'
   | 'captureConsentUiReadySnapshot' | 'frameworkStateFromObservations'
   | 'detectGenericConsentMechanism' | 'usPrivacyObservation'
   | 'diagnosticObservation' | 'readUsercentricsV2State';
