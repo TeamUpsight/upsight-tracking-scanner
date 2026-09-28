@@ -71,7 +71,8 @@ async function auditFixture(
   actionsEnabled = consentV2Enabled,
   dependencies: Partial<AuditRunnerDependencies> = {},
   scanMode: 'normal' | 'diagnostic' = 'normal',
-  geo: 'USA' | 'EU' | 'UK' = 'EU'
+  geo: 'USA' | 'EU' | 'UK' = 'EU',
+  testedCountry: string | null = null
 ) {
   vi.stubEnv('BROWSER_PROVIDER', 'local');
   vi.stubEnv('CONSENT_V2_ENABLED', consentV2Enabled ? 'true' : 'false');
@@ -85,6 +86,7 @@ async function auditFixture(
       audit_id: `runner-${status}-${consentV2Enabled}`,
       domain: 'fixture.example',
       tested_geos: geo,
+      tested_country: testedCountry,
       scan_mode: scanMode,
       selected_modules
     }, async (update) => { updates.push(update as Record<string, unknown>); }, {
@@ -135,7 +137,82 @@ async function browserlessRoutingFixture(modules: Array<'consent' | 'tracking' |
   return { result: updates.at(-1) as StorefrontAudit, cdpUrls: cdpUrls.map((url) => new URL(url)) };
 }
 
+async function exactCountryFixture(egressCountries: string[]) {
+  vi.stubEnv('BROWSER_PROVIDER', 'browserless');
+  vi.stubEnv('BROWSERLESS_TOKEN', 'fixture-token');
+  vi.stubEnv('DECODO_PROXY_EU', 'http://fixture-user:fixture-password@gate.decodo.com:7000');
+  vi.stubEnv('CONSENT_V2_ENABLED', 'true');
+  vi.stubEnv('CONSENT_V2_ACTIONS_ENABLED', 'false');
+  let probeCount = 0;
+  let storefrontRequests = 0;
+  const fixture = await fixtureServer(200, (path) => {
+    if (path === '/geo') return { status: 200, body: JSON.stringify({ country_code: egressCountries[Math.min(probeCount++, egressCountries.length - 1)] }) };
+    storefrontRequests += 1;
+    return '<title>Fixture shop</title><main>Products</main><script>window.__tcfapi=function(){};window.__gpp=function(){};</script>';
+  });
+  vi.stubEnv('PROXY_EGRESS_PROBE_URL', new URL('/geo', fixture.url).toString());
+  const cdpUrls: URL[] = [];
+  const connect = vi.spyOn(chromium, 'connectOverCDP').mockImplementation(async (url) => {
+    cdpUrls.push(new URL(String(url)));
+    return chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
+      args: ['--host-resolver-rules=MAP fixture.example 127.0.0.1'] });
+  });
+  const updates: Array<Partial<StorefrontAudit>> = [];
+  try {
+    await runStorefrontAudit({ audit_id: 'exact-country-fixture', domain: 'fixture.example', tested_geos: 'EU',
+      tested_country: 'DE', selected_modules: ['consent'], scan_mode: 'normal' },
+    async (update) => { updates.push(update); }, { storefrontUrl: fixture.url, resolveHostname: resolvedFixtureHost });
+  } finally {
+    connect.mockRestore();
+    await closeServer(fixture.server);
+  }
+  return { result: updates.at(-1) as StorefrontAudit, cdpUrls, probeCount, storefrontRequests };
+}
+
 describe('runStorefrontAudit production browser wiring', () => {
+  it('uses the exact-country local fixture for Germany geo selection', async () => {
+    const selector = '<title>Global shop</title><main>Catalog</main><div role="dialog" style="position:fixed;width:450px;height:160px">Choose your country to visit your local site. <a href="/de">Take me to Germany</a><a href="/fr">Take me to France</a></div>';
+    const result = await auditFixture(200, (path) => path === '/de' ? '<title>German shop</title><main>Catalog DE</main>' : selector,
+      true, ['consent'], false, {}, 'normal', 'EU', 'DE') as unknown as StorefrontAudit;
+    expect(result.evidence_bundle?.runtime).toMatchObject({ requested_country: 'DE', actual_egress_country: 'DE', exact_country_match: true });
+    expect(result.evidence_bundle?.runtime.geo_interstitial).toMatchObject({ resolution: 'resolved', target_match: 'exact' });
+    expect(result.evidence_bundle?.page.final_url).toContain('/de');
+  }, 45_000);
+  it('rejects a Czech egress, retries on DE, and completes framework-only Consent', async () => {
+    vi.stubEnv('DECODO_MAX_RETRIES_SINGLE', '0'); // exact-country identity gets one bounded retry even when ordinary retries are disabled
+    const { result, cdpUrls, storefrontRequests, probeCount } = await exactCountryFixture(['CZ', 'DE']);
+    expect(cdpUrls).toHaveLength(2);
+    expect(cdpUrls.every((url) => decodeURIComponent(new URL(url.searchParams.get('externalProxyServer') || '').username).includes('-country-de-'))).toBe(true);
+    expect(storefrontRequests).toBeGreaterThan(0);
+    expect(probeCount).toBeGreaterThanOrEqual(3); // initial CZ, retry DE, fresh context DE
+    expect(result.scan_status).toBe('completed');
+    expect(result.evidence_bundle?.runtime).toMatchObject({ requested_country: 'DE', actual_egress_country: 'DE', exact_country_match: true,
+      proxy_country_verified: true, consent_v2: { consent_appearance_wait_result: 'framework_only', consent_appearance_watchdog_fired: false } });
+    expect(result.evidence_bundle?.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
+    expect(JSON.parse(String(result.trace_steps)).filter((step: { step: string }) => step.step === 'exact_country_mismatch')).toHaveLength(1);
+  }, 60_000);
+
+  it('fails conservatively when exact-country retries never reach the target', async () => {
+    const { result, cdpUrls, storefrontRequests } = await exactCountryFixture(['CZ', 'CZ']);
+    expect(cdpUrls).toHaveLength(2);
+    expect(storefrontRequests).toBe(0);
+    expect(result.scan_status).toBe('failed');
+    expect(result.error_category).toBe('proxy_error');
+    expect(result.evidence_bundle?.runtime).toMatchObject({ requested_country: 'DE', actual_egress_country: 'CZ',
+      country_matches_requested_geo: true, exact_country_match: false, proxy_country_verified: false });
+    expect(result.evidence_bundle?.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
+  }, 45_000);
+
+  it('does not use a fresh Consent context that exits outside the canonical exact country', async () => {
+    const { result, cdpUrls, probeCount } = await exactCountryFixture(['DE', 'CZ']);
+    expect(cdpUrls).toHaveLength(1);
+    expect(probeCount).toBeGreaterThanOrEqual(2);
+    expect(result.scan_status).toBe('partial');
+    expect(result.evidence_bundle?.runtime).toMatchObject({ requested_country: 'DE', actual_egress_country: 'CZ',
+      exact_country_match: false, proxy_country_verified: false });
+    expect(result.cmp_provider).not.toBe('Not Found');
+    expect(result.evidence_bundle?.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
+  }, 45_000);
   it.each([
     ['Consent only', ['consent']],
     ['Consent, Tracking, Server', ['consent', 'tracking', 'server_side']]

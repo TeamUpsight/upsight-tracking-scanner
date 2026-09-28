@@ -4,10 +4,38 @@ import { BrowserlessSessionAccounting } from './session-accounting';
 import { finalizeRequestCaptureChannel } from '../audit-runner';
 import { EvidenceCollector } from '../evidence/evidence-collector';
 import { replayEvidence } from '../quality/replay';
+import { countryForGeo, getExternalProxyForGeo, validateTestedCountry } from './decodo';
 
 afterEach(() => vi.unstubAllEnvs());
 
 describe('Proxy Routing Optimization V1', () => {
+  it('validates optional exact countries against the existing regional route set', () => {
+    expect(validateTestedCountry('EU', null)).toEqual({ country: null, error: null });
+    expect(validateTestedCountry('EU', ' de ')).toEqual({ country: 'DE', error: null });
+    for (const country of ['DE', 'NL', 'FR', 'IT', 'ES']) expect(validateTestedCountry('EU', country).error).toBeNull();
+    expect(validateTestedCountry('EU', 'CZ').error).toMatch(/not supported/);
+    expect(validateTestedCountry('USA', 'US').country).toBe('US');
+    expect(validateTestedCountry('UK', 'GB').country).toBe('GB');
+    expect(validateTestedCountry('USA', 'DE').error).toMatch(/not supported/);
+    expect(validateTestedCountry('UK', 'US').error).toMatch(/not supported/);
+  });
+
+  it('keeps regional EU rotation but pins every exact Decodo attempt to Germany', () => {
+    vi.stubEnv('DECODO_PROXY_EU_COUNTRY_FALLBACKS', 'de,nl,fr,it,es');
+    vi.stubEnv('DECODO_PROXY_EU', 'http://fixture-user:fixture-password@gate.decodo.com:7000');
+    expect([0, 1, 2, 3, 4].map((attempt) => countryForGeo('EU', attempt))).toEqual(['de', 'nl', 'fr', 'it', 'es']);
+    const regional = [0, 1].map((attempt) => decodeURIComponent(new URL(getExternalProxyForGeo('EU', attempt)).username));
+    expect(regional[0]).toContain('-country-de-');
+    expect(regional[1]).toContain('-country-nl-');
+    const exact = [0, 1, 2].map((attempt) => decodeURIComponent(new URL(getExternalProxyForGeo('EU', attempt, 0, 'DE')).username));
+    expect(exact.every((username) => username.includes('-country-de-'))).toBe(true);
+    expect(new Set(exact)).toHaveProperty('size', 3);
+    vi.stubEnv('DECODO_PROXY_EU', 'http://fixture-user:fixture-password@eu.decodo.com:10001');
+    const exactFromRegional = new URL(getExternalProxyForGeo('EU', 1, 0, 'DE'));
+    expect(exactFromRegional.hostname).toBe('gate.decodo.com');
+    expect(exactFromRegional.port).toBe('7000');
+    expect(decodeURIComponent(exactFromRegional.username)).toContain('-country-de-');
+  });
   it.each([
     [['tracking'], 'browserless_direct'],
     [['server_side'], 'browserless_direct'],

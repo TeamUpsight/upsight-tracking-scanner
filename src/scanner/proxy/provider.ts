@@ -44,13 +44,14 @@ export function buildProxyAttemptPlan(input: {
   provider: ProxyProvider;
   geo: string;
   attempt: number;
+  exactCountry?: string | null;
   portOffset?: number;
   browserlessHost: string;
   browserlessToken: string;
   sessionTimeoutMs: number;
 }) : ProxyAttemptPlan {
   const externalProxyServer = input.provider === 'decodo'
-    ? getExternalProxyForGeo(input.geo, input.attempt, input.portOffset || 0)
+    ? getExternalProxyForGeo(input.geo, input.attempt, input.portOffset || 0, input.exactCountry)
     : '';
   if (input.provider === 'decodo' && !externalProxyServer) throw new Error(`No valid Decodo proxy is configured for ${input.geo}`);
   const country = input.provider === 'decodo'

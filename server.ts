@@ -21,7 +21,7 @@ import { compareReplay, replayEvidence } from './src/scanner/quality/replay';
 import { buildLatestReviewQueue } from './src/scanner/quality/review-queue';
 import type { AuditListFilter, EvidenceBundle, QaFeedback, ScanMode, StorefrontAudit } from './src/types';
 import { normalizeAuditModules } from './src/audit-modules';
-import { isRecoverableStaleAudit, queueJobForAudit, rerunAuditOptions, shouldEnqueueAudit, type AuditQueueJob } from './src/audit-lifecycle';
+import { isRecoverableStaleAudit, queueJobForAudit, rerunAuditOptions, shouldEnqueueAudit, validateExactCountryRequest, type AuditQueueJob } from './src/audit-lifecycle';
 import { boundedInteger, bulkProxyRetryLimit, globalScanTimeoutMs } from './src/shared/config';
 import { buildMetadata } from './src/build-metadata';
 import { productionConfigurationIssues } from './src/production-config';
@@ -169,6 +169,7 @@ class InMemoryAuditQueue {
         audit_id: audit.audit_id,
         domain: audit.domain,
         tested_geos: audit.tested_geos,
+        tested_country: job.tested_country,
         group_label: audit.group_label,
         enable_captcha_solving: job.enable_captcha_solving,
         is_bulk: job.is_bulk,
@@ -318,9 +319,11 @@ app.post('/api/v1/scan', asyncRoute(async (req, res) => {
   if (!validGeo(geo)) return res.status(400).json({ error: 'tested_geos must be USA, EU, or UK.' });
   if (!validMode(mode)) return res.status(400).json({ error: 'mode must be normal or diagnostic.' });
   if (!selectedModules) return res.status(400).json({ error: 'selected_modules must be a non-empty array of supported modules.' });
+  const exactCountry = validateExactCountryRequest(geo, req.body?.tested_country, selectedModules);
+  if (exactCountry.error) return res.status(400).json({ error: exactCountry.error });
   const groupLabel = req.body?.group_label ? String(req.body.group_label).slice(0, 120) : null;
   const audit = await db.createAudit(domain, geo, groupLabel, mode, selectedModules, {
-    enable_captcha_solving: req.body?.enable_captcha_solving === true, is_bulk: false, proxy_provider: 'decodo'
+    enable_captcha_solving: req.body?.enable_captcha_solving === true, is_bulk: false, proxy_provider: 'decodo', tested_country: exactCountry.country
   });
   queue.add(queueJobForAudit(audit));
   res.status(202).json(audit);
@@ -334,6 +337,8 @@ app.post('/api/v1/scan/bulk', upload.single('file'), asyncRoute(async (req, res)
   const selectedModules = requestedModules(req.body?.selected_modules);
   if (!validMode(mode)) return res.status(400).json({ error: 'mode must be normal or diagnostic.' });
   if (!selectedModules) return res.status(400).json({ error: 'selected_modules must be a non-empty array of supported modules.' });
+  const exactCountry = validateExactCountryRequest(geo, req.body?.tested_country, selectedModules);
+  if (exactCountry.error) return res.status(400).json({ error: exactCountry.error });
   const lines = req.file.buffer.toString('utf8').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (!lines.length) return res.status(400).json({ error: 'The CSV is empty.' });
   const first = parseCsvLine(lines[0]).map((value) => value.toLowerCase());
@@ -349,7 +354,7 @@ app.post('/api/v1/scan/bulk', upload.single('file'), asyncRoute(async (req, res)
   const audits: StorefrontAudit[] = [];
   for (const domain of domains) {
     const audit = await db.createAudit(domain, geo, groupLabel, mode, selectedModules, {
-      enable_captcha_solving: false, is_bulk: true, proxy_provider: 'decodo'
+      enable_captcha_solving: false, is_bulk: true, proxy_provider: 'decodo', tested_country: exactCountry.country
     });
     audits.push(audit);
     queue.add(queueJobForAudit(audit));
@@ -403,6 +408,7 @@ app.post('/api/v1/scans/:id/difficult-site-rerun', asyncRoute(async (req, res) =
 app.post('/api/v1/scans/:id/proxy-fallback-rerun', asyncRoute(async (req, res) => {
   const source = await db.getAudit(req.params.id);
   if (!source) return res.status(404).json({ error: 'Audit not found.' });
+  if (source.queue_options?.tested_country) return res.status(409).json({ error: 'Exact-country audits require Decodo routing.' });
   if (!source.tested_geos || source.scan_status !== 'failed' || !source.runtime_metrics?.proxy_fallback_candidate) {
     return res.status(409).json({ error: 'This audit is not eligible for a Browserless Residential fallback rerun.' });
   }

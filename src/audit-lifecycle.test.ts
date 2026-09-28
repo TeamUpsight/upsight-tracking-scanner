@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { classifyAuditTermination, isRecoverableStaleAudit, queueJobForAudit, rerunAuditOptions, shouldEnqueueAudit } from './audit-lifecycle';
+import { classifyAuditTermination, isRecoverableStaleAudit, queueJobForAudit, rerunAuditOptions, shouldEnqueueAudit, validateExactCountryRequest } from './audit-lifecycle';
 import { AuditDatabase } from './db';
 import { decideAccessTransition } from './scanner/access-state-machine';
 import { EvidenceCollector } from './scanner/evidence/evidence-collector';
@@ -35,6 +35,12 @@ function audit(overrides: Partial<StorefrontAudit> = {}): StorefrontAudit {
 afterEach(() => vi.unstubAllEnvs());
 
 describe('API queue lifecycle contracts', () => {
+  it('rejects invalid exact-country requests before queue creation', () => {
+    expect(validateExactCountryRequest('EU', 'CZ', ['consent']).error).toMatch(/not supported/);
+    expect(validateExactCountryRequest('EU', 'DE', ['tracking']).error).toMatch(/requires the Consent module/);
+    expect(validateExactCountryRequest('EU', 'de', ['consent'])).toEqual({ country: 'DE', error: null });
+    expect(validateExactCountryRequest('EU', null, ['tracking'])).toEqual({ country: null, error: null });
+  });
   it('keeps a queue timeout distinct from manual cancellation', () => {
     expect(classifyAuditTermination(false, true)).toEqual({ category: 'scan_timeout', scanStatus: 'failed' });
     expect(classifyAuditTermination(true, true)).toEqual({ category: 'cancelled', scanStatus: 'cancelled' });
@@ -51,6 +57,17 @@ describe('API queue lifecycle contracts', () => {
     expect(queueJobForAudit(source, { is_bulk: true })).toMatchObject({
       scan_mode: 'diagnostic', selected_modules: ['tracking', 'server_side'], is_bulk: true, proxy_provider: 'decodo'
     });
+  });
+
+  it('retains the optional exact country through queue and diagnostic rerun options', () => {
+    const source = audit({ selected_modules: ['consent'], queue_options: {
+      enable_captcha_solving: false, is_bulk: false, proxy_provider: 'decodo', tested_country: 'DE'
+    } });
+    expect(queueJobForAudit(source).tested_country).toBe('DE');
+    const rerun = rerunAuditOptions(source, 'diagnostic');
+    expect(rerun.queue_options?.tested_country).toBe('DE');
+    expect(queueJobForAudit({ ...source, ...rerun }).tested_country).toBe('DE');
+    expect(queueJobForAudit(audit()).tested_country).toBeNull();
   });
 
   it('does not enqueue a second job for an audit that is already queued or active', () => {

@@ -826,12 +826,22 @@ export async function waitForConsentUiReadiness(page: Page, maximumMs: number, r
 export interface ConsentAppearanceResult {
   result: 'ui_appeared' | 'framework_only' | 'absent' | 'incomplete';
   elapsed_ms: number;
+  semantic_window_ms: number;
+  outer_watchdog_ms: number;
+  watchdog_fired: boolean;
 }
 
 /** An empty first capture cannot prove absence. This is one bounded observation window. */
 export async function waitForConsentAppearance(page: Page, maximumMs = 3_500): Promise<ConsentAppearanceResult> {
   const boundedMs = Math.max(50, Math.min(maximumMs, 4_000));
+  // Browserless may deliver a completed page.evaluate after the in-page timer.
+  // This allowance does not extend the semantic observation window.
+  const outerWatchdogMs = boundedMs + 1_500;
   const started = Date.now();
+  const completed = (result: ConsentAppearanceResult['result'], watchdogFired = false): ConsentAppearanceResult => ({
+    result, elapsed_ms: Date.now() - started, semantic_window_ms: boundedMs,
+    outer_watchdog_ms: outerWatchdogMs, watchdog_fired: watchdogFired
+  });
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -889,11 +899,11 @@ export async function waitForConsentAppearance(page: Page, maximumMs = 3_500): P
           const poll = window.setInterval(check, 250);
           const timeout = window.setTimeout(() => finish(uiVisible() ? 'ui_appeared' : unreadableVisibleSurface ? 'incomplete' : frameworkPresent() ? 'framework_only' : 'absent'), duration);
         });
-      }, boundedMs).then((result) => ({ result, elapsed_ms: Date.now() - started })),
-      new Promise<ConsentAppearanceResult>((resolve) => { timer = setTimeout(() => resolve({ result: 'incomplete', elapsed_ms: Date.now() - started }), boundedMs + 250); })
+      }, boundedMs).then((result) => completed(result)),
+      new Promise<ConsentAppearanceResult>((resolve) => { timer = setTimeout(() => resolve(completed('incomplete', true)), outerWatchdogMs); })
     ]);
   } catch {
-    return { result: 'incomplete', elapsed_ms: Date.now() - started };
+    return completed('incomplete');
   } finally {
     if (timer) clearTimeout(timer);
   }

@@ -55,6 +55,7 @@ import {
   recordProxyRetry,
   recordProxySuccess,
   reserveProxyPortOffset,
+  validateTestedCountry,
   type ProxyMetricEvent,
   summarizeCdpUrlForTrace
 } from './proxy/decodo';
@@ -1197,6 +1198,7 @@ export async function runStorefrontAudit(
     audit_id: string | number;
     domain: string;
     tested_geos: 'USA' | 'EU' | 'UK' | null;
+    tested_country?: string | null;
     group_label?: string | null;
     enable_captcha_solving?: boolean;
     is_bulk?: boolean;
@@ -1238,15 +1240,18 @@ export async function runStorefrontAudit(
   const geo = params.tested_geos && ['USA', 'EU', 'UK'].includes(params.tested_geos)
     ? params.tested_geos
     : 'USA';
+  const exactCountryValidation = validateTestedCountry(geo, params.tested_country);
+  if (exactCountryValidation.error) throw new Error(exactCountryValidation.error);
+  const requestedCountry = exactCountryValidation.country;
   const proxyPortOffset = reserveProxyPortOffset(geo);
   const selectedModules = selectedAuditModules(params.selected_modules);
   const runtimeBudget = new AuditRuntimeBudget(startedMs, timeoutMs, selectedModules);
   const consentSelected = selectedModules.includes('consent');
   const browserlessTransportAvailable = (process.env.BROWSER_PROVIDER || 'browserless') === 'browserless' &&
     Boolean(process.env.BROWSERLESS_TOKEN);
-  const residentialFallbackEnabled = consentSelected
+  const residentialFallbackEnabled = !requestedCountry && (consentSelected
     ? process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED !== 'false'
-    : process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED === 'true' || params.proxy_provider === 'browserless_residential';
+    : process.env.BROWSERLESS_RESIDENTIAL_FALLBACK_ENABLED === 'true' || params.proxy_provider === 'browserless_residential');
   const consentV2Controls = certificationSafeConsentV2RolloutControls(consentV2RolloutControls(), buildMetadata.certification_eligible);
   const consentV2Enabled = consentV2Controls.enabled;
   const trackingSelected = selectedModules.includes('tracking');
@@ -1259,10 +1264,13 @@ export async function runStorefrontAudit(
     selectedModules
   });
   const evidence = evidenceCollector.bundle;
+  evidence.runtime.requested_country = requestedCountry;
+  evidence.runtime.exact_country_match = requestedCountry ? null : undefined;
   if (process.env.BROWSER_PROVIDER === 'local' && dependencies.consentGeoVerified === true) {
     evidence.runtime.proxy_country_verified = true;
     evidence.runtime.country_matches_requested_geo = true;
-    evidence.runtime.actual_egress_country = countryForGeo(geo, 0).toUpperCase();
+    evidence.runtime.actual_egress_country = requestedCountry || countryForGeo(geo, 0).toUpperCase();
+    if (requestedCountry) evidence.runtime.exact_country_match = true;
   }
   const sharedConsentRequests = new ConsentRequestBuffer();
   const sharedConsentGcm = new GoogleConsentModeObserver();
@@ -1301,7 +1309,7 @@ export async function runStorefrontAudit(
   let lastTunnelPhase: 'connect' | 'target' = 'connect';
   let lastProxyPort: number | null = null;
   let lastProxyRotated = false;
-  let currentProxyCountry = countryForGeo(geo, 0);
+  let currentProxyCountry = requestedCountry?.toLowerCase() || countryForGeo(geo, 0);
   let currentBrowserRoute: 'local' | 'standard' | 'stealth' = 'local';
   let effectiveDomain = normalizedDomain || '';
   const observedContexts = new WeakSet<BrowserContext>();
@@ -1847,9 +1855,11 @@ export async function runStorefrontAudit(
       if (actualCountry) {
         currentProxyCountry = actualCountry;
         evidence.runtime.proxy_country = currentProxyCountry;
-        evidence.runtime.actual_egress_country = actualCountry;
+        evidence.runtime.actual_egress_country = actualCountry.toUpperCase();
         evidence.runtime.country_matches_requested_geo = countryMatchesRequestedGeo(geo, actualCountry);
-        evidence.runtime.proxy_country_verified = evidence.runtime.country_matches_requested_geo;
+        if (requestedCountry) evidence.runtime.exact_country_match = actualCountry.toUpperCase() === requestedCountry;
+        evidence.runtime.proxy_country_verified = evidence.runtime.country_matches_requested_geo &&
+          (!requestedCountry || evidence.runtime.exact_country_match === true);
         // Apply the independently observed country to the real audit page as
         // well as the context headers before target navigation begins.
         const reapplied = await configureBrowserGeo(context, homepage, currentProxyCountry);
@@ -1867,7 +1877,9 @@ export async function runStorefrontAudit(
       }
       addTrace('proxy_egress_verified', {
         requested_geo: geo,
+        requested_country: requestedCountry,
         actual_country: actualCountry,
+        exact_country_match: evidence.runtime.exact_country_match ?? null,
         country_matches_requested_geo: evidence.runtime.country_matches_requested_geo,
         country_verified: evidence.runtime.proxy_country_verified,
         browser_profile_country: evidence.runtime.browser_profile_country,
@@ -1890,11 +1902,52 @@ export async function runStorefrontAudit(
     }
   };
 
+  const verifyFreshExactCountry = async (freshContext: BrowserContext) => {
+    if (!requestedCountry || process.env.BROWSER_PROVIDER === 'local') return;
+    const probePage = await freshContext.newPage();
+    let observedCountry: string | null = null;
+    try {
+      const response = await probePage.goto(process.env.PROXY_EGRESS_PROBE_URL || 'https://ip.decodo.com/json', {
+        waitUntil: 'domcontentloaded', timeout: 10_000
+      });
+      if (!response?.ok()) throw new Error('Fresh context egress probe failed');
+      const payload = await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Fresh context egress body timed out')), 8_000);
+        void (response.json() as Promise<Record<string, unknown>>).then(
+          (body) => { clearTimeout(timer); resolve(body); },
+          (error) => { clearTimeout(timer); reject(error); }
+        );
+      });
+      const actualCountry = parseEgressCountry(payload)?.toUpperCase() || null;
+      observedCountry = actualCountry;
+      if (actualCountry !== requestedCountry) {
+        evidence.runtime.actual_egress_country = actualCountry;
+        evidence.runtime.exact_country_match = false;
+        evidence.runtime.proxy_country_verified = false;
+        addTrace('fresh_exact_country_mismatch', { requested_country: requestedCountry, actual_egress_country: actualCountry });
+        throw new Error('Fresh Consent context exact-country verification failed');
+      }
+      addTrace('fresh_exact_country_verified', { requested_country: requestedCountry, actual_egress_country: actualCountry });
+    } catch (error) {
+      if (!observedCountry) evidence.runtime.actual_egress_country = null;
+      evidence.runtime.exact_country_match = false;
+      evidence.runtime.proxy_country_verified = false;
+      throw error;
+    } finally {
+      await closeWithDeadline(() => probePage.close());
+    }
+  };
+
   const connectSession = async (attempt: number, solveCaptchas = false, proxyModeOverride?: ProxyProvider) => {
     check();
     lastTunnelPhase = 'connect';
     await settleSharedConsentObservation('session_replacement');
     await closeSession();
+    if (requestedCountry && process.env.BROWSER_PROVIDER !== 'local') {
+      evidence.runtime.proxy_country_verified = false;
+      evidence.runtime.exact_country_match = null;
+      evidence.runtime.actual_egress_country = null;
+    }
     const provider = process.env.BROWSER_PROVIDER || 'browserless';
     let cdpUrl = '';
     let proxy = '';
@@ -1908,7 +1961,7 @@ export async function runStorefrontAudit(
         currentProxyCountry = plan.country;
         cdpUrl = plan.cdpUrl;
       } else {
-        proxy = getExternalProxyForGeo(geo, attempt, proxyPortOffset);
+        proxy = getExternalProxyForGeo(geo, attempt, proxyPortOffset, requestedCountry);
       }
       if (!proxy && currentProxyProvider === 'decodo') {
         throw new ScanTermination('proxy_error', 'failed', `No valid Decodo proxy is configured for ${geo}`);
@@ -1916,6 +1969,9 @@ export async function runStorefrontAudit(
       if (currentProxyProvider === 'decodo') {
         lastProxyPort = parseProxyUrl(proxy).port;
         currentProxyCountry = getProxyCountryHint(proxy, geo, attempt);
+        if (requestedCountry && currentProxyCountry.toUpperCase() !== requestedCountry) {
+          throw new ScanTermination('proxy_error', 'failed', 'Configured Decodo route cannot target the requested country', 'EXACT_COUNTRY_ROUTE_UNAVAILABLE');
+        }
       }
       const profile = browserGeoProfile(currentProxyCountry);
       const browserlessHost = process.env.BROWSERLESS_HOST || 'chrome.browserless.io';
@@ -2022,7 +2078,7 @@ export async function runStorefrontAudit(
 
   const connectViaBrowserQl = async (attempt: number) => {
     if (!process.env.BROWSERLESS_TOKEN) throw new Error('BrowserQL requires a Browserless token');
-    const proxy = getExternalProxyForGeo(geo, attempt, proxyPortOffset);
+    const proxy = getExternalProxyForGeo(geo, attempt, proxyPortOffset, requestedCountry);
     const bqlProxyPort = parseProxyUrl(proxy).port;
     const bqlProxyCountry = getProxyCountryHint(proxy, geo, attempt);
     evidence.runtime.bql_escalation_attempted = true;
@@ -2059,6 +2115,15 @@ export async function runStorefrontAudit(
     const connectedBrowser = browser;
     connectedBrowser.on('disconnected', () => browserlessSessions.finish(sessionId));
     await configureConnectedSession(true);
+    if (requestedCountry) {
+      evidence.runtime.exact_country_match = null;
+      evidence.runtime.proxy_country_verified = false;
+      evidence.runtime.actual_egress_country = null;
+      await verifyProxyEgress();
+      if (evidence.runtime.exact_country_match !== true) {
+        throw new ScanTermination('proxy_error', 'failed', 'BrowserQL route did not verify the requested country', 'EXACT_COUNTRY_MISMATCH');
+      }
+    }
     evidence.runtime.bql_escalation_succeeded = true;
     addTrace('browserql_escalation_handoff_ready', {
       navigation_status: handoff.navigationStatus,
@@ -2101,7 +2166,8 @@ export async function runStorefrontAudit(
       addTrace('dns_preflight_completed', { status: 'resolved', sources: dnsEvidence.sources });
     }
 
-    const maxProxyRetries = params.is_bulk ? bulkProxyRetryLimit() : singleProxyRetryLimit();
+    const configuredProxyRetries = params.is_bulk ? bulkProxyRetryLimit() : singleProxyRetryLimit();
+    const maxProxyRetries = requestedCountry && consentSelected ? Math.max(1, configuredProxyRetries) : configuredProxyRetries;
     let decodoRetryCount = 0;
     let solveCaptchas = false;
     let proxyModeOverride: ProxyProvider = initialProxyProvider;
@@ -2110,6 +2176,27 @@ export async function runStorefrontAudit(
     while (true) {
       try {
         await connectSession(proxyAttempt, solveCaptchas, proxyModeOverride);
+        if (requestedCountry && evidence.runtime.exact_country_match !== true) {
+          evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, {
+            failure_classification: 'EXACT_COUNTRY_MISMATCH'
+          });
+          addTrace('exact_country_mismatch', {
+            requested_country: requestedCountry,
+            actual_egress_country: evidence.runtime.actual_egress_country || null,
+            attempt: proxyAttempt + 1
+          });
+          if (decodoRetryCount < maxProxyRetries && currentProxyProvider === 'decodo') {
+            decodoRetryCount += 1;
+            const previousPort = lastProxyPort;
+            proxyAttempt += 1;
+            const retryPort = parseProxyUrl(getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset, requestedCountry)).port;
+            lastProxyRotated = retryPort !== previousPort;
+            recordProxyRetry(retryPort, lastProxyRotated);
+            persistProxyMetric({ kind: 'retry', geo, port: retryPort, rotated: lastProxyRotated });
+            continue;
+          }
+          throw new ScanTermination('proxy_error', 'failed', 'Exact-country proxy verification failed', 'EXACT_COUNTRY_MISMATCH');
+        }
         lastTunnelPhase = 'target';
         check();
         currentPhase = 'consent_initial_load';
@@ -2124,6 +2211,7 @@ export async function runStorefrontAudit(
         evidence.runtime.last_successful_phase = 'consent_initial_load';
         check();
       } catch (error) {
+        if (requestedCountry && error instanceof ScanTermination) throw error;
         if (browserlessTransportAvailable && !consentSelected &&
           (currentProxyProvider === 'browserless_direct' || currentProxyProvider === 'browserless_datacenter') &&
           !(error instanceof ScanTermination) &&
@@ -2173,7 +2261,7 @@ export async function runStorefrontAudit(
             decodoRetryCount += 1;
             const previousPort = lastProxyPort;
             proxyAttempt += 1;
-            const retryProxy = getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset);
+            const retryProxy = getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset, requestedCountry);
             const retryPort = parseProxyUrl(retryProxy).port;
             const retryHost = parseProxyUrl(retryProxy).host;
             const usernameSessionRotated = /(?:^|\.)gate\.decodo\.com$/i.test(retryHost);
@@ -2381,7 +2469,7 @@ export async function runStorefrontAudit(
           decodoRetryCount += 1;
           const previousPort = lastProxyPort;
           proxyAttempt += 1;
-          const retryPort = parseProxyUrl(getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset)).port;
+          const retryPort = parseProxyUrl(getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset, requestedCountry)).port;
           lastProxyRotated = retryPort !== previousPort;
           recordProxyRetry(retryPort, lastProxyRotated);
           persistProxyMetric({ kind: 'retry', geo, port: retryPort, rotated: lastProxyRotated });
@@ -2629,6 +2717,7 @@ export async function runStorefrontAudit(
         });
         consentContext = freshConsent.context;
         consentHomepage = freshConsent.page;
+        await verifyFreshExactCountry(consentContext);
         await guardBrowserContext(consentContext);
         const consentAuthorized = await attachAuthorizedAccessHeader(consentContext, consentHomepage, effectiveDomain);
         addTrace('consent_fresh_context_ready', {
@@ -3474,7 +3563,7 @@ export async function runStorefrontAudit(
             recordProxyError(geo, previousPort);
             persistProxyMetric({ kind: 'error', geo, port: previousPort });
             proxyAttempt += 1;
-            const retryProxy = getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset);
+            const retryProxy = getExternalProxyForGeo(geo, proxyAttempt, proxyPortOffset, requestedCountry);
             const retryPort = parseProxyUrl(retryProxy).port;
             lastProxyRotated = retryPort !== previousPort;
             recordProxyRetry(retryPort, lastProxyRotated);
@@ -3574,6 +3663,7 @@ export async function runStorefrontAudit(
           });
           consentContext = freshConsent.context;
           consentHomepage = freshConsent.page;
+          await verifyFreshExactCountry(consentContext);
           await guardBrowserContext(consentContext);
           attachContextObservers(consentContext);
           await attachAuthorizedAccessHeader(consentContext, consentHomepage, effectiveDomain);
@@ -3631,6 +3721,7 @@ export async function runStorefrontAudit(
           independentlyVerified: dependencies.consentGeoVerified ?? null
         });
         acceptContext = freshAccept.context;
+        await verifyFreshExactCountry(acceptContext);
         await guardBrowserContext(acceptContext);
         attachContextObservers(acceptContext);
         await attachAuthorizedAccessHeader(acceptContext, freshAccept.page, effectiveDomain);

@@ -1,5 +1,15 @@
 const EU_PROXY_FALLBACK_COUNTRIES = new Set(['de', 'nl', 'fr', 'it', 'es']);
 
+/** Exact targets share the same supported EU countries as Decodo fallback. */
+export function validateTestedCountry(geo: 'USA' | 'EU' | 'UK', value: unknown): { country: string | null; error: string | null } {
+  if (value === null || value === undefined || value === '') return { country: null, error: null };
+  if (typeof value !== 'string') return { country: null, error: 'tested_country must be an ISO alpha-2 country code.' };
+  const country = value.trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(country)) return { country: null, error: 'tested_country must be an ISO alpha-2 country code.' };
+  const supported = geo === 'USA' ? country === 'US' : geo === 'UK' ? country === 'GB' : EU_PROXY_FALLBACK_COUNTRIES.has(country.toLowerCase());
+  return supported ? { country, error: null } : { country: null, error: `tested_country ${country} is not supported for ${geo}.` };
+}
+
 export interface ProxyMetrics {
   total_connects_by_geo: Record<string, number>;
   errors_by_geo: Record<string, number>;
@@ -206,7 +216,7 @@ export function reserveProxyPortOffset(geo: string) {
   return current % ports.length;
 }
 
-export function getExternalProxyForGeo(geo: string, attempt = 0, portOffset = 0) {
+export function getExternalProxyForGeo(geo: string, attempt = 0, portOffset = 0, exactCountry?: string | null) {
   const normalized = geo.toUpperCase();
   const configured = process.env[`DECODO_PROXY_${normalized}`] || '';
   if (!configured || !isValidProxy(configured)) return '';
@@ -215,11 +225,18 @@ export function getExternalProxyForGeo(geo: string, attempt = 0, portOffset = 0)
   const healthyPorts = ports.filter((port) => stateFor(normalized, port).quarantined_until <= Date.now());
   const selectablePorts = healthyPorts.length ? healthyPorts : ports;
   if (selectablePorts.length) parsed.port = String(selectablePorts[(portOffset + attempt) % selectablePorts.length]);
+  if (exactCountry) {
+    if (!parsed.username) return '';
+    // A regional endpoint cannot promise a specific country. Use Decodo's
+    // existing country-addressable gateway for this opt-in route.
+    parsed.hostname = 'gate.decodo.com';
+    parsed.port = '7000';
+  }
   if (parsed.username) {
     const sessionId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     const username = decodeURIComponent(parsed.username);
     parsed.username = isBackconnectProxy(parsed)
-      ? rotateDecodoSessionUsername(ensureAdvancedUsername(username), countryForGeo(normalized, attempt), sessionId)
+      ? rotateDecodoSessionUsername(ensureAdvancedUsername(username), exactCountry?.toLowerCase() || countryForGeo(normalized, attempt), sessionId)
       : rotateExistingSessionUsername(username, sessionId);
   }
   return parsed.toString();

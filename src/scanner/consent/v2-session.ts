@@ -285,6 +285,8 @@ async function captureConsentUiReadySnapshot(page: Page, controls: ConsentV2Roll
     return { snapshot: await finalizeDiagnostic(snapshot, appearance.elapsed_ms), readiness: {
       triggered: true, reason: 'absence_observation', started_at_ms: startedAt, completed_at_ms: completedAt,
       elapsed_ms: appearance.elapsed_ms,
+      semantic_window_ms: appearance.semantic_window_ms, outer_watchdog_ms: appearance.outer_watchdog_ms,
+      watchdog_fired: appearance.watchdog_fired,
       completion: appearance.result === 'ui_appeared' ? 'positive_ui_ready' : appearance.result === 'framework_only' ? 'appearance_framework_only' : appearance.result === 'absent' ? 'appearance_absent' : 'appearance_incomplete',
       initial: { provider_count: 0, strong_surface_count: 0, semantic_control_count: 0 },
       final: { provider_count: providerCount, strong_surface_count: strongSurfaceCount(snapshot.facts), semantic_control_count: semanticControlCount(snapshot.facts), open_shadow_roots: 0, provider_root_visible: false },
@@ -878,6 +880,11 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
     });
     telemetryResult.consent_appearance_wait_triggered = initialCapture.readiness.reason === 'absence_observation';
     telemetryResult.consent_appearance_wait_ms = initialCapture.readiness.reason === 'absence_observation' ? initialCapture.readiness.elapsed_ms : 0;
+    if (initialCapture.readiness.reason === 'absence_observation') {
+      telemetryResult.consent_appearance_semantic_window_ms = initialCapture.readiness.semantic_window_ms;
+      telemetryResult.consent_appearance_outer_watchdog_ms = initialCapture.readiness.outer_watchdog_ms;
+      telemetryResult.consent_appearance_watchdog_fired = initialCapture.readiness.watchdog_fired;
+    }
     telemetryResult.consent_appearance_wait_result = initialCapture.readiness.completion === 'appearance_absent' ? 'absent'
       : initialCapture.readiness.completion === 'appearance_framework_only' ? 'framework_only'
       : initialCapture.readiness.completion === 'appearance_incomplete' ? 'incomplete'

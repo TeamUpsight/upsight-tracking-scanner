@@ -1,5 +1,13 @@
 import { selectedAuditModules } from './audit-modules';
+import { validateTestedCountry } from './scanner/proxy/decodo';
 import type { AuditModule, AuditProxyProvider, AuditQueueOptions, ErrorCategory, ScanMode, ScanStatus, StorefrontAudit } from './types';
+
+export function validateExactCountryRequest(geo: 'USA' | 'EU' | 'UK', value: unknown, modules: AuditModule[]) {
+  const result = validateTestedCountry(geo, value);
+  return result.country && !modules.includes('consent')
+    ? { country: null, error: 'tested_country requires the Consent module.' }
+    : result;
+}
 
 export interface AuditQueueJob {
   audit_id: string | number;
@@ -9,6 +17,7 @@ export interface AuditQueueJob {
   scan_mode: ScanMode;
   selected_modules: AuditModule[];
   proxy_provider: AuditProxyProvider;
+  tested_country?: string | null;
   available_at?: number;
 }
 
@@ -16,7 +25,8 @@ export function normalizeQueueOptions(input?: Partial<AuditQueueOptions> | null)
   return {
     is_bulk: input?.is_bulk === true,
     enable_captcha_solving: input?.enable_captcha_solving === true,
-    proxy_provider: input?.proxy_provider === 'browserless_residential' ? 'browserless_residential' : 'decodo'
+    proxy_provider: input?.proxy_provider === 'browserless_residential' ? 'browserless_residential' : 'decodo',
+    tested_country: typeof input?.tested_country === 'string' ? input.tested_country.trim().toUpperCase() || null : null
   };
 }
 
@@ -32,7 +42,8 @@ export function queueJobForAudit(
     is_bulk: queueOptions.is_bulk,
     scan_mode: audit.scan_mode === 'diagnostic' ? 'diagnostic' : 'normal',
     selected_modules: selectedAuditModules(audit.selected_modules),
-    proxy_provider: queueOptions.proxy_provider
+    proxy_provider: queueOptions.proxy_provider,
+    tested_country: queueOptions.tested_country
   };
 }
 

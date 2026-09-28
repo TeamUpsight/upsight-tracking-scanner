@@ -34,6 +34,23 @@ const geo = (regional: string, alternative = '<button>No, I prefer the Global we
 const input = { geo: 'USA' as const, geo_verified: true, page_valid: true, appearance_wait_ms: 450 };
 
 describe('Consent Detection P0 browser fixtures', () => {
+  it('allows remote evaluate delivery slack without extending the semantic window', async () => {
+    const delayedPage = { evaluate: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 195));
+      return 'framework_only';
+    } } as unknown as Page;
+    const result = await waitForConsentAppearance(delayedPage, 120);
+    expect(result).toMatchObject({ result: 'framework_only', semantic_window_ms: 120, outer_watchdog_ms: 1_620, watchdog_fired: false });
+    expect(result.elapsed_ms).toBeGreaterThanOrEqual(175);
+    expect(result.elapsed_ms).toBeLessThan(1_620);
+  });
+
+  it('marks a genuinely hung evaluate incomplete at the outer watchdog', async () => {
+    const hungPage = { evaluate: () => new Promise(() => {}) } as unknown as Page;
+    const result = await waitForConsentAppearance(hungPage, 50);
+    expect(result).toMatchObject({ result: 'incomplete', semantic_window_ms: 50, outer_watchdog_ms: 1_550, watchdog_fired: true });
+    expect(result.elapsed_ms).toBeGreaterThanOrEqual(1_500);
+  });
   it('never earns absence from an initial empty capture before the appearance window completes', () => {
     const capture = { completion: 'skipped' } as Parameters<typeof cmpAbsenceEarned>[1];
     const facts = { generic: { surfaces: [], text_read_diagnostics: { dom_text_read_error_count: 0, control_text_read_error_count: 0 } } } as unknown as Parameters<typeof cmpAbsenceEarned>[2];
@@ -81,6 +98,7 @@ describe('Consent Detection P0 browser fixtures', () => {
       const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 120 });
       expect(result.telemetry.consent_appearance_wait_result).toBe('framework_only');
       expect(result.telemetry.consent_appearance_wait_ms).toBeGreaterThanOrEqual(100);
+      expect(result.telemetry.consent_appearance_watchdog_fired).toBe(false);
       expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
     });
   });

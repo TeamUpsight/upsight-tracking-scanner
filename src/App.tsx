@@ -149,6 +149,7 @@ export default function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('upsight_internal_token') || '');
   const [domain, setDomain] = useState('');
   const [geo, setGeo] = useState<'USA' | 'EU' | 'UK'>('USA');
+  const [testedCountry, setTestedCountry] = useState('');
   const [group, setGroup] = useState('');
   const [mode, setMode] = useState<'single' | 'bulk'>('single');
   const [scanMode, setScanMode] = useState<'normal' | 'diagnostic'>('normal');
@@ -319,7 +320,7 @@ export default function App() {
       if (mode === 'single') {
         response = await request('/api/v1/scan', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ domain, tested_geos: geo, group_label: group || null, mode: scanMode, selected_modules: selectedModules, enable_captcha_solving: captcha })
+          body: JSON.stringify({ domain, tested_geos: geo, tested_country: geo === 'EU' && selectedModules.includes('consent') ? testedCountry || null : null, group_label: group || null, mode: scanMode, selected_modules: selectedModules, enable_captcha_solving: captcha })
         });
       } else {
         if (!csv) throw new Error('Choose a CSV file first.');
@@ -535,6 +536,7 @@ export default function App() {
               <button type="button" disabled={busy || (mode === 'single' ? !domain : !csv)} onClick={() => void startScan()} className="flex items-center justify-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-xs font-black uppercase tracking-wider text-[#07120f] shadow-lg shadow-primary/10 transition hover:bg-primary-hover hover:shadow-primary/20 disabled:opacity-40">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}Run audit</button>
             </div>
             <fieldset className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-300"><legend className="mr-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Modules</legend>{([['consent', 'Consent'], ['tracking', 'Tracking'], ['server_side', 'Server-side']] as const).map(([module, label]) => <label key={module} className="flex items-center gap-1.5"><input type="checkbox" checked={selectedModules.includes(module)} onChange={(event) => setSelectedModules((current) => event.target.checked ? [...current, module] : current.filter((item) => item !== module))} />{label}</label>)}</fieldset>
+            {mode === 'single' && geo === 'EU' && selectedModules.includes('consent') && <label className="mt-3 flex items-center gap-2 text-[11px] text-slate-300">Exact country (optional)<select aria-label="Exact country" value={testedCountry} onChange={(event) => setTestedCountry(event.target.value)} className="rounded-lg border border-neutral-border bg-[#0d1016] px-3 py-2 text-xs"><option value="">Auto / regional</option><option value="DE">Germany</option><option value="NL">Netherlands</option><option value="FR">France</option><option value="IT">Italy</option><option value="ES">Spain</option></select></label>}
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-[10px] text-slate-400"><span>{scanMode === 'normal' ? 'Normal mode captures the bounded evidence needed for routine and bulk audits.' : 'Diagnostic mode keeps extra request summaries, DOM/CMP signals, timings, and screenshots.'}</span>{mode === 'single' && <label className="flex items-center gap-2"><input type="checkbox" checked={captcha} onChange={(event) => setCaptcha(event.target.checked)} />Allow one challenge-solving retry</label>}</div>
           </section>
 
