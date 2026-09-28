@@ -824,7 +824,7 @@ export async function waitForConsentUiReadiness(page: Page, maximumMs: number, r
 }
 
 export interface ConsentAppearanceResult {
-  result: 'appeared' | 'absent' | 'incomplete';
+  result: 'ui_appeared' | 'framework_only' | 'absent' | 'incomplete';
   elapsed_ms: number;
 }
 
@@ -836,9 +836,22 @@ export async function waitForConsentAppearance(page: Page, maximumMs = 3_500): P
   try {
     return await Promise.race([
       page.evaluate(async (duration) => {
-        const relevant = () => {
+        const frameworkPresent = () => {
           const runtime = window as any;
-          if (typeof runtime.__tcfapi === 'function' || typeof runtime.__gpp === 'function' || runtime.Cookiebot || runtime.OneTrust || runtime.UC_UI || runtime.Didomi) return true;
+          return typeof runtime.__tcfapi === 'function' || typeof runtime.__gpp === 'function' ||
+            typeof runtime.__uspapi === 'function' ||
+            Boolean(runtime.Cookiebot || runtime.OneTrust || runtime.UC_UI || runtime.Didomi || runtime.CookieYes || runtime._sp_) ||
+            Array.from(document.scripts).some((script) => /cookielaw\.org|onetrust|cookiebot|usercentrics|didomi|cookieyes|privacy-mgmt\.com/i.test(script.src));
+        };
+        let unreadableVisibleSurface = false;
+        const uiVisible = () => {
+          const visible = (element: Element | null) => {
+            if (!(element instanceof HTMLElement)) return false;
+            const style = getComputedStyle(element);
+            const box = element.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+          };
+          if (['#onetrust-banner-sdk', '#CybotCookiebotDialog', '#usercentrics-cmp-ui', '#didomi-host', '#didomi-notice', '#cookieyes-banner', '#sp_message_container'].some((selector) => visible(document.querySelector(selector)))) return true;
           const roots: Array<{ root: Document | ShadowRoot; depth: number }> = [{ root: document, depth: 0 }];
           for (let rootIndex = 0; rootIndex < roots.length && rootIndex < 41; rootIndex += 1) {
             const { root, depth } = roots[rootIndex];
@@ -851,30 +864,30 @@ export async function waitForConsentAppearance(page: Page, maximumMs = 3_500): P
               const marker = `${element.id} ${element.className && typeof element.className === 'string' ? element.className : ''}`;
               const known = /cookie|consent|privacy|cybot|didomi|usercentrics/i.test(marker) || element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true';
               if (!known && inspected > 450) continue;
+              if (!visible(element)) continue;
               const style = getComputedStyle(element);
-              const box = element.getBoundingClientRect();
-              if (style.display === 'none' || style.visibility === 'hidden' || box.width <= 0 || box.height <= 0) continue;
               if (!known && style.position !== 'fixed' && style.position !== 'sticky' && !(style.position === 'absolute' && Number.parseInt(style.zIndex, 10) >= 1000)) continue;
               let text = '';
-              try { text = String(element.textContent || '').slice(0, 1200).toLowerCase(); } catch { return true; }
-              if (/cookie|consent|privacy|tracking|personal data|personal information|looks like you are in|visit your local site|choose your country/.test(text)) return true;
+              try { text = String(element.textContent || '').slice(0, 1200).toLowerCase(); }
+              catch { unreadableVisibleSurface = true; continue; }
+              if (/cookie|consent|privacy|personal data|personal information/.test(text)) return true;
             }
           }
           return false;
         };
-        if (relevant()) return 'appeared' as const;
-        return await new Promise<'appeared' | 'absent'>((resolve) => {
+        if (uiVisible()) return 'ui_appeared' as const;
+        return await new Promise<'ui_appeared' | 'framework_only' | 'absent' | 'incomplete'>((resolve) => {
           let done = false;
-          const finish = (value: 'appeared' | 'absent') => {
+          const finish = (value: 'ui_appeared' | 'framework_only' | 'absent' | 'incomplete') => {
             if (done) return;
             done = true;
             observer.disconnect(); clearInterval(poll); clearTimeout(timeout); resolve(value);
           };
-          const check = () => { if (relevant()) finish('appeared'); };
+          const check = () => { if (uiVisible()) finish('ui_appeared'); };
           const observer = new MutationObserver(check);
           observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'role', 'aria-modal'] });
           const poll = window.setInterval(check, 250);
-          const timeout = window.setTimeout(() => finish('absent'), duration);
+          const timeout = window.setTimeout(() => finish(uiVisible() ? 'ui_appeared' : unreadableVisibleSurface ? 'incomplete' : frameworkPresent() ? 'framework_only' : 'absent'), duration);
         });
       }, boundedMs).then((result) => ({ result, elapsed_ms: Date.now() - started })),
       new Promise<ConsentAppearanceResult>((resolve) => { timer = setTimeout(() => resolve({ result: 'incomplete', elapsed_ms: Date.now() - started }), boundedMs + 250); })

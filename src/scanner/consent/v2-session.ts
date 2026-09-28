@@ -276,13 +276,16 @@ async function captureConsentUiReadySnapshot(page: Page, controls: ConsentV2Roll
     const startedAt = Date.now();
     const appearance = await withConsentObservationStage('ui_readiness', 'waitForConsentAppearance', () => waitForConsentAppearance(page, appearanceMaxMs));
     const completedAt = Date.now();
-    const snapshot = appearance.result === 'appeared' ? await captureConsentUiSnapshot(page, controls, geo) : initial;
+    // A late UI or framework must replace the pre-window snapshot. A clean
+    // empty window needs no second provider-context construction.
+    const snapshot = appearance.result === 'ui_appeared' || appearance.result === 'framework_only'
+      ? await captureConsentUiSnapshot(page, controls, geo) : initial;
     if (snapshot !== initial) for (const key of ['browser_facts', 'framework_observation', 'provider_context', 'provider_selection', 'provider_operations', 'semantic_discovery'] as const) snapshot.stageDurations[key] += initial.stageDurations[key];
     const providerCount = snapshot.selection.candidates.filter((candidate) => candidate.high_confidence || candidate.deterministic_provider_signature).length;
     return { snapshot: await finalizeDiagnostic(snapshot, appearance.elapsed_ms), readiness: {
       triggered: true, reason: 'absence_observation', started_at_ms: startedAt, completed_at_ms: completedAt,
       elapsed_ms: appearance.elapsed_ms,
-      completion: appearance.result === 'appeared' ? 'positive_ui_ready' : appearance.result === 'absent' ? 'appearance_absent' : 'appearance_incomplete',
+      completion: appearance.result === 'ui_appeared' ? 'positive_ui_ready' : appearance.result === 'framework_only' ? 'appearance_framework_only' : appearance.result === 'absent' ? 'appearance_absent' : 'appearance_incomplete',
       initial: { provider_count: 0, strong_surface_count: 0, semantic_control_count: 0 },
       final: { provider_count: providerCount, strong_surface_count: strongSurfaceCount(snapshot.facts), semantic_control_count: semanticControlCount(snapshot.facts), open_shadow_roots: 0, provider_root_visible: false },
       reason_codes: appearance.result === 'incomplete' ? [ConsentAuditCodes.DETECTION_INCONCLUSIVE] : []
@@ -876,8 +879,9 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
     telemetryResult.consent_appearance_wait_triggered = initialCapture.readiness.reason === 'absence_observation';
     telemetryResult.consent_appearance_wait_ms = initialCapture.readiness.reason === 'absence_observation' ? initialCapture.readiness.elapsed_ms : 0;
     telemetryResult.consent_appearance_wait_result = initialCapture.readiness.completion === 'appearance_absent' ? 'absent'
+      : initialCapture.readiness.completion === 'appearance_framework_only' ? 'framework_only'
       : initialCapture.readiness.completion === 'appearance_incomplete' ? 'incomplete'
-        : initialCapture.readiness.reason === 'absence_observation' ? 'appeared' : 'not_required';
+        : initialCapture.readiness.reason === 'absence_observation' ? 'ui_appeared' : 'not_required';
     return { result, tracking, ledger, telemetry: telemetryResult, google_consent_mode: gcm.result(), ...(input.diagnostic ? { diagnostic_observation: await withConsentObservationStage('diagnostic_observation', 'diagnosticObservation', async () => diagnosticObservation('fresh', 'consent_fresh_observation', before, frameworkObservations, selection, banner, actions, telemetryResult.consent_mode_classification, hasCmpIdentity || absenceEarned, initialCapture.readiness, initialCapture.snapshot.semanticDiscovery, initialCapture.snapshot.diagnosticControlCensus, initialCapture.snapshot.stageDurations, initialCapture.snapshot.usercentricsMainFrameCensus)) } : {}) };
   } finally { capture.dispose(); }
 }

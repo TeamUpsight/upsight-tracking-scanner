@@ -1405,6 +1405,23 @@ export async function runStorefrontAudit(
     addTrace('diagnostic_consent_snapshot_captured', { context: snapshot.context, capture_id: snapshot.capture_id, observation_complete: snapshot.observation_complete }, { module: 'consent', severity: 'info' });
   };
 
+  const recordFreshConsentDiagnostic = async (result: ConsentV2SessionOutput, page: Page) => {
+    if (evidence.mode !== 'diagnostic' || !result.diagnostic_observation) return;
+    let screenshotName: string | null = null;
+    let screenshotCapturedAt: number | null = null;
+    try {
+      if (!result.diagnostic_observation.observation_complete) throw new Error('incomplete diagnostic observation');
+      const image = await page.screenshot({ type: 'jpeg', quality: 55, fullPage: false, timeout: 1_500 });
+      const capturedAt = Date.now();
+      evidenceCollector.addScreenshot({ name: 'consent-fresh.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
+      if (evidence.runtime.screenshots.some((screenshot) => screenshot.name === 'consent-fresh.jpg')) {
+        screenshotName = 'consent-fresh.jpg';
+        screenshotCapturedAt = capturedAt;
+      }
+    } catch { /* A diagnostic screenshot cannot change the Consent result. */ }
+    recordConsentDiagnostic(result.diagnostic_observation, screenshotName, screenshotCapturedAt);
+  };
+
   const enrichConsentV2Evidence = (result: ConsentV2SessionOutput, pageValid: boolean | null, emitTrace = true) => {
     const measurement = persistConsentMeasurementTelemetry(result.telemetry.measurement?.sources);
     result.telemetry.measurement = measurement;
@@ -2655,6 +2672,7 @@ export async function runStorefrontAudit(
         }, consentCapture);
         consentV2Ran = true;
         evidence.runtime.consent_v2 = consentV2.telemetry;
+        await recordFreshConsentDiagnostic(consentV2, consentHomepage);
         const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
         cmp = {
           provider: compatibility.cmp_provider || (readiness.status === 'ready' && consentV2.result.reason_codes.includes('NO_CMP_DETECTED') ? 'Not Found' : 'Unknown'),
@@ -3578,6 +3596,7 @@ export async function runStorefrontAudit(
           }, consentCapture!));
           consentV2Ran = true;
           evidence.runtime.consent_v2 = consentV2.telemetry;
+          await recordFreshConsentDiagnostic(consentV2, consentHomepage!);
           const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
           addTrace(readiness.status !== 'ready' ? 'consent_fresh_navigation_blocked_or_challenged' : compatibility.cmp_provider ? 'cmp_provider_detected' : 'cmp_not_found', {
             provider: compatibility.cmp_provider, reason_codes: consentV2.result.reason_codes

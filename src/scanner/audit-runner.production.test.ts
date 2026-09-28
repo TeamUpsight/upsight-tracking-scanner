@@ -7,6 +7,7 @@ import type { StorefrontAudit } from '../types';
 import { buildDebugPackageFiles } from './quality/debug-package';
 import { compareGpcObservations } from './consent/gpc-experiment';
 import { isRequestForPdp } from './tracking/pdp-association';
+import { EvidenceCollector } from './evidence/evidence-collector';
 
 // Most runner fixtures exercise compiled-production action wiring with a local
 // browser. One focused case switches to direct source provenance to prove the
@@ -156,6 +157,39 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(evidence.consent.resolved_provider_evidence).toContain('CMP_PROVIDER_UNKNOWN');
     expect(evidence.consent.resolved_provider_evidence).not.toContain('NO_CMP_DETECTED');
     expect(evidence.diagnostic_observability?.consent_observations.map((observation) => observation.context)).toEqual(expect.arrayContaining(['shared', 'fresh']));
+    const captures = evidence.diagnostic_observability?.diagnostic_captures || [];
+    const screenshots = evidence.runtime.screenshots.map((screenshot) => screenshot.name);
+    for (const [context, name] of [['shared', 'consent-shared.jpg'], ['fresh', 'consent-fresh.jpg']] as const) {
+      const observation = evidence.diagnostic_observability?.consent_observations.find((item) => item.context === context);
+      const matching = captures.filter((item) => item.consent_snapshot_id === observation?.capture_id);
+      expect(matching).toHaveLength(1);
+      expect(matching[0]).toMatchObject({ context, screenshot_name: name, screenshot_observation_delta_ms: expect.any(Number) });
+      expect(matching[0].screenshot_observation_delta_ms).toBeGreaterThanOrEqual(0);
+      expect(matching[0].screenshot_observation_delta_ms).toBeLessThan(2_000);
+      expect(screenshots.filter((item) => item === name)).toHaveLength(1);
+    }
+  }, 45_000);
+
+  it('keeps fresh Consent complete when its diagnostic screenshot fails', async () => {
+    const banner = '<div style="position:fixed;width:500px;height:160px">Cookie choices <button>Accept All</button><button>Reject All</button></div>';
+    const result = await auditFixture(200, banner, true, ['consent'], false, {
+      createFreshConsentContext: async (browser, input) => {
+        const context = await browser.newContext({ serviceWorkers: 'block' });
+        const page = await context.newPage();
+        await page.route('**/*', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: banner }));
+        vi.spyOn(page, 'screenshot').mockRejectedValue(new Error('fixture screenshot failure'));
+        return { context, page, service_workers: 'blocked' as const, geo: {
+          requested_geo: input.requestedGeo, proxy_region: input.proxyRegion, verified: true,
+          verification_method: 'egress_probe' as const, confidence: 'high' as const, reason_codes: []
+        } };
+      }
+    }, 'diagnostic') as unknown as StorefrontAudit;
+    const fresh = result.evidence_bundle?.diagnostic_observability?.consent_observations.find((item) => item.context === 'fresh');
+    const capture = result.evidence_bundle?.diagnostic_observability?.diagnostic_captures.find((item) => item.consent_snapshot_id === fresh?.capture_id);
+    expect(fresh?.observation_complete).toBe(true);
+    expect(capture).toMatchObject({ context: 'fresh', screenshot_name: null, screenshot_captured_at_ms: null, screenshot_observation_delta_ms: null });
+    expect(result.evidence_bundle?.runtime.screenshots.some((item) => item.name === 'consent-fresh.jpg')).toBe(false);
+    expect(result.evidence_bundle?.consent.banner_visible).toBe(true);
   }, 45_000);
 
   it('starts Tracking and Server directly, skips geo probing, and uses no fallback on success', async () => {
@@ -292,6 +326,14 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(diagnosticScreenshotDeltaMs(1_000, 1_500)).toBe(500);
     expect(diagnosticScreenshotDeltaMs(1_500, 1_000)).toBe(-500);
     expect(diagnosticScreenshotDeltaMs(1_000, null)).toBeNull();
+  });
+
+  it('retains four distinct bounded diagnostic screenshots without duplicate names', () => {
+    const collector = new EvidenceCollector({ auditId: 'four-screenshots', domain: 'fixture.example', geo: 'EU', mode: 'diagnostic' });
+    for (const name of ['homepage.jpg', 'consent-shared.jpg', 'pdp.jpg', 'consent-fresh.jpg', 'consent-fresh.jpg', 'fifth.jpg']) {
+      collector.addScreenshot({ name, mime_type: 'image/jpeg', content_base64: 'fixture' });
+    }
+    expect(collector.bundle.runtime.screenshots.map((item) => item.name)).toEqual(['homepage.jpg', 'consent-shared.jpg', 'pdp.jpg', 'consent-fresh.jpg']);
   });
 
   it('RUNNER-V2-01 finalizes Consent V2 compatibility fields from the real runner', async () => {

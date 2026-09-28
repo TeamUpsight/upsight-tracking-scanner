@@ -203,7 +203,7 @@ export interface EvidenceBundle {
       control_text_read_error_count?: number;
       dom_text_fallback_used?: boolean;
       capture_stage_durations_ms?: { browser_facts: number; framework_observation: number; provider_context: number; provider_selection: number; provider_operations: number; semantic_discovery: number; ui_readiness: number; accessibility_census: number; total: number };
-      readiness?: { triggered: boolean; reason: string | null; started_at_ms: number | null; completed_at_ms: number | null; elapsed_ms: number; completion: 'positive_ui_ready' | 'timeout' | 'skipped' | 'appearance_absent' | 'appearance_incomplete'; initial: { provider_count: number; strong_surface_count: number; semantic_control_count: number }; final: { provider_count: number; strong_surface_count: number; semantic_control_count: number; open_shadow_roots: number; provider_root_visible: boolean }; reason_codes: string[] };
+      readiness?: { triggered: boolean; reason: string | null; started_at_ms: number | null; completed_at_ms: number | null; elapsed_ms: number; completion: 'positive_ui_ready' | 'timeout' | 'skipped' | 'appearance_framework_only' | 'appearance_absent' | 'appearance_incomplete'; initial: { provider_count: number; strong_surface_count: number; semantic_control_count: number }; final: { provider_count: number; strong_surface_count: number; semantic_control_count: number; open_shadow_roots: number; provider_root_visible: boolean }; reason_codes: string[] };
       provider_selection: {
         selected_provider: string | null;
         provider_conflict: boolean;
@@ -498,7 +498,7 @@ export interface EvidenceBundle {
       session_status?: 'completed' | 'unavailable';
       consent_appearance_wait_triggered?: boolean;
       consent_appearance_wait_ms?: number;
-      consent_appearance_wait_result?: 'appeared' | 'absent' | 'incomplete' | 'not_required';
+      consent_appearance_wait_result?: 'ui_appeared' | 'framework_only' | 'absent' | 'incomplete' | 'not_required';
       /** Bounded passive homepage facts, retained separately from fresh-session completion. */
       shared_observation?: {
         provider: string | null;

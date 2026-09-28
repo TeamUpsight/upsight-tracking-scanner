@@ -1,6 +1,6 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { captureBrowserConsentFacts } from './browser-context-builders';
+import { captureBrowserConsentFacts, waitForConsentAppearance } from './browser-context-builders';
 import { detectGenericConsentMechanism } from './generic-consent-detector';
 import { chooseGeoInterstitialTarget, resolveGeoInterstitial } from './geo-interstitial';
 import { cmpAbsenceEarned, runConsentV2Session } from './v2-session';
@@ -51,7 +51,46 @@ describe('Consent Detection P0 browser fixtures', () => {
       expect(result.result.mechanisms).toEqual(expect.arrayContaining([expect.objectContaining({ mechanism: 'custom', provider: expect.objectContaining({ attribution: 'unknown_candidate' }) })]));
       expect(result.result.banner.visibility).toBe('visible');
       expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
-      expect(result.telemetry.consent_appearance_wait_result).toBe('appeared');
+      expect(result.telemetry.consent_appearance_wait_result).toBe('ui_appeared');
+    });
+  });
+
+  it('waits past early TCF/GPP stubs for a later arbitrary-class consent banner', async () => {
+    await fixture(`<main>Ordinary shop</main><script>
+      setTimeout(() => { window.__tcfapi = function() {}; window.__gpp = function() {}; }, 240);
+      setTimeout(() => document.body.insertAdjacentHTML('beforeend', ${JSON.stringify(banner)}), 1150);
+    </script>`, async (page) => {
+      const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 1_600, diagnostic: true });
+      expect(result.telemetry.consent_appearance_wait_result).toBe('ui_appeared');
+      expect(result.telemetry.consent_appearance_wait_ms).toBeGreaterThanOrEqual(700);
+      expect(result.telemetry.consent_appearance_wait_ms).toBeLessThan(1_600);
+      expect(result.result.frameworks.tcf).not.toBe('not_present');
+      expect(result.result.frameworks.gpp).not.toBe('not_present');
+      expect(result.result.mechanisms).toEqual(expect.arrayContaining([expect.objectContaining({ mechanism: 'custom' })]));
+      expect(result.result.banner.visibility).toBe('visible');
+      expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+      expect(result.diagnostic_observation?.readiness?.final.strong_surface_count).toBeGreaterThan(0);
+    });
+  }, 15_000);
+
+  it('observes the full short window for framework-only runtime and keeps absence inconclusive', async () => {
+    await fixture('<main>Ordinary shop</main><script>window.__tcfapi=function(){};window.__gpp=function(){};</script>', async (page) => {
+      const appearance = await waitForConsentAppearance(page, 120);
+      expect(appearance.result).toBe('framework_only');
+      expect(appearance.elapsed_ms).toBeGreaterThanOrEqual(100);
+      const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 120 });
+      expect(result.telemetry.consent_appearance_wait_result).toBe('framework_only');
+      expect(result.telemetry.consent_appearance_wait_ms).toBeGreaterThanOrEqual(100);
+      expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+    });
+  });
+
+  it('does not turn a provider runtime without visible UI into UI appearance', async () => {
+    await fixture('<main>Ordinary shop</main><script>window.OneTrust={};</script>', async (page) => {
+      expect((await waitForConsentAppearance(page, 120)).result).toBe('framework_only');
+      const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 120 });
+      expect(result.telemetry.consent_appearance_wait_result).not.toBe('ui_appeared');
+      expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
     });
   });
 
@@ -73,9 +112,20 @@ describe('Consent Detection P0 browser fixtures', () => {
 
   it('earns absence only after a completed appearance window', async () => {
     await fixture('<main><h1>Ordinary shop</h1></main>', async (page) => {
+      expect((await waitForConsentAppearance(page, 90)).result).toBe('absent');
       const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 90 });
       expect(result.telemetry.consent_appearance_wait_result).toBe('absent');
       expect(result.result.reason_codes).toContain('NO_CMP_DETECTED');
+    });
+  });
+
+  it('keeps an immediately visible custom CMP without an absence wait', async () => {
+    await fixture(banner, async (page) => {
+      const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 400 });
+      expect(result.telemetry.consent_appearance_wait_triggered).toBe(false);
+      expect(result.telemetry.consent_appearance_wait_result).toBe('not_required');
+      expect(result.result.banner.visibility).toBe('visible');
+      expect(result.result.mechanisms.some((mechanism) => mechanism.mechanism === 'custom')).toBe(true);
     });
   });
 

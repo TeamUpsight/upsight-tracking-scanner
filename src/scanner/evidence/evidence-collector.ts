@@ -454,7 +454,9 @@ export class EvidenceCollector {
   }
 
   addScreenshot(screenshot: ScreenshotEvidence) {
-    if (this.bundle.mode !== 'diagnostic' || this.bundle.runtime.screenshots.length >= 3) return;
+    // Diagnostic audits may capture homepage, shared Consent, PDP, and fresh Consent.
+    if (this.bundle.mode !== 'diagnostic' || this.bundle.runtime.screenshots.length >= 4 ||
+      this.bundle.runtime.screenshots.some((item) => item.name === screenshot.name)) return;
     this.bundle.runtime.screenshots.push(screenshot);
   }
 
