@@ -58,7 +58,8 @@ describe('Consent Detection P0 browser fixtures', () => {
     const selection = { provider: undefined, candidates: [], conflict: false } as Parameters<typeof cmpAbsenceEarned>[4];
     const frameworks = { tcf: 'not_present', gpp: 'not_present' } as Parameters<typeof cmpAbsenceEarned>[5];
     expect(cmpAbsenceEarned(input, capture, facts, generic, selection, frameworks)).toBe(false);
-    expect(cmpAbsenceEarned(input, { ...capture, completion: 'appearance_absent' }, facts, generic, selection, frameworks)).toBe(true);
+    expect(cmpAbsenceEarned({ ...input, render_state: 'ready' }, { ...capture, completion: 'appearance_absent' }, facts, generic, selection, frameworks)).toBe(true);
+    expect(cmpAbsenceEarned({ ...input, render_state: 'incomplete' }, { ...capture, completion: 'appearance_absent' }, facts, generic, selection, frameworks)).toBe(false);
     expect(cmpAbsenceEarned({ ...input, geo_interstitial_unresolved: true }, { ...capture, completion: 'appearance_absent' }, facts, generic, selection, frameworks)).toBe(false);
   });
 
@@ -68,7 +69,8 @@ describe('Consent Detection P0 browser fixtures', () => {
       expect(result.result.mechanisms).toEqual(expect.arrayContaining([expect.objectContaining({ mechanism: 'custom', provider: expect.objectContaining({ attribution: 'unknown_candidate' }) })]));
       expect(result.result.banner.visibility).toBe('visible');
       expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
-      expect(result.telemetry.consent_appearance_wait_result).toBe('ui_appeared');
+      // Render readiness can observe the delayed banner before the Consent appearance snapshot.
+      expect(['ui_appeared', 'not_required']).toContain(result.telemetry.consent_appearance_wait_result);
     });
   });
 

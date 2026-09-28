@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mergeSharedConsentObservation, type SharedConsentObservation } from './v2-session';
 
 const shared = (): SharedConsentObservation => ({
-  source: 'shared', provider: 'onetrust', provider_conflict: false,
+  source: 'shared', provider: 'onetrust', provider_conflict: false, render_state: 'ready',
   us_privacy: null,
   banner: { surface: 'banner', visibility: 'visible', evidence: ['shared_visible'], reason_codes: [] },
   actions: [
@@ -13,7 +13,7 @@ const shared = (): SharedConsentObservation => ({
 });
 
 const fresh = (banner: 'visible' | 'not_visible' | 'unknown' = 'unknown', provider = 'onetrust') => ({
-  telemetry: { provider, provider_conflict: false, session_status: 'completed', timeline: { initial_observation_completed_at: 1 } },
+  telemetry: { provider, provider_conflict: false, render_state: 'ready', session_status: 'completed', timeline: { initial_observation_completed_at: 1 } },
   result: { banner: { surface: banner === 'visible' ? 'banner' : 'none', visibility: banner, evidence: [], reason_codes: [] }, available_actions: [] }
 } as any);
 
@@ -30,6 +30,14 @@ describe('shared CMP observation survival', () => {
 
   it('CMP-SURVIVE-03 preserves a shared visible banner after a fresh timeout', () => {
     expect(mergeSharedConsentObservation(shared(), null).banner.visibility).toBe('visible');
+  });
+
+  it('CMP-SURVIVE-RENDER preserves shared positive evidence when fresh rendering is incomplete', () => {
+    const incomplete = fresh('not_visible');
+    incomplete.telemetry.render_state = 'incomplete';
+    const merged = mergeSharedConsentObservation(shared(), incomplete);
+    expect(merged).toMatchObject({ provider: 'onetrust', banner: { visibility: 'visible' } });
+    expect(merged.actions).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'reject_all', availability: 'direct' })]));
   });
 
   it('CMP-SURVIVE-04 keeps incomplete shared observation unknown when fresh is unavailable', () => {

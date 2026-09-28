@@ -731,6 +731,17 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'page_validity_failed' })]));
   }, 30_000);
 
+  it('RUNNER-RENDER-582 keeps an HTTP 200 permanent app shell access-valid and Consent inconclusive', async () => {
+    const shell = '<div id="root" aria-busy="true"><div class="loading-overlay" style="position:fixed;inset:0;background:white"><div class="spinner">Loading...</div></div></div>';
+    const result = await auditFixture(200, shell, true, ['consent'], false, {}, 'diagnostic');
+    const evidence = result.evidence_bundle as StorefrontAudit['evidence_bundle'];
+    expect(evidence?.page).toMatchObject({ valid: true, status_code: 200, access_category: 'none' });
+    expect(evidence?.runtime.consent_v2).toMatchObject({ render_state: 'incomplete', shared_observation: { render_state: 'incomplete' } });
+    expect(evidence?.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
+    expect(result).toMatchObject({ consent_status: 'inconclusive' });
+    expect(result.cmp_provider).not.toBe('Not Found');
+  }, 45_000);
+
   it('RUNNER-UNIFIED-01 reaches the PDP before any consent action and retains its early view_item evidence', async () => {
     const html = `<a href="/products/widget">Widget</a><form action="/cart/add"><button>Add to cart</button></form>
       <script>window.dataLayer=[{event:'view_item', ecommerce:{items:[{item_id:'widget-1',item_name:'Widget'}]}}]</script>`;

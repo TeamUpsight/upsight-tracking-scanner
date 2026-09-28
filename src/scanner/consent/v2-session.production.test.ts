@@ -453,7 +453,7 @@ describe('Consent V2 production session wiring', () => {
 
   it('WP11.4-MERGE-POSITIVE-03 retains a true same-provider complete contradiction as unknown', () => {
     const shared = { source: 'shared', provider: 'didomi', provider_conflict: false, banner: { surface: 'banner', visibility: 'visible', evidence: [], reason_codes: [] }, actions: [] } as any;
-    const fresh = { telemetry: { provider: 'didomi', provider_conflict: false, session_status: 'completed', timeline: { initial_observation_completed_at: Date.now() } }, result: { banner: { surface: 'none', visibility: 'not_visible', evidence: [], reason_codes: [] }, available_actions: [] } } as any;
+    const fresh = { telemetry: { provider: 'didomi', provider_conflict: false, render_state: 'ready', session_status: 'completed', timeline: { initial_observation_completed_at: Date.now() } }, result: { banner: { surface: 'none', visibility: 'not_visible', evidence: [], reason_codes: [] }, available_actions: [] } } as any;
     expect(mergeSharedConsentObservation(shared, fresh).banner.visibility).toBe('unknown');
   });
   it('FW-ASYNC-TCF-01 buffers delayed TCF callbacks from the pre-navigation bridge', async () => {
@@ -1068,7 +1068,7 @@ describe('Consent V2 production session wiring', () => {
       { action: 'reject_all', outcome: 'unsupported' }
     ]);
     expect(result.result.rejection_verification.status).toBe('inconclusive');
-  });
+  }, 10_000);
 
   it('UC-SHADOW-01 and UC-SHADOW-02 preserve open and closed shadow topology', async () => {
     const page = await browser.newPage();

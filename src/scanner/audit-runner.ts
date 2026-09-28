@@ -37,6 +37,7 @@ import { captureBrowserConsentFacts, installConsentCommandBootstrap } from './co
 import { resolveGeoInterstitial, type GeoInterstitialDecision } from './consent/geo-interstitial';
 import { certificationSafeConsentV2RolloutControls, consentV2RolloutControls, legacyAcceptActionEnabled } from './consent/rollout-controls';
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
+import { attachRenderRuntimeDiagnostics } from './consent/render-readiness';
 import { consentObservationFailure } from './consent/observation-stage';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { PageProvenanceTracker } from './tracking/page-provenance';
@@ -1285,6 +1286,7 @@ export async function runStorefrontAudit(
   let consentHomepage: Page | null = null;
   let consentV2: ConsentV2SessionOutput | null = null;
   let sharedConsentObservation: SharedConsentObservation | null = null;
+  let sharedRenderDiagnostics: ReturnType<typeof attachRenderRuntimeDiagnostics> | null = null;
   let sharedConsentObservationTask: Promise<void> | null = null;
   let sharedConsentObservationStatus: 'not_started' | 'pending' | 'completed' | 'incomplete' = 'not_started';
   let authoritativeSharedHomepage: { page: Page; context: BrowserContext; host: string } | null = null;
@@ -1372,6 +1374,7 @@ export async function runStorefrontAudit(
     const reject = merged.actions.find((item) => item.action === 'reject_all') || merged.actions.find((item) => item.action === 'only_necessary');
     telemetry.reject_availability = reject?.availability || (fresh ? telemetry.reject_availability : 'unknown');
     telemetry.shared_observation = sharedConsentObservation ? {
+      render_state: sharedConsentObservation.render_state,
       provider: sharedConsentObservation.provider,
       provider_confidence: sharedConsentObservation.provider === 'generic' ? 'medium' : sharedConsentObservation.provider ? 'high' : null,
       provider_conflict: sharedConsentObservation.provider_conflict,
@@ -1786,6 +1789,9 @@ export async function runStorefrontAudit(
     context.setDefaultTimeout(10_000);
     context.setDefaultNavigationTimeout(15_000);
     homepage = context.pages()[0] || await context.newPage();
+    sharedRenderDiagnostics?.dispose();
+    sharedRenderDiagnostics = consentSelected && consentV2Enabled && evidence.mode === 'diagnostic'
+      ? attachRenderRuntimeDiagnostics(homepage) : null;
     // The shared homepage is reused across normal, retried, and reconnected
     // sessions. Install its passive Consent observer before the target URL is
     // ever navigated, so synchronous Usercentrics lifecycle events survive.
@@ -2645,7 +2651,7 @@ export async function runStorefrontAudit(
           await wait(HOMEPAGE_OBSERVATION_MS, authoritativeHomepagePage);
           const captureStartedAt = Date.now();
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
-           const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic', geo, geoUnresolved);
+          const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic', geo, geoUnresolved, true, sharedRenderDiagnostics || undefined);
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
           sharedConsentObservation = observed;
           sharedConsentObservationStatus = 'completed';
@@ -2664,6 +2670,7 @@ export async function runStorefrontAudit(
             recordConsentDiagnostic(observed.diagnostic_observation, consentScreenshotName, consentScreenshotCapturedAt);
           }
           addTrace('homepage_shared_cmp_observation_completed', {
+            render_state: observed.render_state,
             provider: observed.provider,
             banner_visibility: observed.banner.visibility,
             action_count: observed.actions.filter((action) => action.availability !== 'not_present' && action.availability !== 'unknown').length,
@@ -2680,6 +2687,9 @@ export async function runStorefrontAudit(
               ? 'SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE'
               : 'SHARED_CONSENT_OBSERVATION_FAILED'
           }, { module: 'consent', severity: 'warning' });
+        } finally {
+          sharedRenderDiagnostics?.dispose();
+          sharedRenderDiagnostics = null;
         }
       })();
     }
@@ -2739,7 +2749,7 @@ export async function runStorefrontAudit(
           fresh_browser_session: false,
           expected_geo: geo
         });
-        consentCapture = await prepareConsentV2Session(consentHomepage);
+        consentCapture = await prepareConsentV2Session(consentHomepage, evidence.mode === 'diagnostic');
         consentCapture.markNavigationStarted();
         freshConsentFailureStage = 'target_navigation';
         const navigation = await navigateFreshConsentContext(consentHomepage, resolvedHomepageUrl, { timings: consentTimings });
@@ -3667,7 +3677,7 @@ export async function runStorefrontAudit(
           await guardBrowserContext(consentContext);
           attachContextObservers(consentContext);
           await attachAuthorizedAccessHeader(consentContext, consentHomepage, effectiveDomain);
-          consentCapture = await prepareConsentV2Session(consentHomepage);
+          consentCapture = await prepareConsentV2Session(consentHomepage, evidence.mode === 'diagnostic');
           consentCapture.markNavigationStarted();
           const navigation = await withinPhaseBudget('consent_pdp_navigation', Math.min(available, 12_000), () =>
             navigateFreshConsentContext(consentHomepage!, consentTarget, { timings: consentTimings })

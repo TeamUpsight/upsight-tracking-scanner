@@ -200,6 +200,8 @@ export interface EvidenceBundle {
       phase: string;
       captured_at_ms: number;
       observation_complete: boolean;
+      render?: import('./scanner/consent/render-readiness').RenderReadinessObservation;
+      runtime_failures?: import('./scanner/consent/render-readiness').RenderRuntimeDiagnostics;
       dom_text_read_error_count?: number;
       control_text_read_error_count?: number;
       dom_text_fallback_used?: boolean;
@@ -494,6 +496,7 @@ export interface EvidenceBundle {
     };
     module_durations_ms: Record<string, number>;
     consent_v2?: {
+      render_state?: import('./scanner/consent/render-readiness').RenderState;
       /** Consent-only normalized provenance. Signal counts cover retained evidence;
        * observed counts include buffer overflow. Truncation never proves absence. */
       measurement?: import('./scanner/consent/tracking-consistency').ConsentMeasurementSummary;
@@ -507,6 +510,7 @@ export interface EvidenceBundle {
       consent_appearance_wait_result?: 'ui_appeared' | 'framework_only' | 'absent' | 'incomplete' | 'not_required';
       /** Bounded passive homepage facts, retained separately from fresh-session completion. */
       shared_observation?: {
+        render_state?: import('./scanner/consent/render-readiness').RenderState;
         provider: string | null;
         provider_confidence: 'high' | 'medium' | 'low' | null;
         provider_conflict: boolean;

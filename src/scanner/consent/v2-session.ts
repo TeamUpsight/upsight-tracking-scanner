@@ -25,8 +25,9 @@ import { consentV2ActionsEnabledFor, consentV2RolloutControls, type ConsentV2Rol
 import { captureDiagnosticConsentControlCensus, discoverProviderSemanticControls, type DiagnosticConsentControlCensusRecord, type ProviderSemanticDiscovery } from './provider-semantic-controls';
 import { buildUSPrivacyObservation, isUSPrivacySemanticLabel, mergeUSPrivacyObservations } from './us-privacy';
 import { withConsentObservationStage } from './observation-stage';
+import { attachRenderRuntimeDiagnostics, observeRenderedPage, type RenderReadinessObservation, type RenderState, type RenderRuntimeDiagnostics } from './render-readiness';
 
-export interface ConsentV2SessionInput { geo: 'USA' | 'EU' | 'UK'; geo_verified: boolean | null; page_valid: boolean | null; timings?: ConsentTimingValues; access_blocked?: boolean; geo_interstitial_unresolved?: boolean; geo_interstitial_target_unverified?: boolean; appearance_wait_ms?: number; rollout?: ConsentV2RolloutControls; rollout_key?: string; diagnostic?: boolean; }
+export interface ConsentV2SessionInput { geo: 'USA' | 'EU' | 'UK'; geo_verified: boolean | null; page_valid: boolean | null; render_state?: RenderState; timings?: ConsentTimingValues; access_blocked?: boolean; geo_interstitial_unresolved?: boolean; geo_interstitial_target_unverified?: boolean; appearance_wait_ms?: number; rollout?: ConsentV2RolloutControls; rollout_key?: string; diagnostic?: boolean; }
 export type ConsentV2Telemetry = NonNullable<EvidenceBundle['runtime']['consent_v2']>;
 type DiagnosticConsentObservation = NonNullable<EvidenceBundle['diagnostic_observability']>['consent_observations'][number];
 export interface ConsentV2SessionOutput { result: FinalConsentAuditResult; tracking: TrackingConsistencyResult; ledger: ConsentEvidenceLedger; telemetry: ConsentV2Telemetry; google_consent_mode: ReturnType<GoogleConsentModeObserver['result']>; diagnostic_observation?: DiagnosticConsentObservation; }
@@ -37,6 +38,7 @@ export interface SharedConsentObservation {
   banner: BannerState;
   actions: AvailableAction[];
   us_privacy: USPrivacyObservation | null;
+  render_state: RenderState;
   diagnostic_observation?: DiagnosticConsentObservation;
 }
 export interface MergedConsentObservation {
@@ -70,6 +72,7 @@ export interface PreparedConsentV2Session {
   requests: TrackingRequestEvidence[];
   request_buffer: ConsentRequestBuffer;
   gcm: GoogleConsentModeObserver;
+  render_diagnostics?: ReturnType<typeof attachRenderRuntimeDiagnostics>;
   markNavigationStarted(): void;
   markDOMContentLoaded(): void;
   markInitialObservationCompleted(): void;
@@ -77,7 +80,8 @@ export interface PreparedConsentV2Session {
 }
 
 /** Installs Consent V2 capture after a fresh page is created and before navigation. */
-export async function prepareConsentV2Session(page: Page): Promise<PreparedConsentV2Session> {
+export async function prepareConsentV2Session(page: Page, diagnostic = false): Promise<PreparedConsentV2Session> {
+  const renderDiagnostics = diagnostic ? attachRenderRuntimeDiagnostics(page) : undefined;
   await installConsentCommandBootstrap(page);
   const timeline: ConsentV2Timeline = { session_started_at: Date.now(), navigation_started_at: null, dom_content_loaded_at: null, initial_observation_completed_at: null, action_attempt_started_at: null, user_choice_at: null, reject_started_at: null, reject_completed_at: null, reload_started_at: null };
   const ledger = new ConsentEvidenceLedger(); const request_buffer = new ConsentRequestBuffer(); const requests = request_buffer.requests; const gcm = new GoogleConsentModeObserver({ timestamp_tolerance_ms: 50 });
@@ -94,11 +98,11 @@ export async function prepareConsentV2Session(page: Page): Promise<PreparedConse
   let disposed = false;
   page.on('request', listener);
   return {
-    timeline, ledger, requests, request_buffer, gcm,
+    timeline, ledger, requests, request_buffer, gcm, render_diagnostics: renderDiagnostics,
     markNavigationStarted() { timeline.navigation_started_at ||= Date.now(); },
     markDOMContentLoaded() { timeline.dom_content_loaded_at ||= Date.now(); },
     markInitialObservationCompleted() { timeline.initial_observation_completed_at ||= Date.now(); },
-    dispose() { if (!disposed) { disposed = true; page.off('request', listener); } }
+    dispose() { if (!disposed) { disposed = true; page.off('request', listener); renderDiagnostics?.dispose(); } }
   };
 }
 
@@ -209,7 +213,7 @@ async function captureConsentUiSnapshot(page: Page, controls: ConsentV2RolloutCo
 }
 
 export function cmpAbsenceEarned(input: ConsentV2SessionInput, capture: ConsentUiReadinessSummary, facts: BrowserConsentFacts, generic: GenericConsentDetectionResult, selection: ProviderSelection, frameworks: FrameworkState) {
-  return input.page_valid === true && !input.access_blocked && !input.geo_interstitial_unresolved && capture.completion === 'appearance_absent' &&
+  return input.page_valid === true && input.render_state === 'ready' && !input.access_blocked && !input.geo_interstitial_unresolved && capture.completion === 'appearance_absent' &&
     !selection.provider && selection.candidates.length === 0 && !selection.conflict && generic.status === 'not_detected' &&
     frameworks.tcf === 'not_present' && frameworks.gpp === 'not_present' &&
     !facts.generic.surfaces.some((surface) => surface.visible && (
@@ -319,12 +323,39 @@ async function captureConsentUiReadySnapshot(page: Page, controls: ConsentV2Roll
   };
 }
 
+async function captureConsentWithRenderReadiness(
+  page: Page, controls: ConsentV2RolloutControls, enabled: boolean, diagnostic: boolean,
+  geo: ConsentV2SessionInput['geo'], appearanceMaxMs: number, absenceWindowEnabled = true
+) {
+  // The render probe and existing Consent appearance window share wall time.
+  const startedAt = Date.now();
+  let [captured, render] = await Promise.all([
+    withConsentObservationStage('ui_readiness', 'captureConsentUiReadySnapshot', () =>
+      captureConsentUiReadySnapshot(page, controls, enabled, diagnostic, geo, appearanceMaxMs, absenceWindowEnabled)),
+    observeRenderedPage(page)
+  ]);
+  if (render.render_state === 'ready' && render.render_state_changed && captured.readiness.completion === 'appearance_absent') {
+    // The first facts may describe the old shell. Repeat capture after content
+    // arrives; repeat the appearance window only if it ended before readiness.
+    const windowCoveredRender = captured.readiness.completed_at_ms !== null &&
+      startedAt + render.render_wait_ms < captured.readiness.completed_at_ms;
+    const updated = await withConsentObservationStage('ui_readiness', 'captureConsentUiReadySnapshot', () =>
+      captureConsentUiReadySnapshot(page, controls, enabled, diagnostic, geo, appearanceMaxMs, absenceWindowEnabled && !windowCoveredRender));
+    captured = windowCoveredRender && updated.readiness.completion === 'skipped' &&
+      !updated.snapshot.selection.provider && strongSurfaceCount(updated.snapshot.facts) === 0
+      ? { ...updated, readiness: captured.readiness } : updated;
+  }
+  return { captured, render };
+}
+
 function diagnosticObservation(
   context: 'shared' | 'fresh', phase: string, facts: BrowserConsentFacts, framework: ConsentFrameworkObservations,
   selection: { provider?: CmpAdapterProviderId; candidates: ReturnType<typeof scoreProviderCandidates>; conflict: boolean; evidence: ProviderEvidenceSignal[] },
   banner: BannerState, actions: AvailableAction[], consentMode: string, observationComplete: boolean, readiness?: ConsentUiReadinessSummary,
   semanticDiscovery?: ProviderSemanticDiscovery, diagnosticControlCensus?: DiagnosticConsentControlCensusRecord[], stageDurations?: ConsentCaptureStageDurations,
-  usercentricsMainFrameCensus?: UsercentricsMainFrameCensus
+  usercentricsMainFrameCensus?: UsercentricsMainFrameCensus,
+  render?: RenderReadinessObservation,
+  runtimeFailures?: RenderRuntimeDiagnostics
 ): DiagnosticConsentObservation {
   const providerCandidates = selection.candidates.slice(0, 8).map((candidate) => ({
     provider: candidate.provider_id,
@@ -397,6 +428,8 @@ function diagnosticObservation(
     control_text_read_error_count: Math.min(20, facts.generic.text_read_diagnostics?.control_text_read_error_count ?? 0),
     dom_text_fallback_used: facts.generic.text_read_diagnostics?.dom_text_fallback_used === true,
     ...(stageDurations ? { capture_stage_durations_ms: { ...stageDurations } } : {}),
+    ...(render ? { render: { ...render } } : {}),
+    ...(runtimeFailures ? { runtime_failures: runtimeFailures } : {}),
     provider_selection: { selected_provider: selection.provider || null, provider_conflict: selection.conflict, candidates: providerCandidates },
     banner: { visibility: banner.visibility, surface: banner.surface }, visible_surfaces: surfaces.slice(0, 12), visible_controls: controls.slice(0, 20),
     ...(selection.provider === 'usercentrics' && facts.usercentrics.runtime_version === 'v2_uc_ui' ? {
@@ -493,9 +526,10 @@ export async function captureSharedConsentObservation(
   diagnostic = false,
   geo: ConsentV2SessionInput['geo'] = 'EU',
   geoInterstitialUnresolved = false,
-  absenceWindowEnabled = true
+  absenceWindowEnabled = true,
+  renderDiagnostics?: ReturnType<typeof attachRenderRuntimeDiagnostics>
 ): Promise<SharedConsentObservation> {
-  const captured = await withConsentObservationStage('ui_readiness', 'captureConsentUiReadySnapshot', () => captureConsentUiReadySnapshot(page, controls, true, diagnostic, geo, 3_500, absenceWindowEnabled));
+  const { captured, render } = await captureConsentWithRenderReadiness(page, controls, true, diagnostic, geo, 3_500, absenceWindowEnabled);
   const { facts, frameworkObservations, contexts, selection } = captured.snapshot;
   const frameworks = await withConsentObservationStage('framework_normalization', 'frameworkStateFromObservations', async () => frameworkStateFromObservations(frameworkObservations));
   const providerOperationsStartedAt = Date.now();
@@ -513,9 +547,9 @@ export async function captureSharedConsentObservation(
         ? { surface: generic.action_plan[0].surface_type, visibility: 'visible' as const, evidence: ['generic_detector_surface'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] }
         : { surface: 'unknown' as const, visibility: 'unknown' as const, evidence: [], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] };
   const actions = selection.provider ? provider.actions : selection.conflict ? [] : generic.actions;
-  return { source: 'shared', provider: selection.provider || (useGeneric ? 'generic' : null), provider_conflict: selection.conflict, banner, actions,
+  return { source: 'shared', provider: selection.provider || (useGeneric ? 'generic' : null), provider_conflict: selection.conflict, banner, actions, render_state: render.render_state,
     us_privacy: await withConsentObservationStage('us_privacy_observation', 'usPrivacyObservation', async () => usPrivacyObservation(geo, facts, frameworkObservations, selection)),
-    ...(diagnostic ? { diagnostic_observation: await withConsentObservationStage('diagnostic_observation', 'diagnosticObservation', async () => diagnosticObservation('shared', 'homepage_shared_observation', facts, frameworkObservations, selection, banner, actions, 'not_recorded', !geoInterstitialUnresolved && captured.readiness.completion !== 'appearance_incomplete', captured.readiness, captured.snapshot.semanticDiscovery, captured.snapshot.diagnosticControlCensus, captured.snapshot.stageDurations, captured.snapshot.usercentricsMainFrameCensus)) } : {}) };
+    ...(diagnostic ? { diagnostic_observation: await withConsentObservationStage('diagnostic_observation', 'diagnosticObservation', async () => diagnosticObservation('shared', 'homepage_shared_observation', facts, frameworkObservations, selection, banner, actions, 'not_recorded', Boolean(selection.provider || useGeneric || render.render_state === 'ready') && !geoInterstitialUnresolved && captured.readiness.completion !== 'appearance_incomplete', captured.readiness, captured.snapshot.semanticDiscovery, captured.snapshot.diagnosticControlCensus, captured.snapshot.stageDurations, captured.snapshot.usercentricsMainFrameCensus, render, renderDiagnostics?.snapshot())) } : {}) };
 }
 
 function available(action: AvailableAction | undefined) {
@@ -535,10 +569,10 @@ export function mergeSharedConsentObservation(
   const provider = providerConflict ? null : freshProvider || shared?.provider || null;
   const freshBanner = fresh.result.banner;
   const sharedVisible = shared?.banner.visibility === 'visible';
-  const sameProviderComplete = Boolean(shared?.provider && freshProvider === shared.provider && fresh.telemetry.session_status === 'completed' && fresh.telemetry.timeline.initial_observation_completed_at !== null);
+  const sameProviderComplete = Boolean(shared?.provider && freshProvider === shared.provider && fresh.telemetry.render_state === 'ready' && fresh.telemetry.session_status === 'completed' && fresh.telemetry.timeline.initial_observation_completed_at !== null);
   const banner = sharedVisible && freshBanner.visibility === 'not_visible' && sameProviderComplete
     ? { surface: 'unknown' as const, visibility: 'unknown' as const, evidence: ['shared_visible_fresh_not_visible'], reason_codes: [ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] }
-    : sharedVisible && (!freshProvider || freshBanner.visibility === 'unknown')
+    : sharedVisible && (fresh.telemetry.render_state !== 'ready' || !freshProvider || freshBanner.visibility === 'unknown')
       ? shared!.banner
       : freshBanner.visibility === 'unknown' && shared
         ? shared.banner
@@ -758,11 +792,11 @@ export function unavailableConsentV2Telemetry(
 
 /** Production composition root. Provider, framework, Shopify, and generic semantics stay in their owning modules. */
 export async function runConsentV2Session(page: Page, input: ConsentV2SessionInput, prepared?: PreparedConsentV2Session): Promise<ConsentV2SessionOutput> {
-  const timings = input.timings || consentTimingValues(); const rollout = input.rollout || consentV2RolloutControls(); const capture = prepared || await prepareConsentV2Session(page); const { ledger, requests, gcm, timeline } = capture;
+  const timings = input.timings || consentTimingValues(); const rollout = input.rollout || consentV2RolloutControls(); const capture = prepared || await prepareConsentV2Session(page, input.diagnostic === true); const { ledger, requests, gcm, timeline } = capture;
   try {
     ledger.append({ phase: 'baseline', source: 'page', family: 'semantic', kind: 'presence', specificity: 'generic', stability: 'stable', provenance: 'browser_api', descriptor: { exists: true } });
     const observedGoogleCommands = new Set<string>();
-    const initialCapture = await withConsentObservationStage('ui_readiness', 'captureConsentUiReadySnapshot', () => captureConsentUiReadySnapshot(page, rollout, !input.access_blocked && rollout.enabled, input.diagnostic === true, input.geo, input.appearance_wait_ms));
+    const { captured: initialCapture, render } = await captureConsentWithRenderReadiness(page, rollout, !input.access_blocked && rollout.enabled, input.diagnostic === true, input.geo, input.appearance_wait_ms ?? 3_500);
     capture.markInitialObservationCompleted();
     const { facts: before, frameworkObservations: initialFrameworkObservations, contexts, selection } = initialCapture.snapshot; observeNewGoogleConsentCommands(gcm, before, observedGoogleCommands);
     let frameworkObservations = initialFrameworkObservations; let frameworks = await withConsentObservationStage('framework_normalization', 'frameworkStateFromObservations', async () => frameworkStateFromObservations(frameworkObservations));
@@ -771,7 +805,7 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
     const baseMechanisms = input.access_blocked || !rollout.enabled ? [] : [...(shopify.mechanism ? [shopify.mechanism] : []), ...providerMechanism(selection.provider), ...(useGeneric && generic.mechanism ? [generic.mechanism] : [])]; const initial = selection.provider ? provider.state : selection.conflict ? unknownState() : shopify.state || provider.state; const banner = selection.provider ? provider.banner : selection.conflict ? { surface: 'unknown' as const, visibility: 'unknown' as const, evidence: [], reason_codes: [ConsentAuditCodes.PROVIDER_CONFLICT, ConsentAuditCodes.BANNER_VISIBILITY_UNKNOWN] } : shopify.banner?.visibility === 'visible' ? shopify.banner : generic.action_plan.length ? { surface: generic.action_plan[0].surface_type, visibility: 'visible' as const, evidence: ['generic_detector_surface'], reason_codes: [ConsentAuditCodes.BANNER_VISIBLE] } : unknownBanner(); const actions = selection.provider ? provider.actions : selection.conflict ? [] : shopify.actions.length ? shopify.actions : generic.actions;
     const providerActionGate = Boolean(input.geo_verified === true && selection.provider && !(selection.provider === 'usercentrics' && selection.conflict) && consentV2ActionsEnabledFor(rollout, selection.provider as ConsentV2RolloutProvider, input.rollout_key || page.url()));
     const blocked = Boolean(input.access_blocked) || !rollout.enabled;
-    if (blocked) { const mechanisms = input.access_blocked || !rollout.enabled ? [] : composeMechanisms(baseMechanisms, frameworkMechanisms(frameworks), googleConsentModeMechanism(gcm.result())); const result = buildResult(input, mechanisms, banner, actions, initial, null, [], { status: 'inconclusive', evidence: [], reason_codes: [ConsentAuditCodes.ACTION_INCONCLUSIVE] }, { status: 'not_applicable', evidence: [], reason_codes: [ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE] }, frameworks, gcm, requests, [input.access_blocked ? ConsentAuditCodes.BLOCKED_OR_CHALLENGED : ConsentAuditCodes.DETECTION_INCONCLUSIVE], initialUSPrivacy); const tracking = checkTrackingConsistency({ rejection_verification: result.rejection_verification, user_choice_at: timeline.user_choice_at, post_reject_observation_completed: false, requests }); const telemetryResult = telemetry(result, tracking, before, generic, frameworkObservations, rollout, undefined, selection.conflict, blocked, false, providerActionGate, timeline, input.geo, capture); return { result, tracking, ledger, telemetry: telemetryResult, google_consent_mode: gcm.result(), ...(input.diagnostic ? { diagnostic_observation: await withConsentObservationStage('diagnostic_observation', 'diagnosticObservation', async () => diagnosticObservation('fresh', 'consent_fresh_observation', before, frameworkObservations, selection, banner, actions, telemetryResult.consent_mode_classification, false, initialCapture.readiness, initialCapture.snapshot.semanticDiscovery, initialCapture.snapshot.diagnosticControlCensus, initialCapture.snapshot.stageDurations, initialCapture.snapshot.usercentricsMainFrameCensus)) } : {}) }; }
+    if (blocked) { const mechanisms = input.access_blocked || !rollout.enabled ? [] : composeMechanisms(baseMechanisms, frameworkMechanisms(frameworks), googleConsentModeMechanism(gcm.result())); const result = buildResult(input, mechanisms, banner, actions, initial, null, [], { status: 'inconclusive', evidence: [], reason_codes: [ConsentAuditCodes.ACTION_INCONCLUSIVE] }, { status: 'not_applicable', evidence: [], reason_codes: [ConsentAuditCodes.PERSISTENCE_NOT_APPLICABLE] }, frameworks, gcm, requests, [input.access_blocked ? ConsentAuditCodes.BLOCKED_OR_CHALLENGED : ConsentAuditCodes.DETECTION_INCONCLUSIVE], initialUSPrivacy); const tracking = checkTrackingConsistency({ rejection_verification: result.rejection_verification, user_choice_at: timeline.user_choice_at, post_reject_observation_completed: false, requests }); const telemetryResult = telemetry(result, tracking, before, generic, frameworkObservations, rollout, undefined, selection.conflict, blocked, false, providerActionGate, timeline, input.geo, capture); telemetryResult.render_state = render.render_state; return { result, tracking, ledger, telemetry: telemetryResult, google_consent_mode: gcm.result(), ...(input.diagnostic ? { diagnostic_observation: await withConsentObservationStage('diagnostic_observation', 'diagnosticObservation', async () => diagnosticObservation('fresh', 'consent_fresh_observation', before, frameworkObservations, selection, banner, actions, telemetryResult.consent_mode_classification, false, initialCapture.readiness, initialCapture.snapshot.semanticDiscovery, initialCapture.snapshot.diagnosticControlCensus, initialCapture.snapshot.stageDurations, initialCapture.snapshot.usercentricsMainFrameCensus, render, capture.render_diagnostics?.snapshot())) } : {}) }; }
     const actionAvailable = actions.some((item) => (item.action === 'reject_all' && ['direct', 'api_only', 'preferences_only'].includes(item.availability)) || (item.action === 'only_necessary' && item.availability === 'direct'));
     let verificationCapability = selection.provider
       ? providerVerificationCapability(selection.provider, provider.state, frameworkObservations, contexts.get(selection.provider))
@@ -845,7 +879,7 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
     const contradiction = hasGcmContradiction(verification, gcm);
     const hasCmpIdentity = baseMechanisms.some((mechanism) => mechanism.mechanism === 'cmp' || mechanism.mechanism === 'custom');
     const finalUSPrivacy = mergeUSPrivacyObservations(initialUSPrivacy, usPrivacyObservation(input.geo, after, frameworkObservations, selection));
-    const absenceEarned = !hasCmpIdentity && cmpAbsenceEarned(input, initialCapture.readiness, before, generic, selection, frameworks);
+    const absenceEarned = !hasCmpIdentity && cmpAbsenceEarned({ ...input, render_state: render.render_state }, initialCapture.readiness, before, generic, selection, frameworks);
     const reasonCodes = [
       ...(hasCmpIdentity ? [] : [absenceEarned ? ConsentAuditCodes.NO_CMP_DETECTED : ConsentAuditCodes.DETECTION_INCONCLUSIVE]),
       ...(input.geo_interstitial_target_unverified ? [ConsentAuditCodes.GEO_INTERSTITIAL_TARGET_UNVERIFIED] : []),
@@ -878,6 +912,7 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
             : before.generic.surfaces.some((surface) => surface.location === 'shadow_dom') ? (initialCapture.readiness.triggered ? 'delayed_open_shadow_web_cmp' : 'open_shadow_web_cmp')
               : 'runtime_without_actionable_banner' } : {})
     });
+    telemetryResult.render_state = render.render_state;
     telemetryResult.consent_appearance_wait_triggered = initialCapture.readiness.reason === 'absence_observation';
     telemetryResult.consent_appearance_wait_ms = initialCapture.readiness.reason === 'absence_observation' ? initialCapture.readiness.elapsed_ms : 0;
     if (initialCapture.readiness.reason === 'absence_observation') {
@@ -889,7 +924,7 @@ export async function runConsentV2Session(page: Page, input: ConsentV2SessionInp
       : initialCapture.readiness.completion === 'appearance_framework_only' ? 'framework_only'
       : initialCapture.readiness.completion === 'appearance_incomplete' ? 'incomplete'
         : initialCapture.readiness.reason === 'absence_observation' ? 'ui_appeared' : 'not_required';
-    return { result, tracking, ledger, telemetry: telemetryResult, google_consent_mode: gcm.result(), ...(input.diagnostic ? { diagnostic_observation: await withConsentObservationStage('diagnostic_observation', 'diagnosticObservation', async () => diagnosticObservation('fresh', 'consent_fresh_observation', before, frameworkObservations, selection, banner, actions, telemetryResult.consent_mode_classification, hasCmpIdentity || absenceEarned, initialCapture.readiness, initialCapture.snapshot.semanticDiscovery, initialCapture.snapshot.diagnosticControlCensus, initialCapture.snapshot.stageDurations, initialCapture.snapshot.usercentricsMainFrameCensus)) } : {}) };
+    return { result, tracking, ledger, telemetry: telemetryResult, google_consent_mode: gcm.result(), ...(input.diagnostic ? { diagnostic_observation: await withConsentObservationStage('diagnostic_observation', 'diagnosticObservation', async () => diagnosticObservation('fresh', 'consent_fresh_observation', before, frameworkObservations, selection, banner, actions, telemetryResult.consent_mode_classification, hasCmpIdentity || absenceEarned, initialCapture.readiness, initialCapture.snapshot.semanticDiscovery, initialCapture.snapshot.diagnosticControlCensus, initialCapture.snapshot.stageDurations, initialCapture.snapshot.usercentricsMainFrameCensus, render, capture.render_diagnostics?.snapshot())) } : {}) };
   } finally { capture.dispose(); }
 }
 

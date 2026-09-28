@@ -31,6 +31,21 @@ function consentEvidence(trackingConsistency: 'consistent' | 'contradiction' | '
 }
 
 describe('Consent V2 canonical replay tracking consistency', () => {
+  it('replays an incomplete rendered page without projecting CMP absence', () => {
+    const evidence = new EvidenceCollector({ auditId: 'render-shell', domain: 'fixture.example', geo: 'EU', mode: 'diagnostic', selectedModules: ['consent'] }).bundle;
+    evidence.page.valid = true;
+    evidence.page.status_code = 200;
+    evidence.page.access_category = 'none';
+    evidence.consent.executed = true;
+    evidence.consent.resolved_provider = 'Not Found';
+    evidence.consent.resolved_provider_evidence = ['NO_CMP_DETECTED'];
+    evidence.runtime.consent_v2 = { enabled: true, render_state: 'incomplete' } as EvidenceBundle['runtime']['consent_v2'];
+    const replayed = replayEvidence(evidence);
+    expect(replayed.cmp_provider).not.toBe('Not Found');
+    expect(replayed.consent_status).toBe('inconclusive');
+    expect(replayEvidence(replayed.evidence_bundle!)).toMatchObject({ cmp_provider: replayed.cmp_provider, consent_status: replayed.consent_status });
+  });
+
   it('REPLAY-CONSENT-V2-545 reproduces the Audit 545 contradiction without a legacy post_reject phase', () => {
     const evidence = consentEvidence('contradiction');
     const replayed = replayEvidence(evidence);

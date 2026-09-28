@@ -157,8 +157,9 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
   const resolvedProvider = evidence.consent.resolved_provider;
   const resolvedIdentity = evidence.consent.executed && resolvedProvider && resolvedProvider !== 'Not Found';
   const detectedIdentity = detectedCmp.provider && detectedCmp.provider !== 'Not Found';
+  const renderIncomplete = evidence.runtime.consent_v2?.enabled === true && evidence.runtime.consent_v2.render_state !== 'ready';
   const resolvedAbsenceComplete = resolvedProvider === 'Not Found' && evidence.consent.executed &&
-    evidence.page.valid === true && !evidence.consent.technical_blocker_reason &&
+    evidence.page.valid === true && !renderIncomplete && !evidence.consent.technical_blocker_reason &&
     evidence.consent.resolved_provider_evidence?.includes('NO_CMP_DETECTED') === true;
   const cmp = consentSelected && resolvedIdentity
     ? { provider: resolvedProvider, confidence: evidence.consent.resolved_provider_confidence || 'medium' as const, evidence: evidence.consent.resolved_provider_evidence || detectedCmp.evidence, banner_visible: detectedCmp.banner_visible, reason_code: resolvedProvider === 'Unknown' ? 'CMP_PROVIDER_UNKNOWN' : 'CMP_PROVIDER_IDENTIFIED' }
@@ -166,7 +167,7 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
       ? detectedCmp
       : consentSelected && resolvedAbsenceComplete
         ? { provider: 'Not Found' as const, confidence: evidence.consent.resolved_provider_confidence || 'medium' as const, evidence: evidence.consent.resolved_provider_evidence || [], banner_visible: detectedCmp.banner_visible, reason_code: 'CMP_NOT_DETECTED' }
-        : consentSelected && resolvedProvider === undefined && evidence.page.valid === true && !evidence.consent.technical_blocker_reason
+        : consentSelected && resolvedProvider === undefined && evidence.page.valid === true && !renderIncomplete && !evidence.consent.technical_blocker_reason
           ? detectedCmp
           : { provider: null as CmpProvider | null, confidence: 'low' as const, evidence: detectedCmp.evidence, banner_visible: detectedCmp.banner_visible, reason_code: consentSelected && evidence.consent.executed && evidence.page.valid === true ? 'CMP_OBSERVATION_INCOMPLETE' : 'CMP_NOT_TESTED' };
 
