@@ -1,7 +1,7 @@
 import { chromium, type Browser } from 'playwright-core';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as builders from './browser-context-builders';
-import { consentObservationFailure, withConsentObservationStage } from './observation-stage';
+import { consentAppearanceIncompleteReason, consentObservationFailure, withConsentObservationStage } from './observation-stage';
 import { captureSharedConsentObservation } from './v2-session';
 
 let browser: Browser;
@@ -10,6 +10,19 @@ afterAll(async () => { await browser?.close(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('bounded Consent observation failures', () => {
+  it.each([
+    ['Execution context was destroyed, most likely because of a navigation.', 'execution_context_destroyed'],
+    ['Frame was detached while navigating the document.', 'navigation_interrupted'],
+    ['Target page, context or browser has been closed', 'page_closed'],
+    ['Browser disconnected from the remote endpoint', 'browser_disconnected'],
+    ['TimeoutError: page.evaluate timeout exceeded', 'evaluation_failed'],
+    ['SCAN_GLOBAL_TIMEOUT', 'global_timeout']
+  ] as const)('normalizes appearance failure without retaining raw browser text: %s', (message, expected) => {
+    const reason = consentAppearanceIncompleteReason(new Error(message));
+    expect(reason).toBe(expected);
+    expect(JSON.stringify({ reason })).not.toContain(message);
+  });
+
   it.each([
     ['OBS-ERR-01', 'captureBrowserConsentFacts', 'browser_facts', 'captureBrowserConsentFacts'],
     ['OBS-ERR-02', 'observeConsentFrameworksInPage', 'framework_observation', 'observeConsentFrameworksInPage'],

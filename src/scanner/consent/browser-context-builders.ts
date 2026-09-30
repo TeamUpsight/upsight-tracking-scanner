@@ -10,7 +10,7 @@ import { observeConsentFrameworks, tcfAggregateDecision, type ConsentFrameworkOb
 import { semanticActionForConsentLabel } from './generic-consent-detector';
 import type { ProviderSemanticDiscovery } from './provider-semantic-controls';
 import type { GpcBrowserSignal } from './domain-types';
-import { BrowserFactsCaptureError, browserFactsPlaywrightErrorFamily, type BrowserFactsErrorFamily, type BrowserFactsSubstage } from './observation-stage';
+import { BrowserFactsCaptureError, browserFactsPlaywrightErrorFamily, consentAppearanceIncompleteReason, type BrowserFactsErrorFamily, type BrowserFactsSubstage, type ConsentAppearanceIncompleteReason, type RecoverableConsentAppearanceInterruption } from './observation-stage';
 
 type BrowserFactsFailureMarker = {
   __upsight_browser_facts_failure: true;
@@ -829,81 +829,123 @@ export interface ConsentAppearanceResult {
   semantic_window_ms: number;
   outer_watchdog_ms: number;
   watchdog_fired: boolean;
+  incomplete_reason: ConsentAppearanceIncompleteReason | null;
+  retry_attempted: boolean;
+  retry_reason: RecoverableConsentAppearanceInterruption | null;
+  retry_ms: number;
 }
 
+export type ConsentAppearanceRetryGuard = (input: {
+  reason: RecoverableConsentAppearanceInterruption;
+  remaining_ms: number;
+}) => Promise<boolean>;
+
 /** An empty first capture cannot prove absence. This is one bounded observation window. */
-export async function waitForConsentAppearance(page: Page, maximumMs = 3_500): Promise<ConsentAppearanceResult> {
+export async function waitForConsentAppearance(page: Page, maximumMs = 3_500, retryGuard?: ConsentAppearanceRetryGuard): Promise<ConsentAppearanceResult> {
   const boundedMs = Math.max(50, Math.min(maximumMs, 4_000));
   // Browserless may deliver a completed page.evaluate after the in-page timer.
   // This allowance does not extend the semantic observation window.
   const outerWatchdogMs = boundedMs + 1_500;
   const started = Date.now();
-  const completed = (result: ConsentAppearanceResult['result'], watchdogFired = false): ConsentAppearanceResult => ({
+  let retryAttempted = false;
+  let retryReason: RecoverableConsentAppearanceInterruption | null = null;
+  let retryStartedAt: number | null = null;
+  const completed = (result: ConsentAppearanceResult['result'], incompleteReason: ConsentAppearanceIncompleteReason | null = null, watchdogFired = false): ConsentAppearanceResult => ({
     result, elapsed_ms: Date.now() - started, semantic_window_ms: boundedMs,
-    outer_watchdog_ms: outerWatchdogMs, watchdog_fired: watchdogFired
+    outer_watchdog_ms: outerWatchdogMs, watchdog_fired: watchdogFired,
+    incomplete_reason: result === 'incomplete' ? incompleteReason || 'unknown' : null,
+    retry_attempted: retryAttempted, retry_reason: retryReason,
+    retry_ms: retryStartedAt === null ? 0 : Math.max(0, Date.now() - retryStartedAt)
   });
+  const runtimeReason = (error: unknown): ConsentAppearanceIncompleteReason => {
+    try {
+      const browser = page.context?.().browser?.();
+      if (browser && !browser.isConnected()) return 'browser_disconnected';
+    } catch { /* The sanitized exception family remains authoritative. */ }
+    try { if (page.isClosed?.()) return 'page_closed'; } catch { /* Ignore state inspection failure. */ }
+    return consentAppearanceIncompleteReason(error);
+  };
+  const observe = (duration: number) => page.evaluate(async (semanticDuration) => {
+    const frameworkPresent = () => {
+      const runtime = window as any;
+      return typeof runtime.__tcfapi === 'function' || typeof runtime.__gpp === 'function' ||
+        typeof runtime.__uspapi === 'function' ||
+        Boolean(runtime.Cookiebot || runtime.OneTrust || runtime.UC_UI || runtime.Didomi || runtime.CookieYes || runtime._sp_) ||
+        Array.from(document.scripts).some((script) => /cookielaw\.org|onetrust|cookiebot|usercentrics|didomi|cookieyes|privacy-mgmt\.com/i.test(script.src));
+    };
+    let unreadableVisibleSurface = false;
+    const uiVisible = () => {
+      const visible = (element: Element | null) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const style = getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
+      };
+      if (['#onetrust-banner-sdk', '#CybotCookiebotDialog', '#usercentrics-cmp-ui', '#didomi-host', '#didomi-notice', '#cookieyes-banner', '#sp_message_container'].some((selector) => visible(document.querySelector(selector)))) return true;
+      const roots: Array<{ root: Document | ShadowRoot; depth: number }> = [{ root: document, depth: 0 }];
+      for (let rootIndex = 0; rootIndex < roots.length && rootIndex < 41; rootIndex += 1) {
+        const { root, depth } = roots[rootIndex];
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        let inspected = 0;
+        for (let node = walker.nextNode(); node && inspected < 600; node = walker.nextNode(), inspected += 1) {
+          const element = node as HTMLElement;
+          if (element.shadowRoot && depth < 4 && roots.length < 41) roots.push({ root: element.shadowRoot, depth: depth + 1 });
+          if (!(element instanceof HTMLElement) || /^(HTML|BODY|MAIN)$/.test(element.tagName)) continue;
+          const marker = `${element.id} ${element.className && typeof element.className === 'string' ? element.className : ''}`;
+          const known = /cookie|consent|privacy|cybot|didomi|usercentrics/i.test(marker) || element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true';
+          if (!known && inspected > 450) continue;
+          if (!visible(element)) continue;
+          const style = getComputedStyle(element);
+          if (!known && style.position !== 'fixed' && style.position !== 'sticky' && !(style.position === 'absolute' && Number.parseInt(style.zIndex, 10) >= 1000)) continue;
+          let text = '';
+          try { text = String(element.textContent || '').slice(0, 1200).toLowerCase(); }
+          catch { unreadableVisibleSurface = true; continue; }
+          if (/cookie|consent|privacy|personal data|personal information/.test(text)) return true;
+        }
+      }
+      return false;
+    };
+    if (uiVisible()) return 'ui_appeared' as const;
+    return await new Promise<'ui_appeared' | 'framework_only' | 'absent' | 'incomplete'>((resolve) => {
+      let done = false;
+      const finish = (value: 'ui_appeared' | 'framework_only' | 'absent' | 'incomplete') => {
+        if (done) return;
+        done = true;
+        observer.disconnect(); clearInterval(poll); clearTimeout(timeout); resolve(value);
+      };
+      const check = () => { if (uiVisible()) finish('ui_appeared'); };
+      const observer = new MutationObserver(check);
+      observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'role', 'aria-modal'] });
+      const poll = window.setInterval(check, 250);
+      const timeout = window.setTimeout(() => finish(uiVisible() ? 'ui_appeared' : unreadableVisibleSurface ? 'incomplete' : frameworkPresent() ? 'framework_only' : 'absent'), semanticDuration);
+    });
+  }, duration);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      page.evaluate(async (duration) => {
-        const frameworkPresent = () => {
-          const runtime = window as any;
-          return typeof runtime.__tcfapi === 'function' || typeof runtime.__gpp === 'function' ||
-            typeof runtime.__uspapi === 'function' ||
-            Boolean(runtime.Cookiebot || runtime.OneTrust || runtime.UC_UI || runtime.Didomi || runtime.CookieYes || runtime._sp_) ||
-            Array.from(document.scripts).some((script) => /cookielaw\.org|onetrust|cookiebot|usercentrics|didomi|cookieyes|privacy-mgmt\.com/i.test(script.src));
-        };
-        let unreadableVisibleSurface = false;
-        const uiVisible = () => {
-          const visible = (element: Element | null) => {
-            if (!(element instanceof HTMLElement)) return false;
-            const style = getComputedStyle(element);
-            const box = element.getBoundingClientRect();
-            return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
-          };
-          if (['#onetrust-banner-sdk', '#CybotCookiebotDialog', '#usercentrics-cmp-ui', '#didomi-host', '#didomi-notice', '#cookieyes-banner', '#sp_message_container'].some((selector) => visible(document.querySelector(selector)))) return true;
-          const roots: Array<{ root: Document | ShadowRoot; depth: number }> = [{ root: document, depth: 0 }];
-          for (let rootIndex = 0; rootIndex < roots.length && rootIndex < 41; rootIndex += 1) {
-            const { root, depth } = roots[rootIndex];
-            const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-            let inspected = 0;
-            for (let node = walker.nextNode(); node && inspected < 600; node = walker.nextNode(), inspected += 1) {
-              const element = node as HTMLElement;
-              if (element.shadowRoot && depth < 4 && roots.length < 41) roots.push({ root: element.shadowRoot, depth: depth + 1 });
-              if (!(element instanceof HTMLElement) || /^(HTML|BODY|MAIN)$/.test(element.tagName)) continue;
-              const marker = `${element.id} ${element.className && typeof element.className === 'string' ? element.className : ''}`;
-              const known = /cookie|consent|privacy|cybot|didomi|usercentrics/i.test(marker) || element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true';
-              if (!known && inspected > 450) continue;
-              if (!visible(element)) continue;
-              const style = getComputedStyle(element);
-              if (!known && style.position !== 'fixed' && style.position !== 'sticky' && !(style.position === 'absolute' && Number.parseInt(style.zIndex, 10) >= 1000)) continue;
-              let text = '';
-              try { text = String(element.textContent || '').slice(0, 1200).toLowerCase(); }
-              catch { unreadableVisibleSurface = true; continue; }
-              if (/cookie|consent|privacy|personal data|personal information/.test(text)) return true;
-            }
-          }
-          return false;
-        };
-        if (uiVisible()) return 'ui_appeared' as const;
-        return await new Promise<'ui_appeared' | 'framework_only' | 'absent' | 'incomplete'>((resolve) => {
-          let done = false;
-          const finish = (value: 'ui_appeared' | 'framework_only' | 'absent' | 'incomplete') => {
-            if (done) return;
-            done = true;
-            observer.disconnect(); clearInterval(poll); clearTimeout(timeout); resolve(value);
-          };
-          const check = () => { if (uiVisible()) finish('ui_appeared'); };
-          const observer = new MutationObserver(check);
-          observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'role', 'aria-modal'] });
-          const poll = window.setInterval(check, 250);
-          const timeout = window.setTimeout(() => finish(uiVisible() ? 'ui_appeared' : unreadableVisibleSurface ? 'incomplete' : frameworkPresent() ? 'framework_only' : 'absent'), duration);
-        });
-      }, boundedMs).then((result) => completed(result)),
-      new Promise<ConsentAppearanceResult>((resolve) => { timer = setTimeout(() => resolve(completed('incomplete', true)), outerWatchdogMs); })
+      (async () => {
+        try {
+          return completed(await observe(boundedMs));
+        } catch (error) {
+          const reason = runtimeReason(error);
+          const recoverable = reason === 'execution_context_destroyed' || reason === 'navigation_interrupted' ? reason : null;
+          const remainingBeforeGuard = Math.max(0, boundedMs - (Date.now() - started));
+          if (!recoverable || !retryGuard || remainingBeforeGuard < 50) return completed('incomplete', reason);
+          let allowed = false;
+          try { allowed = await retryGuard({ reason: recoverable, remaining_ms: remainingBeforeGuard }); } catch { allowed = false; }
+          const remaining = Math.max(0, boundedMs - (Date.now() - started));
+          if (!allowed || remaining < 50) return completed('incomplete', reason);
+          retryAttempted = true;
+          retryReason = recoverable;
+          retryStartedAt = Date.now();
+          try { return completed(await observe(remaining)); }
+          catch (retryError) { return completed('incomplete', runtimeReason(retryError)); }
+        }
+      })(),
+      new Promise<ConsentAppearanceResult>((resolve) => { timer = setTimeout(() => resolve(completed('incomplete', 'outer_watchdog', true)), outerWatchdogMs); })
     ]);
-  } catch {
-    return completed('incomplete');
+  } catch (error) {
+    return completed('incomplete', runtimeReason(error));
   } finally {
     if (timer) clearTimeout(timer);
   }

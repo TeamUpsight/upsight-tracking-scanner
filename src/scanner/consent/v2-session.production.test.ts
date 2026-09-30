@@ -84,6 +84,42 @@ async function auditNavigation(html: string, accessBlocked = false, sessionInput
   }
 }
 
+async function auditAppearanceReplacement(afterHtml: string) {
+  const server = createServer((request, response) => {
+    const path = new URL(request.url || '/', 'http://127.0.0.1').pathname;
+    const html = path === '/after' ? afterHtml
+      : '<title>Initial shop</title><main>Ordinary storefront content.</main><script>window.dataLayer=[["consent","default",{ad_storage:"denied",analytics_storage:"denied"}]];setTimeout(()=>location.replace("/after"),500)</script>';
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); response.end(html);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Appearance replacement fixture did not expose a TCP port.');
+  const origin = `http://127.0.0.1:${address.port}`;
+  const page = await browser.newPage();
+  try {
+    const capture = await prepareConsentV2Session(page, true);
+    capture.markNavigationStarted();
+    await page.goto(`${origin}/start`, { waitUntil: 'domcontentloaded' });
+    capture.markDOMContentLoaded();
+    return await runConsentV2Session(page, {
+      ...input,
+      diagnostic: true,
+      appearance_wait_ms: 1_200,
+      appearance_retry_guard: async ({ remaining_ms }) => {
+        await page.waitForTimeout(Math.min(100, Math.max(0, remaining_ms - 50))).catch(() => {});
+        await page.waitForLoadState('domcontentloaded', { timeout: Math.min(400, remaining_ms) }).catch(() => {});
+        if (page.isClosed() || !page.context().browser()?.isConnected()) return false;
+        const current = new URL(page.url());
+        return current.origin === origin && current.pathname === '/after' &&
+          await page.evaluate(() => document.readyState !== 'loading' && Boolean(document.body));
+      }
+    }, capture);
+  } finally {
+    await page.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
 /** Local Congstar-shaped v2 fixture. No public website or Usercentrics CDN is contacted. */
 function usercentricsV2Fixture(options: { event?: 'DENY_ALL' | 'ACCEPT_ALL' | 'SAVE' | 'CMP_SHOWN' | null; preActionEvent?: boolean; tcf?: 'pre' | 'post'; after?: 'rejected' | 'accepted' | 'partial'; resetOnReload?: boolean; missingApi?: boolean; throwOnRead?: boolean; malformed?: boolean; v3?: boolean } = {}) {
   const { event = 'DENY_ALL', preActionEvent = false, tcf, after = 'rejected', resetOnReload = false, missingApi = false, throwOnRead = false, malformed = false, v3 = false } = options;
@@ -176,6 +212,36 @@ async function auditSourcepoint(preferences = false, contradictory = false) {
 
 describe('Consent V2 production session wiring', () => {
   const usaInput: ConsentV2SessionInput = { ...input, geo: 'USA' };
+
+  it('retries one same-origin execution-context replacement and retains a newly visible custom banner', async () => {
+    const result = await auditAppearanceReplacement('<title>Settled shop</title><main>Products are ready.</main><div class="privacy-choice" role="dialog" style="position:fixed;width:480px;height:180px;background:white">Cookie and privacy choices <button>Accept All</button><button>Reject All</button></div>');
+    expect(result.telemetry).toMatchObject({
+      consent_appearance_wait_result: 'ui_appeared',
+      consent_appearance_incomplete_reason: null,
+      consent_appearance_retry_attempted: true
+    });
+    expect(['execution_context_destroyed', 'navigation_interrupted']).toContain(result.telemetry.consent_appearance_retry_reason);
+    expect(result.telemetry.consent_appearance_wait_ms).toBeLessThan(1_500);
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.mechanisms).toEqual(expect.arrayContaining([expect.objectContaining({ mechanism: 'custom' })]));
+    expect(result.google_consent_mode.commands.some((command) => command.command === 'default')).toBe(true);
+    expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+  }, 15_000);
+
+  it('uses the remaining semantic budget after replacement and completes framework-only', async () => {
+    const result = await auditAppearanceReplacement('<title>Settled shop</title><main>Products are ready.</main><script>window.__tcfapi=function(){};window.__gpp=function(){};</script>');
+    expect(result.telemetry).toMatchObject({
+      consent_appearance_wait_result: 'framework_only',
+      consent_appearance_incomplete_reason: null,
+      consent_appearance_retry_attempted: true
+    });
+    expect(['execution_context_destroyed', 'navigation_interrupted']).toContain(result.telemetry.consent_appearance_retry_reason);
+    expect(result.telemetry.consent_appearance_wait_ms).toBeGreaterThanOrEqual(900);
+    expect(result.telemetry.consent_appearance_wait_ms).toBeLessThan(1_500);
+    expect(result.result.frameworks.tcf).not.toBe('not_present');
+    expect(result.result.frameworks.gpp).not.toBe('not_present');
+    expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+  }, 15_000);
 
   it('WP12A-US-01 classifies an Issuu-style Cookiebot control as sale/share opt-out without inventing reject all', async () => {
     const result = await audit(`<script>window.Cookiebot={hasResponse:false,consented:false,declined:false,consent:{preferences:null,statistics:null,marketing:null}};</script>

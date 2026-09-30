@@ -48,8 +48,39 @@ describe('Consent Detection P0 browser fixtures', () => {
   it('marks a genuinely hung evaluate incomplete at the outer watchdog', async () => {
     const hungPage = { evaluate: () => new Promise(() => {}) } as unknown as Page;
     const result = await waitForConsentAppearance(hungPage, 50);
-    expect(result).toMatchObject({ result: 'incomplete', semantic_window_ms: 50, outer_watchdog_ms: 1_550, watchdog_fired: true });
+    expect(result).toMatchObject({ result: 'incomplete', semantic_window_ms: 50, outer_watchdog_ms: 1_550, watchdog_fired: true,
+      incomplete_reason: 'outer_watchdog', retry_attempted: false, retry_reason: null, retry_ms: 0 });
     expect(result.elapsed_ms).toBeGreaterThanOrEqual(1_500);
+  });
+
+  it('does not retry a closed page and records only the bounded reason', async () => {
+    const page = await browser.newPage();
+    let guardCalls = 0;
+    try {
+      await page.setContent('<main>Ordinary shop content</main>');
+      const pending = waitForConsentAppearance(page, 400, async () => { guardCalls += 1; return true; });
+      setTimeout(() => { void page.close(); }, 60);
+      const result = await pending;
+      expect(result).toMatchObject({ result: 'incomplete', incomplete_reason: 'page_closed', retry_attempted: false, retry_reason: null, retry_ms: 0 });
+      expect(guardCalls).toBe(0);
+      expect(JSON.stringify(result)).not.toMatch(/Target|closed while|Protocol error/);
+    } finally {
+      if (!page.isClosed()) await page.close();
+    }
+  });
+
+  it('does not retry a recoverable error when the authoritative-page guard rejects it', async () => {
+    let evaluations = 0;
+    let guardCalls = 0;
+    const replacedPage = {
+      evaluate: async () => { evaluations += 1; throw new Error('Execution context was destroyed, most likely because of a navigation.'); },
+      isClosed: () => false,
+      context: () => ({ browser: () => ({ isConnected: () => true }) })
+    } as unknown as Page;
+    const result = await waitForConsentAppearance(replacedPage, 300, async () => { guardCalls += 1; return false; });
+    expect(result).toMatchObject({ result: 'incomplete', incomplete_reason: 'execution_context_destroyed', retry_attempted: false });
+    expect(evaluations).toBe(1);
+    expect(guardCalls).toBe(1);
   });
   it('never earns absence from an initial empty capture before the appearance window completes', () => {
     const capture = { completion: 'skipped' } as Parameters<typeof cmpAbsenceEarned>[1];

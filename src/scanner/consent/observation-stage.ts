@@ -33,6 +33,14 @@ export type BrowserFactsErrorFamily =
   | 'serialization_error' | 'execution_context_destroyed'
   | 'navigation_interrupted' | 'page_closed' | 'other';
 
+export type ConsentAppearanceIncompleteReason =
+  | 'execution_context_destroyed' | 'navigation_interrupted' | 'page_closed'
+  | 'browser_disconnected' | 'evaluation_failed' | 'outer_watchdog'
+  | 'global_timeout' | 'unknown';
+
+export type RecoverableConsentAppearanceInterruption =
+  Extract<ConsentAppearanceIncompleteReason, 'execution_context_destroyed' | 'navigation_interrupted'>;
+
 /** A safe replacement for browser/Playwright exceptions that may contain page data. */
 export class BrowserFactsCaptureError extends Error {
   constructor(readonly browser_facts_substage: BrowserFactsSubstage, readonly error_family: BrowserFactsErrorFamily) {
@@ -49,6 +57,18 @@ export function browserFactsPlaywrightErrorFamily(error: unknown): BrowserFactsE
   if (/Navigation failed|navigation interrupted|net::ERR_ABORTED/i.test(message)) return 'navigation_interrupted';
   if (/serialization|could not be cloned|Object reference chain is too long/i.test(message)) return 'serialization_error';
   return 'other';
+}
+
+/** Reduces browser evaluation failures to a bounded family; raw messages never escape. */
+export function consentAppearanceIncompleteReason(error: unknown): ConsentAppearanceIncompleteReason {
+  const message = error instanceof Error ? `${error.name} ${error.message}` : '';
+  if (/Execution context was destroyed|Cannot find context with specified id|context was destroyed/i.test(message)) return 'execution_context_destroyed';
+  if (/frame was detached|detached frame|navigation interrupted|document (?:was )?replaced|net::ERR_ABORTED/i.test(message)) return 'navigation_interrupted';
+  if (/browser (?:has been )?disconnected|browser disconnected|browser closed|connection closed/i.test(message)) return 'browser_disconnected';
+  if (/Target page, context or browser has been closed|Target closed|Page closed|context closed/i.test(message)) return 'page_closed';
+  if (/SCAN_GLOBAL_TIMEOUT|global (?:audit )?timeout|global deadline/i.test(message)) return 'global_timeout';
+  if (/TimeoutError|timeout .* exceeded|timed out|evaluation failed|Protocol error/i.test(message)) return 'evaluation_failed';
+  return error instanceof Error ? 'evaluation_failed' : 'unknown';
 }
 
 const failureMarker = Symbol('consentObservationFailure');

@@ -37,7 +37,7 @@ import { captureBrowserConsentFacts, installConsentCommandBootstrap } from './co
 import { resolveGeoInterstitial, type GeoInterstitialDecision } from './consent/geo-interstitial';
 import { certificationSafeConsentV2RolloutControls, consentV2RolloutControls, legacyAcceptActionEnabled } from './consent/rollout-controls';
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
-import { attachRenderRuntimeDiagnostics } from './consent/render-readiness';
+import { attachRenderRuntimeDiagnostics, observeRenderedPage } from './consent/render-readiness';
 import { consentObservationFailure } from './consent/observation-stage';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { PageProvenanceTracker } from './tracking/page-provenance';
@@ -1381,7 +1381,12 @@ export async function runStorefrontAudit(
       banner_visibility: sharedConsentObservation.banner.visibility,
       accept_available: sharedConsentObservation.actions.some((item) => item.action === 'accept_all' && item.availability !== 'not_present' && item.availability !== 'unknown'),
       reject_available: sharedConsentObservation.actions.some((item) => (item.action === 'reject_all' || item.action === 'only_necessary') && item.availability !== 'not_present' && item.availability !== 'unknown'),
-      preferences_available: sharedConsentObservation.actions.some((item) => item.action === 'open_preferences' && item.availability !== 'not_present' && item.availability !== 'unknown')
+      preferences_available: sharedConsentObservation.actions.some((item) => item.action === 'open_preferences' && item.availability !== 'not_present' && item.availability !== 'unknown'),
+      consent_appearance_wait_result: sharedConsentObservation.appearance_wait_result || 'not_required',
+      consent_appearance_incomplete_reason: sharedConsentObservation.appearance_incomplete_reason || null,
+      consent_appearance_retry_attempted: sharedConsentObservation.appearance_retry_attempted === true,
+      consent_appearance_retry_reason: sharedConsentObservation.appearance_retry_reason || null,
+      consent_appearance_retry_ms: sharedConsentObservation.appearance_retry_ms || 0
     } : undefined;
     evidence.runtime.consent_v2 = telemetry;
     evidence.consent.executed = true;
@@ -1928,11 +1933,16 @@ export async function runStorefrontAudit(
       observedCountry = actualCountry;
       if (actualCountry !== requestedCountry) {
         evidence.runtime.actual_egress_country = actualCountry;
+        evidence.runtime.country_matches_requested_geo = actualCountry ? countryMatchesRequestedGeo(geo, actualCountry) : null;
         evidence.runtime.exact_country_match = false;
         evidence.runtime.proxy_country_verified = false;
         addTrace('fresh_exact_country_mismatch', { requested_country: requestedCountry, actual_egress_country: actualCountry });
         throw new Error('Fresh Consent context exact-country verification failed');
       }
+      evidence.runtime.actual_egress_country = actualCountry;
+      evidence.runtime.country_matches_requested_geo = countryMatchesRequestedGeo(geo, actualCountry);
+      evidence.runtime.exact_country_match = true;
+      evidence.runtime.proxy_country_verified = evidence.runtime.country_matches_requested_geo === true;
       addTrace('fresh_exact_country_verified', { requested_country: requestedCountry, actual_egress_country: actualCountry });
     } catch (error) {
       if (!observedCountry) evidence.runtime.actual_egress_country = null;
@@ -2640,6 +2650,31 @@ export async function runStorefrontAudit(
         return false;
       }
     };
+    const consentAppearanceRetryGuard = (page: Page, authorityHost: string) => async ({ remaining_ms }: { remaining_ms: number }) => {
+      const startedAt = Date.now();
+      const authoritativePageAvailable = () => {
+        if (page.isClosed()) return false;
+        const owningBrowser = page.context().browser();
+        if (!owningBrowser?.isConnected()) return false;
+        try {
+          const currentUrl = new URL(page.url());
+          return isPublicWebUrl(currentUrl.toString()) && !isNonStorefrontUrl(currentUrl.toString()) &&
+            isSafeCanonicalRedirect(authorityHost, currentUrl.hostname);
+        } catch { return false; }
+      };
+      if (!authoritativePageAvailable()) return false;
+      const replacementSettleMs = Math.min(100, Math.max(0, remaining_ms - 50));
+      if (replacementSettleMs > 0) await page.waitForTimeout(replacementSettleMs).catch(() => {});
+      const loadAllowance = Math.min(500, Math.max(0, remaining_ms - (Date.now() - startedAt) - 50));
+      if (loadAllowance > 0) await page.waitForLoadState('domcontentloaded', { timeout: loadAllowance }).catch(() => {});
+      if (!authoritativePageAvailable()) return false;
+      const access = await inspectPageAccess(page, null);
+      if (consentNavigationReadiness(access).status !== 'ready' || !authoritativePageAvailable()) return false;
+      const remaining = Math.max(0, remaining_ms - (Date.now() - startedAt));
+      if (remaining < 50) return false;
+      const render = await observeRenderedPage(page, Math.min(750, remaining));
+      return render.render_state === 'ready' && authoritativePageAvailable();
+    };
     // Consent owns an early, page-bound evidence task. It shares the existing
     // homepage settle window with Tracking, but no longer waits for Tracking,
     // CMS, or installation capture to finish.
@@ -2651,7 +2686,7 @@ export async function runStorefrontAudit(
           await wait(HOMEPAGE_OBSERVATION_MS, authoritativeHomepagePage);
           const captureStartedAt = Date.now();
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
-          const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic', geo, geoUnresolved, true, sharedRenderDiagnostics || undefined);
+          const observed = await captureSharedConsentObservation(authoritativeHomepagePage, consentV2Controls, evidence.mode === 'diagnostic', geo, geoUnresolved, true, sharedRenderDiagnostics || undefined, consentAppearanceRetryGuard(authoritativeHomepagePage, finalHost));
           if (!authoritativeHomepageAvailable()) throw new Error('SHARED_CONSENT_AUTHORITATIVE_PAGE_UNAVAILABLE');
           sharedConsentObservation = observed;
           sharedConsentObservationStatus = 'completed';
@@ -2676,6 +2711,11 @@ export async function runStorefrontAudit(
             action_count: observed.actions.filter((action) => action.availability !== 'not_present' && action.availability !== 'unknown').length,
             homepage_settle_ms: captureStartedAt - boundaryStartedAt,
             consent_capture_ms: Date.now() - captureStartedAt,
+            consent_appearance_wait_result: observed.appearance_wait_result,
+            consent_appearance_incomplete_reason: observed.appearance_incomplete_reason,
+            consent_appearance_retry_attempted: observed.appearance_retry_attempted,
+            consent_appearance_retry_reason: observed.appearance_retry_reason,
+            consent_appearance_retry_ms: observed.appearance_retry_ms,
             capture_stage_durations_ms: observed.diagnostic_observation?.capture_stage_durations_ms || null
           }, { module: 'consent', severity: 'info' });
         } catch (error) {
@@ -2762,12 +2802,13 @@ export async function runStorefrontAudit(
         freshConsentFailureStage = readiness.status === 'ready' ? 'consent_observation' : 'challenge_detection';
         consentV2 = await runConsentV2Session(consentHomepage, {
           geo,
-          geo_verified: freshConsent.geo.verified,
+          geo_verified: requestedCountry ? evidence.runtime.proxy_country_verified : freshConsent.geo.verified,
           page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
           timings: consentTimings,
           rollout: consentV2Controls,
           access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic', geo_interstitial_unresolved: freshGeoIncomplete,
-          geo_interstitial_target_unverified: geoTargetUnverified
+          geo_interstitial_target_unverified: geoTargetUnverified,
+          appearance_retry_guard: consentAppearanceRetryGuard(consentHomepage, finalHost)
         }, consentCapture);
         consentV2Ran = true;
         evidence.runtime.consent_v2 = consentV2.telemetry;
@@ -3688,10 +3729,11 @@ export async function runStorefrontAudit(
           const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
           const readiness = consentNavigationReadiness(consentAccess);
           consentV2 = await withinPhaseBudget('consent_pdp_reject', Math.min(available, 15_000), () => runConsentV2Session(consentHomepage!, {
-            geo, geo_verified: freshConsent.geo.verified,
+            geo, geo_verified: requestedCountry ? evidence.runtime.proxy_country_verified : freshConsent.geo.verified,
             page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
             timings: consentTimings, rollout: consentV2Controls, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic', geo_interstitial_unresolved: freshGeoIncomplete,
             geo_interstitial_target_unverified: geoTargetUnverified,
+            appearance_retry_guard: consentAppearanceRetryGuard(consentHomepage!, finalHost),
             rollout_key: normalizedDomain
           }, consentCapture!));
           consentV2Ran = true;

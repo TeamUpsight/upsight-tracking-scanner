@@ -137,7 +137,11 @@ async function browserlessRoutingFixture(modules: Array<'consent' | 'tracking' |
   return { result: updates.at(-1) as StorefrontAudit, cdpUrls: cdpUrls.map((url) => new URL(url)) };
 }
 
-async function exactCountryFixture(egressCountries: string[]) {
+async function exactCountryFixture(
+  egressCountries: Array<string | null>,
+  storefront: (path: string) => FixtureRoute = () => '<title>Fixture shop</title><main>Products</main><script>window.__tcfapi=function(){};window.__gpp=function(){};</script>',
+  scanMode: 'normal' | 'diagnostic' = 'normal'
+) {
   vi.stubEnv('BROWSER_PROVIDER', 'browserless');
   vi.stubEnv('BROWSERLESS_TOKEN', 'fixture-token');
   vi.stubEnv('DECODO_PROXY_EU', 'http://fixture-user:fixture-password@gate.decodo.com:7000');
@@ -146,9 +150,12 @@ async function exactCountryFixture(egressCountries: string[]) {
   let probeCount = 0;
   let storefrontRequests = 0;
   const fixture = await fixtureServer(200, (path) => {
-    if (path === '/geo') return { status: 200, body: JSON.stringify({ country_code: egressCountries[Math.min(probeCount++, egressCountries.length - 1)] }) };
+    if (path === '/geo') {
+      const country = egressCountries[Math.min(probeCount++, egressCountries.length - 1)];
+      return country ? { status: 200, body: JSON.stringify({ country_code: country }) } : { status: 502, body: '{}' };
+    }
     storefrontRequests += 1;
-    return '<title>Fixture shop</title><main>Products</main><script>window.__tcfapi=function(){};window.__gpp=function(){};</script>';
+    return storefront(path);
   });
   vi.stubEnv('PROXY_EGRESS_PROBE_URL', new URL('/geo', fixture.url).toString());
   const cdpUrls: URL[] = [];
@@ -160,7 +167,7 @@ async function exactCountryFixture(egressCountries: string[]) {
   const updates: Array<Partial<StorefrontAudit>> = [];
   try {
     await runStorefrontAudit({ audit_id: 'exact-country-fixture', domain: 'fixture.example', tested_geos: 'EU',
-      tested_country: 'DE', selected_modules: ['consent'], scan_mode: 'normal' },
+      tested_country: 'DE', selected_modules: ['consent'], scan_mode: scanMode },
     async (update) => { updates.push(update); }, { storefrontUrl: fixture.url, resolveHostname: resolvedFixtureHost });
   } finally {
     connect.mockRestore();
@@ -213,6 +220,36 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(result.cmp_provider).not.toBe('Not Found');
     expect(result.evidence_bundle?.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
   }, 45_000);
+
+  it('recovers exact DE state and retries one interrupted fresh appearance observation', async () => {
+    const banner = '<title>Settled shop</title><main>Products are ready for purchase.</main><div class="consent-surface" role="dialog" style="position:fixed;width:480px;height:180px;background:white">Cookie and privacy choices <button>Accept All</button><button>Reject All</button></div>';
+    const replacingStorefront = (path: string) => path === '/settled' ? banner
+      : `<title>Loading shop</title><main>Products are loading.</main><script>setTimeout(()=>location.replace('/settled'),5500)</script>`;
+    const { result, probeCount } = await exactCountryFixture(['DE', null, 'DE'], replacingStorefront, 'diagnostic');
+    const runtime = result.evidence_bundle?.runtime;
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+
+    expect(probeCount).toBeGreaterThanOrEqual(3);
+    expect(runtime).toMatchObject({
+      requested_country: 'DE', actual_egress_country: 'DE', country_matches_requested_geo: true,
+      exact_country_match: true, proxy_country_verified: true,
+      consent_v2: {
+        geo_unverified: false,
+        consent_appearance_wait_result: 'ui_appeared',
+        consent_appearance_incomplete_reason: null,
+        consent_appearance_retry_attempted: true,
+        shared_observation: {
+          consent_appearance_wait_result: 'ui_appeared',
+          consent_appearance_incomplete_reason: null,
+          consent_appearance_retry_attempted: true
+        }
+      }
+    });
+    expect(['execution_context_destroyed', 'navigation_interrupted']).toContain(runtime?.consent_v2?.consent_appearance_retry_reason);
+    expect(result.evidence_bundle?.consent.resolved_provider_evidence || []).not.toEqual(expect.arrayContaining(['GEO_UNVERIFIED', 'NO_CMP_DETECTED']));
+    expect(trace.some((step) => step.step === 'consent_fresh_navigation_inconclusive')).toBe(true);
+    expect(trace.some((step) => step.step === 'fresh_exact_country_verified')).toBe(true);
+  }, 60_000);
   it.each([
     ['Consent only', ['consent']],
     ['Consent, Tracking, Server', ['consent', 'tracking', 'server_side']]

@@ -206,7 +206,7 @@ export interface EvidenceBundle {
       control_text_read_error_count?: number;
       dom_text_fallback_used?: boolean;
       capture_stage_durations_ms?: { browser_facts: number; framework_observation: number; provider_context: number; provider_selection: number; provider_operations: number; semantic_discovery: number; ui_readiness: number; accessibility_census: number; total: number };
-      readiness?: { triggered: boolean; reason: string | null; started_at_ms: number | null; completed_at_ms: number | null; elapsed_ms: number; semantic_window_ms?: number; outer_watchdog_ms?: number; watchdog_fired?: boolean; completion: 'positive_ui_ready' | 'timeout' | 'skipped' | 'appearance_framework_only' | 'appearance_absent' | 'appearance_incomplete'; initial: { provider_count: number; strong_surface_count: number; semantic_control_count: number }; final: { provider_count: number; strong_surface_count: number; semantic_control_count: number; open_shadow_roots: number; provider_root_visible: boolean }; reason_codes: string[] };
+      readiness?: { triggered: boolean; reason: string | null; started_at_ms: number | null; completed_at_ms: number | null; elapsed_ms: number; semantic_window_ms?: number; outer_watchdog_ms?: number; watchdog_fired?: boolean; incomplete_reason?: import('./scanner/consent/observation-stage').ConsentAppearanceIncompleteReason | null; retry_attempted?: boolean; retry_reason?: import('./scanner/consent/observation-stage').RecoverableConsentAppearanceInterruption | null; retry_ms?: number; completion: 'positive_ui_ready' | 'timeout' | 'skipped' | 'appearance_framework_only' | 'appearance_absent' | 'appearance_incomplete'; initial: { provider_count: number; strong_surface_count: number; semantic_control_count: number }; final: { provider_count: number; strong_surface_count: number; semantic_control_count: number; open_shadow_roots: number; provider_root_visible: boolean }; reason_codes: string[] };
       provider_selection: {
         selected_provider: string | null;
         provider_conflict: boolean;
@@ -508,6 +508,10 @@ export interface EvidenceBundle {
       consent_appearance_outer_watchdog_ms?: number;
       consent_appearance_watchdog_fired?: boolean;
       consent_appearance_wait_result?: 'ui_appeared' | 'framework_only' | 'absent' | 'incomplete' | 'not_required';
+      consent_appearance_incomplete_reason?: import('./scanner/consent/observation-stage').ConsentAppearanceIncompleteReason | null;
+      consent_appearance_retry_attempted?: boolean;
+      consent_appearance_retry_reason?: import('./scanner/consent/observation-stage').RecoverableConsentAppearanceInterruption | null;
+      consent_appearance_retry_ms?: number;
       /** Bounded passive homepage facts, retained separately from fresh-session completion. */
       shared_observation?: {
         render_state?: import('./scanner/consent/render-readiness').RenderState;
@@ -518,6 +522,11 @@ export interface EvidenceBundle {
         accept_available: boolean;
         reject_available: boolean;
         preferences_available: boolean;
+        consent_appearance_wait_result?: 'ui_appeared' | 'framework_only' | 'absent' | 'incomplete' | 'not_required';
+        consent_appearance_incomplete_reason?: import('./scanner/consent/observation-stage').ConsentAppearanceIncompleteReason | null;
+        consent_appearance_retry_attempted?: boolean;
+        consent_appearance_retry_reason?: import('./scanner/consent/observation-stage').RecoverableConsentAppearanceInterruption | null;
+        consent_appearance_retry_ms?: number;
       };
       enabled: boolean;
       observation_only: boolean;
