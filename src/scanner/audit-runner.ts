@@ -230,6 +230,20 @@ export function diagnosticScreenshotDeltaMs(observationCapturedAt: number, scree
   return screenshotCapturedAt === null ? null : screenshotCapturedAt - observationCapturedAt;
 }
 
+export function freshConsentDiagnosticScreenshotEligible(observation: { observation_complete: boolean } | undefined) {
+  return observation?.observation_complete === true;
+}
+
+export function freshConsentDetectionTraceStep(
+  navigationReady: boolean,
+  provider: CmpProvider | null,
+  reasonCodes: readonly string[]
+) {
+  if (!navigationReady) return 'consent_fresh_navigation_blocked_or_challenged';
+  if (provider && provider !== 'Not Found') return 'cmp_provider_detected';
+  return reasonCodes.includes('NO_CMP_DETECTED') ? 'cmp_not_found' : 'cmp_detection_inconclusive';
+}
+
 export function parseEgressCountry(payload: Record<string, unknown>) {
   const country = payload.country && typeof payload.country === 'object'
     ? payload.country as Record<string, unknown>
@@ -1426,7 +1440,7 @@ export async function runStorefrontAudit(
     let screenshotName: string | null = null;
     let screenshotCapturedAt: number | null = null;
     try {
-      if (!result.diagnostic_observation.observation_complete) throw new Error('incomplete diagnostic observation');
+      if (!freshConsentDiagnosticScreenshotEligible(result.diagnostic_observation)) throw new Error('incomplete diagnostic observation');
       const image = await page.screenshot({ type: 'jpeg', quality: 55, fullPage: false, timeout: 1_500 });
       const capturedAt = Date.now();
       evidenceCollector.addScreenshot({ name: 'consent-fresh.jpg', mime_type: 'image/jpeg', content_base64: image.toString('base64') });
@@ -2821,7 +2835,7 @@ export async function runStorefrontAudit(
           banner_visible: consentV2.result.banner.visibility === 'visible',
           reason_code: consentV2.result.reason_codes[0] || 'DETECTION_INCONCLUSIVE'
         };
-        addTrace(readiness.status !== 'ready' ? 'consent_fresh_navigation_blocked_or_challenged' : compatibility.cmp_provider ? 'cmp_provider_detected' : 'cmp_not_found', {
+        addTrace(freshConsentDetectionTraceStep(readiness.status === 'ready', compatibility.cmp_provider, evidence.consent.resolved_provider_evidence || []), {
           provider: compatibility.cmp_provider,
           reason_codes: consentV2.result.reason_codes,
           access_reason_code: readiness.status !== 'ready' ? consentAccess.reasonCode : null
@@ -3740,7 +3754,7 @@ export async function runStorefrontAudit(
           evidence.runtime.consent_v2 = consentV2.telemetry;
           await recordFreshConsentDiagnostic(consentV2, consentHomepage!);
           const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
-          addTrace(readiness.status !== 'ready' ? 'consent_fresh_navigation_blocked_or_challenged' : compatibility.cmp_provider ? 'cmp_provider_detected' : 'cmp_not_found', {
+          addTrace(freshConsentDetectionTraceStep(readiness.status === 'ready', compatibility.cmp_provider, evidence.consent.resolved_provider_evidence || []), {
             provider: compatibility.cmp_provider, reason_codes: consentV2.result.reason_codes
           });
           addTrace('consent_v2_session_completed', { target_type: confirmedPdpUrl ? 'pdp' : 'homepage', pdp_url: safeUrl(consentTarget), provider: compatibility.cmp_provider, action_attempted: evidence.consent.interaction_attempted, rejection_verified: evidence.consent.rejection_verified, reason_codes: consentV2.result.reason_codes }, { module: 'consent', severity: 'info' });

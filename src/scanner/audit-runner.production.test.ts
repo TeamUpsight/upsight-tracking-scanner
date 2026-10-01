@@ -2,12 +2,13 @@ import { createServer, type Server } from 'node:http';
 import { chromium } from 'playwright-core';
 import type { Page } from 'playwright-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { diagnosticScreenshotDeltaMs, runStorefrontAudit, type AuditRunnerDependencies } from './audit-runner';
+import { diagnosticScreenshotDeltaMs, freshConsentDetectionTraceStep, freshConsentDiagnosticScreenshotEligible, runStorefrontAudit, type AuditRunnerDependencies } from './audit-runner';
 import type { StorefrontAudit } from '../types';
 import { buildDebugPackageFiles } from './quality/debug-package';
 import { compareGpcObservations } from './consent/gpc-experiment';
 import { isRequestForPdp } from './tracking/pdp-association';
 import { EvidenceCollector } from './evidence/evidence-collector';
+import { replayEvidence } from './quality/replay';
 
 // Most runner fixtures exercise compiled-production action wiring with a local
 // browser. One focused case switches to direct source provenance to prove the
@@ -197,6 +198,33 @@ describe('runStorefrontAudit production browser wiring', () => {
       proxy_country_verified: true, consent_v2: { consent_appearance_wait_result: 'framework_only', consent_appearance_watchdog_fired: false } });
     expect(result.evidence_bundle?.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
     expect(JSON.parse(String(result.trace_steps)).filter((step: { step: string }) => step.step === 'exact_country_mismatch')).toHaveLength(1);
+  }, 60_000);
+
+  it('CONSENT-P0.1.4-AUDIT-586 keeps exact-DE framework-only diagnostics complete and inconclusive', async () => {
+    const storefront = () => '<title>Fixture shop</title><main>Products</main><script>window.__tcfapi=function(){};window.__gpp=function(){};</script>';
+    const { result } = await exactCountryFixture(['DE'], storefront, 'diagnostic');
+    const evidence = result.evidence_bundle!;
+    const fresh = evidence.diagnostic_observability?.consent_observations.find((observation) => observation.context === 'fresh');
+    const capture = evidence.diagnostic_observability?.diagnostic_captures.find((item) => item.consent_snapshot_id === fresh?.capture_id);
+    const trace = JSON.parse(String(result.trace_steps)) as Array<{ step: string }>;
+    const replayed = replayEvidence(evidence);
+
+    expect(evidence.runtime).toMatchObject({ requested_country: 'DE', actual_egress_country: 'DE', exact_country_match: true, proxy_country_verified: true });
+    expect(evidence.runtime.consent_v2).toMatchObject({ render_state: 'ready', consent_appearance_wait_result: 'framework_only' });
+    expect(result).toMatchObject({ consent_status: 'inconclusive', cmp_provider: null });
+    expect(fresh).toMatchObject({
+      observation_complete: true,
+      provider_selection: { selected_provider: null, candidates: [] },
+      banner: { visibility: 'not_visible' },
+      frameworks: { tcf: true, gpp: true }
+    });
+    expect(capture).toMatchObject({ context: 'fresh', observation_complete: true, screenshot_name: 'consent-fresh.jpg' });
+    expect(evidence.runtime.screenshots.some((item) => item.name === 'consent-fresh.jpg')).toBe(true);
+    expect(evidence.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'cmp_detection_inconclusive' })]));
+    expect(trace).not.toEqual(expect.arrayContaining([expect.objectContaining({ step: 'cmp_not_found' })]));
+    expect(replayed).toMatchObject({ consent_status: 'inconclusive', cmp_provider: null });
+    expect(replayEvidence(replayed.evidence_bundle!)).toMatchObject({ consent_status: 'inconclusive', cmp_provider: null });
   }, 60_000);
 
   it('fails conservatively when exact-country retries never reach the target', async () => {
@@ -440,6 +468,18 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(diagnosticScreenshotDeltaMs(1_000, 1_500)).toBe(500);
     expect(diagnosticScreenshotDeltaMs(1_500, 1_000)).toBe(-500);
     expect(diagnosticScreenshotDeltaMs(1_000, null)).toBeNull();
+  });
+
+  it('CONSENT-P0.1.4-TRACE-01 separates earned absence, inconclusive detection, and provider detection', () => {
+    expect(freshConsentDetectionTraceStep(true, null, ['NO_CMP_DETECTED'])).toBe('cmp_not_found');
+    expect(freshConsentDetectionTraceStep(true, null, ['DETECTION_INCONCLUSIVE'])).toBe('cmp_detection_inconclusive');
+    expect(freshConsentDetectionTraceStep(true, 'OneTrust', ['CMP_VERIFICATION_CAPABILITY_UNAVAILABLE'])).toBe('cmp_provider_detected');
+  });
+
+  it('CONSENT-P0.1.4-SCREENSHOT-01 gates fresh diagnostic screenshots only on observation completeness', () => {
+    expect(freshConsentDiagnosticScreenshotEligible({ observation_complete: true })).toBe(true);
+    expect(freshConsentDiagnosticScreenshotEligible({ observation_complete: false })).toBe(false);
+    expect(freshConsentDiagnosticScreenshotEligible(undefined)).toBe(false);
   });
 
   it('retains four distinct bounded diagnostic screenshots without duplicate names', () => {

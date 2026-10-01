@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { captureBrowserConsentFacts, waitForConsentAppearance } from './browser-context-builders';
 import { detectGenericConsentMechanism } from './generic-consent-detector';
 import { chooseGeoInterstitialTarget, resolveGeoInterstitial } from './geo-interstitial';
-import { cmpAbsenceEarned, runConsentV2Session } from './v2-session';
+import { cmpAbsenceEarned, consentDiagnosticObservationComplete, runConsentV2Session } from './v2-session';
 
 let browser: Browser;
 beforeAll(async () => { browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, headless: true }); });
@@ -51,6 +51,9 @@ describe('Consent Detection P0 browser fixtures', () => {
     expect(result).toMatchObject({ result: 'incomplete', semantic_window_ms: 50, outer_watchdog_ms: 1_550, watchdog_fired: true,
       incomplete_reason: 'outer_watchdog', retry_attempted: false, retry_reason: null, retry_ms: 0 });
     expect(result.elapsed_ms).toBeGreaterThanOrEqual(1_500);
+    expect(consentDiagnosticObservationComplete({
+      page_access_valid: true, render_state: 'ready', appearance_completion: 'appearance_incomplete'
+    })).toBe(false);
   });
 
   it('does not retry a closed page and records only the bounded reason', async () => {
@@ -94,6 +97,21 @@ describe('Consent Detection P0 browser fixtures', () => {
     expect(cmpAbsenceEarned({ ...input, geo_interstitial_unresolved: true }, { ...capture, completion: 'appearance_absent' }, facts, generic, selection, frameworks)).toBe(false);
   });
 
+  it.each([
+    ['invalid page/access', { page_access_valid: false, render_state: 'ready' as const, appearance_completion: 'appearance_framework_only' as const }],
+    ['unavailable render observation', { page_access_valid: true, render_state: 'unknown' as const, appearance_completion: 'appearance_framework_only' as const }],
+    ['incomplete appearance', { page_access_valid: true, render_state: 'ready' as const, appearance_completion: 'appearance_incomplete' as const }],
+    ['nonrecoverable failure', { page_access_valid: true, render_state: 'ready' as const, appearance_completion: 'appearance_framework_only' as const, nonrecoverable_failure: true }]
+  ])('keeps diagnostic observation incomplete for %s', (_label, lifecycle) => {
+    expect(consentDiagnosticObservationComplete(lifecycle)).toBe(false);
+  });
+
+  it('treats a completed render probe finding as observed even when page readiness remains incomplete', () => {
+    expect(consentDiagnosticObservationComplete({
+      page_access_valid: true, render_state: 'incomplete', appearance_completion: 'appearance_framework_only'
+    })).toBe(true);
+  });
+
   it('observes a delayed arbitrary-class custom banner and attributes an unknown custom CMP', async () => {
     await fixture(`<script>setTimeout(() => document.body.insertAdjacentHTML('beforeend', ${JSON.stringify(banner)}), 180)</script>`, async (page) => {
       const result = await runConsentV2Session(page, { ...input, diagnostic: true });
@@ -128,10 +146,17 @@ describe('Consent Detection P0 browser fixtures', () => {
       const appearance = await waitForConsentAppearance(page, 120);
       expect(appearance.result).toBe('framework_only');
       expect(appearance.elapsed_ms).toBeGreaterThanOrEqual(100);
-      const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 120 });
+      const result = await runConsentV2Session(page, { ...input, appearance_wait_ms: 120, diagnostic: true });
       expect(result.telemetry.consent_appearance_wait_result).toBe('framework_only');
       expect(result.telemetry.consent_appearance_wait_ms).toBeGreaterThanOrEqual(100);
       expect(result.telemetry.consent_appearance_watchdog_fired).toBe(false);
+      expect(result.diagnostic_observation).toMatchObject({
+        observation_complete: true,
+        provider_selection: { selected_provider: null },
+        banner: { visibility: 'not_visible' },
+        frameworks: { tcf: true, gpp: true }
+      });
+      expect(result.result.reason_codes).toContain('DETECTION_INCONCLUSIVE');
       expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
     });
   });
