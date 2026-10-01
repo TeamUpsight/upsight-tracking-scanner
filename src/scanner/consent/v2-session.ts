@@ -2,7 +2,7 @@ import type { Page, Request } from 'playwright-core';
 import type { EvidenceBundle, TrackingRequestEvidence } from '../../types';
 import { consentTimingValues, type ConsentTimingValues } from '../../shared/config';
 import { cmpAdapterRegistry, platformRuntimeRegistry, scoreProviderCandidates, type CmpAdapterProviderId, type ProviderEvidenceSignal } from './adapter-registry';
-import './onetrust-adapter'; import './cookiebot-adapter'; import './usercentrics-adapter'; import './didomi-adapter'; import './cookieyes-adapter'; import './sourcepoint-adapter'; import './shopify-customer-privacy-runtime';
+import './onetrust-adapter'; import './cookiebot-adapter'; import './usercentrics-adapter'; import './didomi-adapter'; import './cookieyes-adapter'; import './sourcepoint-adapter'; import './adroll-adapter'; import './shopify-customer-privacy-runtime';
 import { buildRejectStateMachine, executeActionPlan, planFromAvailableAction, type ActionPlan, type ConsentInteractionStrategy, type InteractionExecutionBridge } from './action-planner';
 import { actionTargetFor, buildPersistenceStorage, buildProviderContexts, buildShopifyCustomerPrivacyContext, captureBrowserConsentFacts, installConsentCommandBootstrap, observeConsentFrameworksInPage, waitForConsentAppearance, waitForConsentUiReadiness, type BrowserConsentFacts, type ConsentAppearanceRetryGuard } from './browser-context-builders';
 import { ConsentEvidenceLedger } from './evidence-ledger';
@@ -421,6 +421,17 @@ function diagnosticObservation(
     accessible_name: control.accessible_name.slice(0, 120), semantic_action: semanticActionForConsentLabel(control.accessible_name) || 'unknown',
     visible: control.visible, enabled: control.enabled, actionable: control.actionable, provider_specific: false, location: control.location === 'child_frame' ? 'iframe' : control.location
   }));
+  if (selection.provider === 'adroll' && facts.adroll.banner_root_visible) {
+    for (const control of facts.adroll.semantic_controls) {
+      const action = semanticActionForConsentLabel(control.accessible_name);
+      if (!action || !control.visible || controls.length >= 20) continue;
+      controls.push({
+        accessible_name: control.accessible_name.slice(0, 120), semantic_action: action,
+        visible: true, enabled: control.enabled, actionable: control.actionable,
+        provider_specific: true, location: 'main_frame'
+      });
+    }
+  }
   for (const action of actions) {
     if (controls.length >= 20 || action.availability === 'not_present' || action.availability === 'unknown') continue;
     if (!controls.some((control) => control.semantic_action === action.action)) controls.push({
@@ -476,6 +487,17 @@ function diagnosticObservation(
     ...(runtimeFailures ? { runtime_failures: runtimeFailures } : {}),
     provider_selection: { selected_provider: selection.provider || null, provider_conflict: selection.conflict, candidates: providerCandidates },
     banner: { visibility: banner.visibility, surface: banner.surface }, visible_surfaces: surfaces.slice(0, 12), visible_controls: controls.slice(0, 20),
+    ...(selection.candidates.some((candidate) => candidate.provider_id === 'adroll') || facts.adroll.global_present || facts.adroll.banner_root_present ? {
+      adroll: {
+        provider_candidate: selection.candidates.some((candidate) => candidate.provider_id === 'adroll'),
+        script_detected: selection.evidence.some((signal) => signal.provider_id === 'adroll' && signal.family === 'provider_asset'),
+        global_detected: facts.adroll.global_present,
+        banner_root_detected: facts.adroll.banner_root_present,
+        banner_visible: facts.adroll.banner_root_visible,
+        load_when_ready_available: facts.adroll.load_when_ready_available,
+        semantic_control_count: Math.min(20, facts.adroll.semantic_controls.filter((control) => Boolean(semanticActionForConsentLabel(control.accessible_name))).length)
+      }
+    } : {}),
     ...(selection.provider === 'usercentrics' && facts.usercentrics.runtime_version === 'v2_uc_ui' ? {
       usercentrics_prechoice_state: (() => { const state = usercentricsV2Decision(facts.usercentrics.service_state); return state === 'unanswered' || state === 'accepted' || state === 'rejected' || state === 'partial' ? state : 'ambiguous'; })(),
       explicit_decision_present: facts.usercentrics.service_state.read_status === 'readable' ? facts.usercentrics.service_state.explicit_decision_present : 'unknown',

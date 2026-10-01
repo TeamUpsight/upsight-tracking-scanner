@@ -6,6 +6,7 @@ import { USERCENTRICS_BROWSER_UI_ROOT, USERCENTRICS_STANDARD_ROOT } from './user
 import { usercentricsRuntimeVersion, usercentricsV2Decision, type UsercentricsV2ServiceAggregate } from './usercentrics-v2-state';
 import { DIDOMI_STANDARD_ROOTS } from './didomi-adapter';
 import { COOKIEYES_STANDARD_ROOT, COOKIEYES_STABLE_CONTROLS } from './cookieyes-adapter';
+import { ADROLL_STANDARD_ROOT } from './adroll-adapter';
 import { observeConsentFrameworks, tcfAggregateDecision, type ConsentFrameworkObservations } from './framework-observers';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
 import type { ProviderSemanticDiscovery } from './provider-semantic-controls';
@@ -59,6 +60,13 @@ export interface BrowserConsentFacts {
   cookieyes_runtime_functions: string[];
   didomi: Record<string, unknown> | null;
   didomi_controls: Array<{ id: string; accessible_name: string; visible: boolean; enabled: boolean }>;
+  adroll: {
+    global_present: boolean;
+    load_when_ready_available: boolean;
+    banner_root_present: boolean;
+    banner_root_visible: boolean;
+    semantic_controls: Array<{ accessible_name: string; visible: boolean; enabled: boolean; actionable: boolean }>;
+  };
   provider_events: string[];
   cookiebot_events: string[];
   shopify: Record<string, unknown> | null;
@@ -92,12 +100,12 @@ export interface ConsentUiProbe {
   provider_root_visible: boolean;
 }
 
-const PROVIDER_GLOBALS = ['OneTrust', 'Optanon', 'Cookiebot', 'UC_UI', 'Didomi', 'CookieYes', '_sp_', '_sp_queue', '__tcfapi', '__gpp', '__uspapi'];
+const PROVIDER_GLOBALS = ['OneTrust', 'Optanon', 'Cookiebot', 'UC_UI', 'Didomi', 'CookieYes', '_sp_', '_sp_queue', '__adroll_consent_banner', '__tcfapi', '__gpp', '__uspapi'];
 const DOM_SELECTORS = [
   ...ONETRUST_STANDARD_ROOTS, ...Object.values(ONETRUST_DOCUMENTED_CONTROLS),
   COOKIEBOT_STANDARD_ROOT, ...Object.values(COOKIEBOT_STANDARD_CONTROLS),
   USERCENTRICS_STANDARD_ROOT, USERCENTRICS_BROWSER_UI_ROOT, ...DIDOMI_STANDARD_ROOTS,
-  COOKIEYES_STANDARD_ROOT, ...Object.values(COOKIEYES_STABLE_CONTROLS)
+  COOKIEYES_STANDARD_ROOT, ...Object.values(COOKIEYES_STABLE_CONTROLS), ADROLL_STANDARD_ROOT
 ];
 
 const CONSENT_COMMAND_OBSERVATIONS_KEY = '__upsightConsentCommandObservations';
@@ -427,6 +435,24 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
        return { id: `surface-${index}`, surface_type: (surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' ? 'dialog' : 'banner') as 'banner' | 'dialog', visible: surfaceVisible, privacy_or_cookie_semantics: privacyOrCookieSemantics && !geoTopology, text_evidence_available: textRead.available, intent, consent_management_topology: consentManagementTopology && !geoTopology, strong_presentation: surface.getAttribute('role') === 'dialog' || surface.getAttribute('aria-modal') === 'true' || style?.position === 'fixed' || style?.position === 'sticky' || (style?.position === 'absolute' && Number.parseInt(style.zIndex, 10) >= 1000), location: 'main_frame' as 'main_frame' | 'shadow_dom', shadow_depth: 0 };
     });
     const genericControls = genericSurfaces.flatMap((surface, index) => controls(surface, true).map((control) => ({ ...control, surface_id: `surface-${index}`, location: 'main_frame' as 'main_frame' | 'shadow_dom', shadow_depth: 0 })));
+    const adrollRoot = document.querySelector('#adroll_consent_banner');
+    let adrollGlobalPresent = false;
+    let adrollLoadWhenReadyAvailable = false;
+    try {
+      adrollGlobalPresent = Boolean(w.__adroll_consent_banner);
+      adrollLoadWhenReadyAvailable = typeof w.__adroll_consent_banner?.loadWhenReady === 'function';
+    } catch { /* A provider getter must not fail the bounded browser capture. */ }
+    const adrollSemanticControls = adrollRoot ? controls(adrollRoot)
+      .filter((item) => item.accessible_name.length > 0 && knownConsentAction(item.accessible_name))
+      .slice(0, 20)
+      .map(({ accessible_name, visible, enabled, actionable }) => ({ accessible_name, visible, enabled, actionable })) : [];
+    const adroll = {
+      global_present: adrollGlobalPresent,
+      load_when_ready_available: adrollLoadWhenReadyAvailable,
+      banner_root_present: Boolean(adrollRoot),
+      banner_root_visible: visible(adrollRoot),
+      semantic_controls: adrollSemanticControls
+    };
     // This is deliberately provider-first: two independent Cookiebot-specific
     // facts are required before inspecting non-standard descendants, and the
     // scan is bounded to a current visible consent surface.
@@ -607,7 +633,7 @@ export async function captureBrowserConsentFacts(page: Page): Promise<BrowserCon
     const providerEvents = Array.isArray(w[providerEventKey]) ? w[providerEventKey].filter((value: unknown) => typeof value === 'string').slice(0, 20) : [];
     const cookiebotEvents = Array.isArray(w.__upsightCookiebotEvents) ? w.__upsightCookiebotEvents.filter((value: unknown) => value === 'CookiebotOnAccept' || value === 'CookiebotOnDecline' || value === 'CookiebotOnDialogDisplay').slice(0, 20) : [];
     currentStage = 'serialize_result';
-    return { globals: presentGlobals, assets, cookie_names: cookieNames, cookiebot_data_cbid_present: cookiebotDataCbidPresent, storage_keys: storageKeys, observations, cookiebot, cookieyes, onetrust, onetrust_public_methods, cookieyes_runtime_functions, didomi, didomi_controls, provider_events: providerEvents, cookiebot_events: cookiebotEvents, shopify, consent_commands: commands, gpc_signal: gpcSignal, gpc_acknowledgement_observed: gpcAcknowledgementObserved, generic };
+    return { globals: presentGlobals, assets, cookie_names: cookieNames, cookiebot_data_cbid_present: cookiebotDataCbidPresent, storage_keys: storageKeys, observations, cookiebot, cookieyes, onetrust, onetrust_public_methods, cookieyes_runtime_functions, didomi, didomi_controls, adroll, provider_events: providerEvents, cookiebot_events: cookiebotEvents, shopify, consent_commands: commands, gpc_signal: gpcSignal, gpc_acknowledgement_observed: gpcAcknowledgementObserved, generic };
     } catch (error) {
       let name = '';
       try { name = typeof (error as { name?: unknown })?.name === 'string' ? (error as { name: string }).name : ''; } catch { /* A hostile exception may have a throwing name getter. */ }
@@ -1045,7 +1071,8 @@ export async function buildProviderContexts(page: Page, facts: BrowserConsentFac
     }],
     ['didomi', { ...common, window_globals: facts.globals, surfaces: DIDOMI_STANDARD_ROOTS.map((selector) => ({ selector, present: Boolean(observation(facts, selector)), visible: Boolean(observation(facts, selector)?.visible) })), generic_surfaces: facts.generic.surfaces, controls: [...facts.didomi_controls.map((item) => ({ id: item.id, accessible_name: item.accessible_name, visible: item.visible, enabled: item.enabled, within_confirmed_didomi_surface: true })), ...facts.generic.controls.filter((item) => item.id?.startsWith('provider-semantic:') || facts.generic.surfaces.some((surface) => surface.id === item.surface_id && surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent')).map((item, index) => ({ id: item.id || `generic:${index}`, accessible_name: item.accessible_name, visible: item.visible, enabled: item.enabled, within_confirmed_didomi_surface: true }))].flatMap((item) => { const action = semanticActionForConsentLabel(item.accessible_name); return action === 'accept_all' || action === 'reject_all' || action === 'open_preferences' ? [{ id: item.id, semantic_action: action, origin: 'semantic_ui' as const, visible: item.visible, enabled: item.enabled, actionable: item.visible && item.enabled, within_confirmed_didomi_surface: item.within_confirmed_didomi_surface }] : []; }), action_targets: facts.didomi_controls.flatMap((item) => { const action = semanticActionForConsentLabel(item.accessible_name); return action === 'accept_all' || action === 'reject_all' || action === 'open_preferences' ? [{ action, category: null, target_ref: `didomi:${item.id}`, surface_type: 'banner' as const, frame_path: ['top'], shadow_mode: 'none' as const, accessible_control: true, attached: true, visible: item.visible, enabled: item.enabled } satisfies BrowserActionTarget] : []; }), public_methods: Array.isArray(facts.didomi?.public_methods) ? facts.didomi.public_methods : [], runtime: facts.didomi, provider_events: facts.provider_events, invoke_control: (id: string) => id.startsWith('provider-semantic:') ? semanticDiscovery?.invoke(id) || Promise.resolve(false) : id.startsWith('generic:') ? Promise.resolve(false) : clickDidomiControl(page, id), invoke_public_method: (method: string) => page.evaluate((name) => { const api = (window as any).Didomi; const fn = name === 'preferences.show' ? api?.preferences?.show : api?.[name]; if (typeof fn !== 'function') return false; fn.call(name === 'preferences.show' ? api.preferences : api); return true; }, method).catch(() => false) }],
     ['cookieyes', { ...common, runtime_functions: facts.cookieyes_runtime_functions, surfaces: [{ selector: COOKIEYES_STANDARD_ROOT, present: Boolean(observation(facts, COOKIEYES_STANDARD_ROOT)), visible: Boolean(observation(facts, COOKIEYES_STANDARD_ROOT)?.visible) }], controls: Object.values(COOKIEYES_STABLE_CONTROLS).map((selector) => control(facts, selector)), action_targets: [documentTarget('accept_all', COOKIEYES_STABLE_CONTROLS.accept, control(facts, COOKIEYES_STABLE_CONTROLS.accept)), documentTarget('reject_all', COOKIEYES_STABLE_CONTROLS.reject, control(facts, COOKIEYES_STABLE_CONTROLS.reject)), documentTarget('open_preferences', COOKIEYES_STABLE_CONTROLS.customize, control(facts, COOKIEYES_STABLE_CONTROLS.customize))], consent: facts.cookieyes, persistence: storage(facts), invoke_control: (selector: string) => click(page, selector), invoke_public_action: (action: string) => page.evaluate((value) => { const fn = (window as any).performBannerAction; if (typeof fn !== 'function') return false; fn(value); return true; }, action).catch(() => false) }],
-    ['sourcepoint', { ...common, window_globals: facts.globals, surfaces: sourcepoint.surfaces, controls: sourcepoint.controls, action_targets: sourcepoint.controls.flatMap((control) => { const action = sourcepointAction(control.action_class); return action ? [{ action, category: null, target_ref: `frame:${control.frame_path.join('>')}:${control.action_class}`, surface_type: control.surface === 'privacy_manager' ? 'preference_center' as const : 'dialog' as const, frame_path: [...control.frame_path], shadow_mode: 'none' as const, accessible_control: true, attached: control.frame_attached, visible: control.visible, enabled: control.enabled }] : []; }), active_surface: sourcepoint.surfaces.find((item) => item.visible)?.surface || null, framework: sourcepointFramework, storage: storage(facts), invoke_control: sourcepoint.invoke }]
+    ['sourcepoint', { ...common, window_globals: facts.globals, surfaces: sourcepoint.surfaces, controls: sourcepoint.controls, action_targets: sourcepoint.controls.flatMap((control) => { const action = sourcepointAction(control.action_class); return action ? [{ action, category: null, target_ref: `frame:${control.frame_path.join('>')}:${control.action_class}`, surface_type: control.surface === 'privacy_manager' ? 'preference_center' as const : 'dialog' as const, frame_path: [...control.frame_path], shadow_mode: 'none' as const, accessible_control: true, attached: control.frame_attached, visible: control.visible, enabled: control.enabled }] : []; }), active_surface: sourcepoint.surfaces.find((item) => item.visible)?.surface || null, framework: sourcepointFramework, storage: storage(facts), invoke_control: sourcepoint.invoke }],
+    ['adroll', { ...common, window_globals: facts.globals, surface: { selector: ADROLL_STANDARD_ROOT, present: facts.adroll.banner_root_present, visible: facts.adroll.banner_root_visible }, load_when_ready_available: facts.adroll.load_when_ready_available, semantic_controls: facts.adroll.semantic_controls.map((item) => ({ ...item, semantic_action: semanticActionForConsentLabel(item.accessible_name) })) }]
   ]);
 }
 

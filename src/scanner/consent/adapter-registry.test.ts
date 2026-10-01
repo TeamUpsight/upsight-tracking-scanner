@@ -44,7 +44,7 @@ const fixtureAdapter: ConsentProviderAdapter<'fixture'> = {
 
 describe('Consent adapter registry', () => {
   it('reserves only the planned provider ids and keeps Shopify in a separate runtime registry', () => {
-    expect(CMP_ADAPTER_PROVIDER_IDS).toEqual(['onetrust', 'cookiebot', 'usercentrics', 'didomi', 'cookieyes', 'sourcepoint']);
+    expect(CMP_ADAPTER_PROVIDER_IDS).toEqual(['onetrust', 'cookiebot', 'usercentrics', 'didomi', 'cookieyes', 'sourcepoint', 'adroll']);
     expect(platformRuntimeRegistry.knownIds()).toEqual(['shopify_customer_privacy']);
   });
 

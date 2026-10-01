@@ -30,6 +30,16 @@ describe('Consent V2 rollout controls', () => {
     expect(consentV2ActionsEnabledFor(controls, 'onetrust', 'storefront.example')).toBe(false);
   });
 
+  it('keeps AdRoll detection enabled and actions disabled even when action flags are forced on', () => {
+    const controls = consentV2RolloutControls({
+      CONSENT_V2_ACTIONS_ENABLED: 'true',
+      CONSENT_ADROLL_ACTIONS_ENABLED: 'true',
+      CONSENT_V2_ACTION_SAMPLE_PERCENT: '100'
+    });
+    expect(controls.providers.adroll).toEqual({ detection_enabled: true, actions_enabled: false });
+    expect(consentV2ActionsEnabledFor(controls, 'adroll', 'storefront.example')).toBe(false);
+  });
+
   it('can disable provider detection without disabling the overall V2 audit', () => {
     const controls = consentV2RolloutControls({ CONSENT_COOKIEBOT_ENABLED: 'false' });
     expect(controls.enabled).toBe(true);

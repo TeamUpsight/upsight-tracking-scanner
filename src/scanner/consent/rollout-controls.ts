@@ -1,7 +1,7 @@
 import { boundedInteger } from '../../shared/config';
 
 export const CONSENT_V2_ROLLOUT_PROVIDERS = [
-  'onetrust', 'cookiebot', 'usercentrics', 'didomi', 'cookieyes', 'sourcepoint', 'shopify', 'generic'
+  'onetrust', 'cookiebot', 'usercentrics', 'didomi', 'cookieyes', 'sourcepoint', 'adroll', 'shopify', 'generic'
 ] as const;
 
 export type ConsentV2RolloutProvider = typeof CONSENT_V2_ROLLOUT_PROVIDERS[number];
@@ -32,7 +32,8 @@ export function consentV2RolloutControls(environment: NodeJS.ProcessEnv = proces
     const name = providerEnvironmentName(provider);
     return [provider, {
       detection_enabled: enabled(environment[`CONSENT_${name}_ENABLED`], true),
-      actions_enabled: actionsEnabled && enabled(environment[`CONSENT_${name}_ACTIONS_ENABLED`], false)
+      // AdRoll remains detection-only even if an action flag is supplied.
+      actions_enabled: provider !== 'adroll' && actionsEnabled && enabled(environment[`CONSENT_${name}_ACTIONS_ENABLED`], false)
     }];
   })) as ConsentV2RolloutControls['providers'];
   return {

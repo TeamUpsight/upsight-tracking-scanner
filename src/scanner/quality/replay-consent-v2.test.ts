@@ -46,6 +46,26 @@ describe('Consent V2 canonical replay tracking consistency', () => {
     expect(replayEvidence(replayed.evidence_bundle!)).toMatchObject({ cmp_provider: replayed.cmp_provider, consent_status: replayed.consent_status });
   });
 
+  it('retains AdRoll provider identity and conservative Consent status across replay', () => {
+    const evidence = new EvidenceCollector({ auditId: 'adroll-replay', domain: 'fixture.example', geo: 'EU', mode: 'diagnostic', selectedModules: ['consent'] }).bundle;
+    evidence.page.valid = true;
+    evidence.page.status_code = 200;
+    evidence.page.access_category = 'none';
+    evidence.runtime.proxy_country_verified = true;
+    evidence.runtime.country_matches_requested_geo = true;
+    evidence.consent.executed = true;
+    evidence.consent.resolved_provider = 'AdRoll';
+    evidence.consent.resolved_provider_confidence = 'high';
+    evidence.consent.banner_visible = false;
+    evidence.consent.interaction_attempted = false;
+    evidence.consent.rejection_verified = false;
+    evidence.consent.post_reject_observation_completed = false;
+    evidence.runtime.consent_v2 = { enabled: true, render_state: 'ready', tracking_consistency: 'not_applicable' } as EvidenceBundle['runtime']['consent_v2'];
+    const replayed = replayEvidence(evidence);
+    expect(replayed).toMatchObject({ cmp_provider: 'AdRoll', consent_status: 'inconclusive' });
+    expect(replayEvidence(replayed.evidence_bundle!)).toMatchObject({ cmp_provider: 'AdRoll', consent_status: 'inconclusive' });
+  });
+
   it('REPLAY-CONSENT-V2-545 reproduces the Audit 545 contradiction without a legacy post_reject phase', () => {
     const evidence = consentEvidence('contradiction');
     const replayed = replayEvidence(evidence);

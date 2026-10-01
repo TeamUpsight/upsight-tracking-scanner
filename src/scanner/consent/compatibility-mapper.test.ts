@@ -65,6 +65,17 @@ describe('Consent V2 compatibility mapper', () => {
     expect(mapped.cmp_provider).toBe('Sourcepoint');
   });
 
+  it('maps deterministic AdRoll identity without requiring a visible banner', () => {
+    const mapped = mapConsentV2ToExisting(result({
+      mechanisms: [mechanism('cmp', 'adroll')],
+      banner: { surface: 'unknown', visibility: 'unknown', evidence: [], reason_codes: ['BANNER_VISIBILITY_UNKNOWN'] },
+      available_actions: [], interactions: [],
+      rejection_verification: { status: 'inconclusive', evidence: [], reason_codes: ['ACTION_INCONCLUSIVE'] },
+      persistence: { status: 'not_applicable', evidence: [], reason_codes: ['PERSISTENCE_NOT_APPLICABLE'] }
+    }), { ...context, post_reject_observation_completed: false });
+    expect(mapped).toMatchObject({ cmp_provider: 'AdRoll', consent_status: 'inconclusive' });
+  });
+
   it('keeps challenge and geo failures inconclusive rather than mapping a false Not Found CMP', () => {
     const blocked = result({
       context_clean: { status: 'inconclusive', evidence: [], reason_codes: ['BLOCKED_OR_CHALLENGED'] },

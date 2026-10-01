@@ -11,7 +11,7 @@ import { semanticActionForConsentLabel } from './generic-consent-detector';
 
 const rollout: ConsentV2RolloutControls = {
   enabled: true, actions_enabled: false, action_sample_percent: 0,
-  providers: Object.fromEntries(['onetrust', 'cookiebot', 'usercentrics', 'didomi', 'cookieyes', 'sourcepoint', 'shopify', 'generic'].map((provider) => [provider, { detection_enabled: true, actions_enabled: false }])) as ConsentV2RolloutControls['providers']
+  providers: Object.fromEntries(['onetrust', 'cookiebot', 'usercentrics', 'didomi', 'cookieyes', 'sourcepoint', 'adroll', 'shopify', 'generic'].map((provider) => [provider, { detection_enabled: true, actions_enabled: false }])) as ConsentV2RolloutControls['providers']
 };
 
 const input: ConsentV2SessionInput = { geo: 'EU', geo_verified: true, page_valid: true, rollout, appearance_wait_ms: 80 };

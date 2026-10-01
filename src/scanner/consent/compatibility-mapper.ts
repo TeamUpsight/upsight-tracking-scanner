@@ -37,7 +37,8 @@ const LEGACY_PROVIDER_BY_ID: Record<string, CmpProvider> = {
   trustarc: 'TrustArc',
   fides: 'Fides',
   quantcast: 'Quantcast',
-  sourcepoint: 'Sourcepoint'
+  sourcepoint: 'Sourcepoint',
+  adroll: 'AdRoll'
 };
 
 function allReasonCodes(result: FinalConsentAuditResult) {

@@ -15,7 +15,8 @@ export const CMP_ADAPTER_PROVIDER_IDS = [
   'usercentrics',
   'didomi',
   'cookieyes',
-  'sourcepoint'
+  'sourcepoint',
+  'adroll'
 ] as const;
 
 export const PLATFORM_RUNTIME_IDS = ['shopify_customer_privacy'] as const;
