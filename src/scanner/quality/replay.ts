@@ -154,12 +154,25 @@ export function replayEvidence(source: EvidenceBundle): Partial<StorefrontAudit>
       banner_visible: evidence.consent.banner_visible
     })
     : { provider: null as CmpProvider | null, confidence: 'low' as const, evidence: [], banner_visible: null, reason_code: 'CMP_NOT_TESTED' };
+  const adrollBootstrap = evidence.runtime.consent_v2?.adroll_bootstrap;
+  const adrollDecisionIdentity = adrollBootstrap?.consent_check_parsed === true && adrollBootstrap.banner_mode === 'adroll';
+  if (consentSelected && evidence.consent.executed && adrollDecisionIdentity) {
+    evidence.consent.resolved_provider = 'AdRoll';
+    evidence.consent.resolved_provider_confidence = 'high';
+    evidence.consent.resolved_provider_evidence = [...new Set([
+      ...(evidence.consent.resolved_provider_evidence || []).filter((code) => code !== 'NO_CMP_DETECTED'),
+      'ADROLL_CONSENT_DECISION'
+    ])];
+  }
+  const adrollBootstrapProtectsAbsence = Boolean(adrollBootstrap &&
+    !['not_observed', 'completed_without_banner'].includes(adrollBootstrap.bootstrap_state));
   const resolvedProvider = evidence.consent.resolved_provider;
   const resolvedIdentity = evidence.consent.executed && resolvedProvider && resolvedProvider !== 'Not Found';
   const detectedIdentity = detectedCmp.provider && detectedCmp.provider !== 'Not Found';
   const renderIncomplete = evidence.runtime.consent_v2?.enabled === true && evidence.runtime.consent_v2.render_state !== 'ready';
   const resolvedAbsenceComplete = resolvedProvider === 'Not Found' && evidence.consent.executed &&
     evidence.page.valid === true && !renderIncomplete && !evidence.consent.technical_blocker_reason &&
+    !adrollBootstrapProtectsAbsence &&
     evidence.consent.resolved_provider_evidence?.includes('NO_CMP_DETECTED') === true;
   const cmp = consentSelected && resolvedIdentity
     ? { provider: resolvedProvider, confidence: evidence.consent.resolved_provider_confidence || 'medium' as const, evidence: evidence.consent.resolved_provider_evidence || detectedCmp.evidence, banner_visible: detectedCmp.banner_visible, reason_code: resolvedProvider === 'Unknown' ? 'CMP_PROVIDER_UNKNOWN' : 'CMP_PROVIDER_IDENTIFIED' }

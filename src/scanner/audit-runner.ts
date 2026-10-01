@@ -37,6 +37,7 @@ import { captureBrowserConsentFacts, installConsentCommandBootstrap } from './co
 import { resolveGeoInterstitial, type GeoInterstitialDecision } from './consent/geo-interstitial';
 import { certificationSafeConsentV2RolloutControls, consentV2RolloutControls, legacyAcceptActionEnabled } from './consent/rollout-controls';
 import { captureSharedConsentObservation, mergeSharedConsentObservation, prepareConsentV2Session, runConsentV2Session, unavailableConsentV2Telemetry, type ConsentV2SessionOutput, type SharedConsentObservation } from './consent/v2-session';
+import type { AdRollBootstrapTelemetry } from './consent/adroll-bootstrap';
 import { attachRenderRuntimeDiagnostics, observeRenderedPage } from './consent/render-readiness';
 import { consentObservationFailure } from './consent/observation-stage';
 import { EvidenceCollector } from './evidence/evidence-collector';
@@ -1347,6 +1348,22 @@ export async function runStorefrontAudit(
     if (now - lastInterimUpdate > 2_000 && !lifecycle.isFinalized) {
       lastInterimUpdate = now;
       orderedUpdates.enqueue({ scan_status: 'scanning', trace_steps: JSON.stringify(trace) });
+    }
+  };
+
+  const addAdRollBootstrapTrace = (bootstrap: AdRollBootstrapTelemetry | undefined) => {
+    if (!bootstrap || bootstrap.bootstrap_state === 'not_observed') return;
+    const metadata = { module: 'consent' as const, severity: 'info' as const };
+    if (bootstrap.roundtrip_observed) addTrace('adroll_roundtrip_observed', { requested_at_ms: bootstrap.roundtrip_requested_at_ms, completed_at_ms: bootstrap.roundtrip_completed_at_ms }, metadata);
+    if (bootstrap.consent_check_observed) addTrace('adroll_consent_check_observed', { status: bootstrap.consent_check_status, requested_at_ms: bootstrap.consent_check_requested_at_ms, completed_at_ms: bootstrap.consent_check_completed_at_ms }, metadata);
+    if (bootstrap.consent_check_parsed) addTrace('adroll_consent_decision_observed', { gdpr_applies: bootstrap.gdpr_applies, banner_mode: bootstrap.banner_mode }, metadata);
+    if (bootstrap.adroll_banner_expected) addTrace('adroll_banner_expected', {}, metadata);
+    if (bootstrap.consent_script_observed) addTrace('adroll_consent_script_observed', { requested_at_ms: bootstrap.consent_script_requested_at_ms, completed_at_ms: bootstrap.consent_script_completed_at_ms }, metadata);
+    if (bootstrap.grace_triggered) {
+      addTrace('adroll_bootstrap_grace_started', { maximum_ms: bootstrap.grace_max_ms }, metadata);
+      addTrace(bootstrap.grace_timed_out ? 'adroll_bootstrap_timeout' : 'adroll_bootstrap_grace_completed', { elapsed_ms: bootstrap.grace_elapsed_ms, bootstrap_state: bootstrap.bootstrap_state }, {
+        module: 'consent', severity: bootstrap.grace_timed_out ? 'warning' : 'info'
+      });
     }
   };
 
@@ -2818,6 +2835,7 @@ export async function runStorefrontAudit(
           geo,
           geo_verified: requestedCountry ? evidence.runtime.proxy_country_verified : freshConsent.geo.verified,
           page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
+          requested_country: requestedCountry,
           timings: consentTimings,
           rollout: consentV2Controls,
           access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic', geo_interstitial_unresolved: freshGeoIncomplete,
@@ -2826,6 +2844,7 @@ export async function runStorefrontAudit(
         }, consentCapture);
         consentV2Ran = true;
         evidence.runtime.consent_v2 = consentV2.telemetry;
+        addAdRollBootstrapTrace(consentV2.telemetry.adroll_bootstrap);
         await recordFreshConsentDiagnostic(consentV2, consentHomepage);
         const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
         cmp = {
@@ -3745,6 +3764,7 @@ export async function runStorefrontAudit(
           consentV2 = await withinPhaseBudget('consent_pdp_reject', Math.min(available, 15_000), () => runConsentV2Session(consentHomepage!, {
             geo, geo_verified: requestedCountry ? evidence.runtime.proxy_country_verified : freshConsent.geo.verified,
             page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
+            requested_country: requestedCountry,
             timings: consentTimings, rollout: consentV2Controls, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic', geo_interstitial_unresolved: freshGeoIncomplete,
             geo_interstitial_target_unverified: geoTargetUnverified,
             appearance_retry_guard: consentAppearanceRetryGuard(consentHomepage!, finalHost),
@@ -3752,6 +3772,7 @@ export async function runStorefrontAudit(
           }, consentCapture!));
           consentV2Ran = true;
           evidence.runtime.consent_v2 = consentV2.telemetry;
+          addAdRollBootstrapTrace(consentV2.telemetry.adroll_bootstrap);
           await recordFreshConsentDiagnostic(consentV2, consentHomepage!);
           const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
           addTrace(freshConsentDetectionTraceStep(readiness.status === 'ready', compatibility.cmp_provider, evidence.consent.resolved_provider_evidence || []), {

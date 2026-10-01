@@ -51,6 +51,9 @@ describe('Consent V2 canonical replay tracking consistency', () => {
     evidence.page.valid = true;
     evidence.page.status_code = 200;
     evidence.page.access_category = 'none';
+    evidence.runtime.requested_country = 'DE';
+    evidence.runtime.actual_egress_country = 'DE';
+    evidence.runtime.exact_country_match = true;
     evidence.runtime.proxy_country_verified = true;
     evidence.runtime.country_matches_requested_geo = true;
     evidence.consent.executed = true;
@@ -60,10 +63,51 @@ describe('Consent V2 canonical replay tracking consistency', () => {
     evidence.consent.interaction_attempted = false;
     evidence.consent.rejection_verified = false;
     evidence.consent.post_reject_observation_completed = false;
-    evidence.runtime.consent_v2 = { enabled: true, render_state: 'ready', tracking_consistency: 'not_applicable' } as EvidenceBundle['runtime']['consent_v2'];
+    evidence.runtime.consent_v2 = {
+      enabled: true,
+      render_state: 'ready',
+      tracking_consistency: 'not_applicable',
+      adroll_bootstrap: {
+        roundtrip_observed: true, roundtrip_requested_at_ms: 10, roundtrip_completed_at_ms: 100,
+        consent_check_observed: true, consent_check_status: 200, consent_check_parsed: true, consent_check_parse_status: 'parsed', consent_check_requested_at_ms: 110, consent_check_completed_at_ms: 150,
+        gdpr_applies: true, user_country: 'LV', advertiser_country: 'AE', banner_mode: 'adroll', ipgeo_country: 'LV', ipgeo_region: 'Riga',
+        consent_script_observed: false, consent_script_requested_at_ms: null, consent_script_completed_at_ms: null,
+        banner_root_observed: false, banner_visible: false, adroll_banner_expected: true, adroll_country_matches_requested_country: false,
+        grace_triggered: true, grace_elapsed_ms: 12_000, grace_max_ms: 12_000, grace_timed_out: true, bootstrap_state: 'timed_out'
+      }
+    } as EvidenceBundle['runtime']['consent_v2'];
     const replayed = replayEvidence(evidence);
     expect(replayed).toMatchObject({ cmp_provider: 'AdRoll', consent_status: 'inconclusive' });
-    expect(replayEvidence(replayed.evidence_bundle!)).toMatchObject({ cmp_provider: 'AdRoll', consent_status: 'inconclusive' });
+    expect(replayed.reason_codes).not.toContain('GEO_UNVERIFIED');
+    expect(replayed.evidence_bundle?.runtime).toMatchObject({ requested_country: 'DE', actual_egress_country: 'DE', exact_country_match: true, proxy_country_verified: true });
+    const replayedAgain = replayEvidence(replayed.evidence_bundle!);
+    expect(replayedAgain).toMatchObject({ cmp_provider: 'AdRoll', consent_status: 'inconclusive' });
+    expect(replayedAgain.evidence_bundle?.runtime.consent_v2?.adroll_bootstrap).toEqual(replayed.evidence_bundle?.runtime.consent_v2?.adroll_bootstrap);
+  });
+
+  it('does not replay unresolved roundtrip-only bootstrap as a confident CMP absence', () => {
+    const evidence = new EvidenceCollector({ auditId: 'adroll-roundtrip-replay', domain: 'fixture.example', geo: 'EU', mode: 'diagnostic', selectedModules: ['consent'] }).bundle;
+    evidence.page.valid = true;
+    evidence.page.status_code = 200;
+    evidence.page.access_category = 'none';
+    evidence.runtime.proxy_country_verified = true;
+    evidence.consent.executed = true;
+    evidence.consent.resolved_provider = 'Not Found';
+    evidence.consent.resolved_provider_evidence = ['NO_CMP_DETECTED'];
+    evidence.runtime.consent_v2 = {
+      enabled: true, render_state: 'ready', tracking_consistency: 'not_applicable',
+      adroll_bootstrap: {
+        roundtrip_observed: true, roundtrip_requested_at_ms: 20, roundtrip_completed_at_ms: 200,
+        consent_check_observed: false, consent_check_status: null, consent_check_parsed: false, consent_check_parse_status: 'not_attempted', consent_check_requested_at_ms: null, consent_check_completed_at_ms: null,
+        gdpr_applies: null, user_country: null, advertiser_country: null, banner_mode: null, ipgeo_country: null, ipgeo_region: null,
+        consent_script_observed: false, consent_script_requested_at_ms: null, consent_script_completed_at_ms: null,
+        banner_root_observed: false, banner_visible: false, adroll_banner_expected: false, adroll_country_matches_requested_country: null,
+        grace_triggered: true, grace_elapsed_ms: 12_000, grace_max_ms: 12_000, grace_timed_out: true, bootstrap_state: 'timed_out'
+      }
+    } as EvidenceBundle['runtime']['consent_v2'];
+    const replayed = replayEvidence(evidence);
+    expect(replayed.cmp_provider).not.toBe('Not Found');
+    expect(replayed.consent_status).toBe('inconclusive');
   });
 
   it('REPLAY-CONSENT-V2-545 reproduces the Audit 545 contradiction without a legacy post_reject phase', () => {

@@ -26,6 +26,7 @@ export interface AdRollAdapterContext {
   }[];
   tcf_active?: boolean;
   gpp_active?: boolean;
+  consent_decision?: { parsed: boolean; banner_mode: string | null };
 }
 
 function hasExact(values: readonly string[] | undefined, expected: string) {
@@ -71,6 +72,12 @@ export function adRollProviderEvidence(context: AdRollAdapterContext): ProviderE
   if (context.surface?.selector === ADROLL_STANDARD_ROOT && context.surface.present) {
     evidence.push({
       provider_id: 'adroll', family: 'provider_root', kind: 'stable_provider_root',
+      specificity: 'provider_specific', deterministic_provider_signature: true
+    });
+  }
+  if (context.consent_decision?.parsed === true && context.consent_decision.banner_mode === 'adroll') {
+    evidence.push({
+      provider_id: 'adroll', family: 'provider_network', kind: 'provider_specific_network',
       specificity: 'provider_specific', deterministic_provider_signature: true
     });
   }

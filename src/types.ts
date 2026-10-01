@@ -216,7 +216,7 @@ export interface EvidenceBundle {
       banner: { visibility: 'visible' | 'not_visible' | 'unknown'; surface: string };
       visible_surfaces: Array<{ surface_type: string; provider_specific: boolean; visible: boolean; privacy_or_cookie_semantics: boolean; text_evidence_available?: boolean; intent: string; strong_presentation?: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
       visible_controls: Array<{ accessible_name: string; semantic_action: string; visible: boolean; enabled: boolean; actionable: boolean; provider_specific: boolean; location: 'main_frame' | 'iframe' | 'shadow_dom' | 'unknown' }>;
-      adroll?: { provider_candidate: boolean; script_detected: boolean; global_detected: boolean; banner_root_detected: boolean; banner_visible: boolean; load_when_ready_available: boolean; semantic_control_count: number };
+      adroll?: { provider_candidate: boolean; script_detected: boolean; global_detected: boolean; banner_root_detected: boolean; banner_visible: boolean; load_when_ready_available: boolean; semantic_control_count: number; bootstrap?: import('./scanner/consent/adroll-bootstrap').AdRollBootstrapTelemetry };
       usercentrics_prechoice_state?: 'unanswered' | 'accepted' | 'rejected' | 'partial' | 'ambiguous';
       explicit_decision_present?: boolean | 'unknown';
       usercentrics_main_frame_census?: import('./scanner/consent/usercentrics-main-frame-census').UsercentricsMainFrameCensus;
@@ -514,6 +514,8 @@ export interface EvidenceBundle {
       consent_appearance_retry_attempted?: boolean;
       consent_appearance_retry_reason?: import('./scanner/consent/observation-stage').RecoverableConsentAppearanceInterruption | null;
       consent_appearance_retry_ms?: number;
+      /** Passive, bounded AdRoll bootstrap facts. Vendor geo never mutates transport geo. */
+      adroll_bootstrap?: import('./scanner/consent/adroll-bootstrap').AdRollBootstrapTelemetry;
       /** Bounded passive homepage facts, retained separately from fresh-session completion. */
       shared_observation?: {
         render_state?: import('./scanner/consent/render-readiness').RenderState;

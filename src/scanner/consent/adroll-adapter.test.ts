@@ -42,6 +42,17 @@ describe('AdRoll Consent adapter', () => {
     expect(detectAdRoll({ tcf_active: true, gpp_active: true })).toMatchObject({ status: 'not_detected' });
   });
 
+  it('uses only a parsed AdRoll-banner decision as deterministic provider-network evidence', () => {
+    expect(adRollProviderEvidence({ consent_decision: { parsed: true, banner_mode: 'adroll' } })).toEqual([
+      expect.objectContaining({
+        provider_id: 'adroll', family: 'provider_network', kind: 'provider_specific_network',
+        deterministic_provider_signature: true
+      })
+    ]);
+    expect(adRollProviderEvidence({ consent_decision: { parsed: false, banner_mode: 'adroll' } })).toEqual([]);
+    expect(adRollProviderEvidence({ consent_decision: { parsed: true, banner_mode: 'none' } })).toEqual([]);
+  });
+
   it('registers detection and banner observation while leaving every action unsupported', () => {
     expect(cmpAdapterRegistry.get('adroll')).toBe(adRollAdapter);
     expect(cmpAdapterRegistry.getCapability('adroll', 'detection').supported).toBe(true);
