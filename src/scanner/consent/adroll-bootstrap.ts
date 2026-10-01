@@ -93,7 +93,8 @@ function boundedString(value: unknown, maximum: number, pattern?: RegExp) {
 }
 
 /**
- * Parses only the documented six-argument call shape. The response is never
+ * Parses only the documented six-argument call shape, optionally preceded by
+ * AdRoll's exact empty experiment-list assignment. The response is never
  * evaluated or executed; JSON.parse is limited to the structurally isolated,
  * size-bounded object argument.
  */
@@ -102,7 +103,7 @@ export function parseAdRollConsentCheckResponse(body: string): AdRollConsentChec
     if (Buffer.byteLength(body, 'utf8') > ADROLL_CONSENT_RESPONSE_MAX_BYTES) return { parsed: false, status: 'oversized' };
     const trimmed = body.trim();
     if (!trimmed.includes('__adroll.set_consent')) return { parsed: false, status: 'unrelated' };
-    const match = trimmed.match(/^__adroll\.set_consent\s*\(\s*null\s*,\s*(?:true|false)\s*,\s*(true|false)\s*,\s*"([A-Za-z]{2})"\s*,\s*"([A-Za-z]{2})"\s*,\s*(\{[\s\S]*\})\s*\)\s*;?$/);
+    const match = trimmed.match(/^(?:window\s*\.\s*adroll_exp_list\s*=\s*\[\s*\]\s*;\s*)?__adroll\.set_consent\s*\(\s*null\s*,\s*(?:true|false)\s*,\s*(true|false)\s*,\s*"([A-Za-z]{2})"\s*,\s*"([A-Za-z]{2})"\s*,\s*(\{[\s\S]*\})\s*\)\s*;?$/);
     if (!match) return { parsed: false, status: 'malformed' };
     let payload: unknown;
     try {

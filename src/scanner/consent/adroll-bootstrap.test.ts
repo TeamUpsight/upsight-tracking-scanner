@@ -8,6 +8,7 @@ import {
 } from './adroll-bootstrap';
 
 const decision = '__adroll.set_consent(null, false, true, "LV", "AE", {"banner":"adroll","ipgeo":{"country_code":"LV","region_name":"Riga"}});';
+const harDecision = 'window.adroll_exp_list = []; __adroll.set_consent(null, false, true, "LV", "AE", {"arconsent":null,"euconsent":null,"purposes":null,"eucookie":null,"banner":"adroll","ipgeo":{"country_code":"LV","region_name":"Riga"},"etld":"matwprojectme.org","max_vendor_id":4202,"networks":["a","g"],"isipv6":false});';
 
 describe('AdRoll consent bootstrap parser', () => {
   it('parses only the bounded allowlisted fields from the observed call shape', () => {
@@ -21,6 +22,27 @@ describe('AdRoll consent bootstrap parser', () => {
       ipgeo_country: 'LV',
       ipgeo_region: 'Riga'
     });
+  });
+
+  it('parses the real HAR-shaped response and retains only allowlisted fields', () => {
+    expect(parseAdRollConsentCheckResponse(harDecision)).toEqual({
+      parsed: true,
+      status: 'parsed',
+      gdpr_applies: true,
+      user_country: 'LV',
+      advertiser_country: 'AE',
+      banner_mode: 'adroll',
+      ipgeo_country: 'LV',
+      ipgeo_region: 'Riga'
+    });
+  });
+
+  it.each([
+    ['arbitrary prefix', `doSomething(); ${decision}`],
+    ['wrong AdRoll prefix', `window.adroll_exp_list = [1]; ${decision}`],
+    ['extra suffix', `${decision} doSomething();`]
+  ])('rejects %s JavaScript', (_name, body) => {
+    expect(parseAdRollConsentCheckResponse(body)).toEqual({ parsed: false, status: 'malformed' });
   });
 
   it.each([
@@ -40,6 +62,7 @@ describe('AdRoll consent bootstrap parser', () => {
     (globalThis as any).__adroll = { set_consent() { calls += 1; } };
     try {
       expect(parseAdRollConsentCheckResponse(decision).parsed).toBe(true);
+      expect(parseAdRollConsentCheckResponse(harDecision).parsed).toBe(true);
       expect(calls).toBe(0);
     } finally {
       (globalThis as any).__adroll = previous;
