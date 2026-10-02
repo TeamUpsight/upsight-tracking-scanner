@@ -23,6 +23,8 @@ Owns the REST boundary, optional internal authentication, request/file validatio
 
 The UI sends Bearer authentication through `src/ui/api.ts`. The server also accepts `X-Internal-API-Token`. Input controls include JSON byte limits, in-memory Multer upload, CSV parsing/deduplication, allowed geo/mode, maximum batch size, and bounded environment values.
 
+Bulk upload mounts `src/bulk-upload.ts` behind the existing `/api/v1` auth. `src/bulk-csv.ts` parses quoted cells and builds one deterministic header map, resolves each row using CSV > multipart/UI > existing defaults, and validates the complete upload before creation. Optional columns are `region` (`geo`, `tested_geos`, `tested_geo`), `exact_country` (`tested_country`, `country`), `mode`, `group_label` (`group label`, `group`), and `modules`; domain-only and legacy first-column files remain supported. Multi-module cells must be quoted, e.g. `"consent,tracking,serverside"`; Server-side aliases normalize through the strict canonical module normalizer. Countries use shared region definitions and `validateExactCountryRequest()` retains the Consent requirement. Mixed-region audits work in one file. First valid duplicate wins; later configurations are never merged. Invalid non-duplicates create/queue zero audits and return at most 50 safe row errors. Success keeps `{ count, duplicates_removed, audits }`. See the README bulk CSV section for examples and public contract.
+
 `GET /api/v1/scans` is a server-paginated summary endpoint: it defaults to `page=1&page_size=25`, caps page size at 100, accepts the existing `filter` and `search` parameters, and never selects audit evidence, trace, or runtime/debug blobs. It returns `{ items, pagination }`, ordered by `scan_started_at DESC, audit_id DESC`. `GET /api/v1/scans/:id` is the explicit on-demand full-detail route; the browser caches an opened audit for the session and deduplicates concurrent detail requests. CSV exports also select only their declared CSV fields.
 
 ## Queue and lifecycle
@@ -30,6 +32,8 @@ The UI sends Bearer authentication through `src/ui/api.ts`. The server also acce
 `InMemoryAuditQueue` stores pending jobs, active IDs/domains, and per-domain cooldowns. It enforces global concurrency and one active job per domain, adds bulk jitter, runs `runStorefrontAudit` with an abort timeout, persists proxy metrics, applies cooldowns after rate-limit/bot/access outcomes, and performs a guarded fallback failure write if execution escapes the runner finalizer.
 
 On startup and every minute, persisted pending rows are requeued and stale orphaned scanning rows are safely reset to restart from the audit start. Atomic pending claims prevent concurrent workers from running the same audit; active browser sessions are never resumed mid-page.
+
+Bulk rows persist mode/modules/queue options through `createAudit()` and region/group on the audit. `queueJobForAudit()` reconstructs exact country from `queue_options.tested_country`, mode and modules; execution reads region/group from the claimed audit. Pending and stale projections retain all these fields. `src/bulk-upload.test.ts` verifies this path with in-memory persistence and a mocked queue, without running scanners.
 
 ## Persistence model
 

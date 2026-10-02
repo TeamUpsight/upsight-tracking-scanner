@@ -26,6 +26,7 @@ import { boundedInteger, bulkProxyRetryLimit, globalScanTimeoutMs } from './src/
 import { buildMetadata } from './src/build-metadata';
 import { productionConfigurationIssues } from './src/production-config';
 import { csvCell } from './src/csv-cell';
+import { createBulkUploadRouter } from './src/bulk-upload';
 
 dotenv.config();
 
@@ -37,7 +38,6 @@ const maxCsvBytes = boundedInteger(process.env.MAX_CSV_BYTES, 5_242_880, 10_000,
 const scanConcurrency = boundedInteger(process.env.SCAN_CONCURRENCY, 3, 1, 10);
 const scanTimeoutMs = globalScanTimeoutMs();
 const staleScanMinutes = boundedInteger(process.env.STALE_SCAN_MINUTES, 10, 3, 1_440);
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: maxCsvBytes, files: 1 } });
 
 function auditsWithCurrentQa(audits: StorefrontAudit[], feedback: QaFeedback[]) {
   const feedbackByAudit = new Map<string, QaFeedback[]>();
@@ -243,30 +243,6 @@ function requestedModules(value: unknown) {
   return selected ? selected : null;
 }
 
-function parseCsvLine(line: string) {
-  const cells: string[] = [];
-  let current = '';
-  let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
-    if (character === '"') {
-      if (quoted && line[index + 1] === '"') {
-        current += '"';
-        index += 1;
-      } else {
-        quoted = !quoted;
-      }
-    } else if (character === ',' && !quoted) {
-      cells.push(current.trim());
-      current = '';
-    } else {
-      current += character;
-    }
-  }
-  cells.push(current.trim());
-  return cells;
-}
-
 function internalAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   const configured = process.env.INTERNAL_API_TOKEN;
   if (!configured) return next();
@@ -329,38 +305,7 @@ app.post('/api/v1/scan', asyncRoute(async (req, res) => {
   res.status(202).json(audit);
 }));
 
-app.post('/api/v1/scan/bulk', upload.single('file'), asyncRoute(async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'A CSV file is required.' });
-  const geo = String(req.body?.tested_geos || '').toUpperCase();
-  if (!validGeo(geo)) return res.status(400).json({ error: 'tested_geos must be USA, EU, or UK.' });
-  const mode = req.body?.mode || 'normal';
-  const selectedModules = requestedModules(req.body?.selected_modules);
-  if (!validMode(mode)) return res.status(400).json({ error: 'mode must be normal or diagnostic.' });
-  if (!selectedModules) return res.status(400).json({ error: 'selected_modules must be a non-empty array of supported modules.' });
-  const exactCountry = validateExactCountryRequest(geo, req.body?.tested_country, selectedModules);
-  if (exactCountry.error) return res.status(400).json({ error: exactCountry.error });
-  const lines = req.file.buffer.toString('utf8').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (!lines.length) return res.status(400).json({ error: 'The CSV is empty.' });
-  const first = parseCsvLine(lines[0]).map((value) => value.toLowerCase());
-  const domainColumn = first.findIndex((value) => value === 'domain' || value.includes('domain'));
-  const start = domainColumn >= 0 ? 1 : 0;
-  const column = domainColumn >= 0 ? domainColumn : 0;
-  const domains = [...new Set(lines.slice(start).map((line) => normalizeAuditDomain(parseCsvLine(line)[column])).filter(Boolean))] as string[];
-  if (!domains.length) return res.status(400).json({ error: 'No valid domains were found.' });
-  if (domains.length > maxBatchDomains) {
-    return res.status(413).json({ error: `Batch contains ${domains.length} unique domains; maximum is ${maxBatchDomains}.` });
-  }
-  const groupLabel = req.body?.group_label ? String(req.body.group_label).slice(0, 120) : null;
-  const audits: StorefrontAudit[] = [];
-  for (const domain of domains) {
-    const audit = await db.createAudit(domain, geo, groupLabel, mode, selectedModules, {
-      enable_captcha_solving: false, is_bulk: true, proxy_provider: 'decodo', tested_country: exactCountry.country
-    });
-    audits.push(audit);
-    queue.add(queueJobForAudit(audit));
-  }
-  res.status(202).json({ count: audits.length, duplicates_removed: lines.length - start - domains.length, audits });
-}));
+app.use('/api/v1/scan/bulk', createBulkUploadRouter({ db, queue, maxBatchDomains, maxCsvBytes }));
 
 app.post('/api/v1/scans/bulk-rerun', asyncRoute(async (req, res) => {
   const ids: string[] | null = Array.isArray(req.body?.ids)

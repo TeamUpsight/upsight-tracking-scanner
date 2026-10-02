@@ -63,7 +63,43 @@ Replay accepts an `evidence.json`, an exported `audit-result.json`, an array of 
 
 The main audit summary shows GA4 installation as one finding and GA4 ecommerce `view_item` as another. The separate collection-observed field remains in normalized evidence, exports, and resolvers because installation evidence and a collection hit are technically different, but it is not shown as a redundant standalone finding in the main UI.
 
-Bulk CSV input accepts a `domain` column (or the first column), deduplicates valid domains, validates geo, limits upload bytes, caps each batch at 5,000 unique domains, and defaults to concurrency 3. CAPTCHA solving is disabled for bulk jobs.
+Bulk CSV input accepts a `domain` column (legacy first-column imports also work), deduplicates valid domains, limits upload bytes, caps each batch at 5,000 unique domains, and defaults to concurrency 3. CAPTCHA solving is disabled for bulk jobs.
+
+### Bulk CSV per-row configuration
+
+`POST /api/v1/scan/bulk` accepts the existing multipart `file` and fallback settings: `tested_geos`, `tested_country`, `mode`, `group_label`, and JSON `selected_modules`. Optional CSV configuration overrides the settings below for that row. Blank or missing CSV values use the settings selected here. Precedence is **CSV row > UI/request setting > existing default** (USA, normal mode, all modules, no exact country or label).
+
+| CSV column | Accepted headers | Values |
+| --- | --- | --- |
+| `domain` | `domain` | Storefront hostname or HTTP(S) URL, using existing domain normalization |
+| `region` | `region`, `geo`, `tested_geos`, `tested_geo` | USA, EU, UK |
+| `exact_country` | `exact_country`, `tested_country`, `country` | Existing ISO alpha-2 targets supported for the resolved region |
+| `mode` | `mode` | normal, diagnostic |
+| `group_label` | `group_label`, `group label`, `group` | Optional label, trimmed and capped at the existing 120 characters |
+| `modules` | `modules` | Comma-separated Consent, Tracking, Server-side module IDs |
+
+Headers are trimmed and matched case-insensitively; spaces and hyphens normalize to underscores (`Group Label`, `group-label`, `Exact Country` also work). The first matching column wins when aliases collide. Region/country/mode/module values normalize case and whitespace. Module aliases `serverside`, `server_side`, and `server-side` all become `server_side`; unknown modules reject the upload and are never silently dropped. Quote a multi-module cell, for example `"consent,tracking,serverside"`:
+
+```csv
+domain,region,exact_country,mode,group_label,modules
+example.com,EU,DE,diagnostic,eu-canary,"consent,tracking,serverside"
+example-default.com,,,,,
+```
+
+A single CSV may now contain **mixed-region audits**; separate geography files are unnecessary:
+
+```csv
+domain,region,exact_country
+site1.com,USA,US
+site2.com,UK,GB
+site3.com,EU,DE
+```
+
+Exact countries are checked against each row's final region: USA/US, UK/GB, and EU/DE, NL, FR, IT, ES. The existing exact-country requirement for the **Consent module** remains: include Consent in the row or fallback modules when specifying an exact country. Blank countries inherit the UI/request country if set, so a changed region must also override an incompatible fallback country. With neither country set, existing regional routing is preserved.
+
+The entire CSV is parsed and validated before any audit is created or queued. An invalid non-duplicate configuration returns HTTP 400 with `error: "CSV validation failed."`, `error_count`, `errors_returned`, `errors_truncated`, and up to 50 `rows` containing physical line number, normalized domain (or null), field and message. Errors omit raw cells and CSV content. For duplicate normalized domains, the first valid occurrence wins, later duplicates count as removed, and configuration is never merged. Legacy domain-only imports retain their existing invalid-domain filtering.
+
+Successful responses retain `count`, `duplicates_removed`, and `audits`. Every audit stores its resolved region, exact country in `queue_options.tested_country`, mode, label and modules, which pending/stale queue recovery reuses. Unknown CSV columns are ignored: CSV cannot set credentials, proxy providers/URLs, challenge solving, timeouts, internal flags or arbitrary queue options. Existing auth, file-size, batch-size and concurrency protections apply.
 
 The Review Queue contains one row per normalized website and only its latest audit. **Mark as Correct** persists a QA resolution, removes that latest audit from the queue, and excludes its resolved failure fingerprints from Quality improvement priorities. Quality finding distributions and operational rates use the latest audit per unique website; the dashboard separately reports all stored audits and unique websites.
 
