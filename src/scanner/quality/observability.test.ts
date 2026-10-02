@@ -77,6 +77,46 @@ describe('WP10 diagnostic observability', () => {
     expect(buildObservabilityConsistency(audit(evidence), evidence).checks.find((check) => check.code === 'OBS_CONSENT_MEASUREMENT_MISMATCH')?.status).toBe('mismatch');
   });
 
+  it('treats explicit generic fallback as compatibility Unknown only for provider consistency', () => {
+    const providerStatus = (evidence: ReturnType<typeof fixture>, currentAudit: StorefrontAudit) =>
+      buildObservabilityConsistency(currentAudit, evidence).checks.find((check) => check.code === 'OBS_CONSENT_PROVIDER_MISMATCH')?.status;
+    for (const compatibilityProvider of ['Unknown', 'unknown', null]) {
+      const evidence = fixture();
+      evidence.runtime.consent_v2!.provider = 'generic';
+      evidence.runtime.consent_v2!.generic_fallback = true;
+      (evidence.consent as { resolved_provider: unknown }).resolved_provider = compatibilityProvider;
+      evidence.decision_summary!.find((item) => item.decision_name === 'cmp')!.status = compatibilityProvider;
+      const currentAudit = audit(evidence);
+      (currentAudit as { cmp_provider: unknown }).cmp_provider = compatibilityProvider;
+      expect(providerStatus(evidence, currentAudit)).toBe('pass');
+    }
+
+    const namedRuntime = fixture();
+    namedRuntime.consent.resolved_provider = 'Unknown';
+    namedRuntime.decision_summary!.find((item) => item.decision_name === 'cmp')!.status = 'Unknown';
+    const namedRuntimeAudit = audit(namedRuntime);
+    namedRuntimeAudit.cmp_provider = 'Unknown';
+    expect(providerStatus(namedRuntime, namedRuntimeAudit)).toBe('mismatch');
+
+    const genericVsNamed = fixture();
+    genericVsNamed.runtime.consent_v2!.provider = 'generic';
+    genericVsNamed.runtime.consent_v2!.generic_fallback = true;
+    expect(providerStatus(genericVsNamed, audit(genericVsNamed))).toBe('mismatch');
+
+    const differentNamed = fixture();
+    differentNamed.runtime.consent_v2!.provider = 'sourcepoint';
+    expect(providerStatus(differentNamed, audit(differentNamed))).toBe('mismatch');
+
+    const genericWithoutFallback = fixture();
+    genericWithoutFallback.runtime.consent_v2!.provider = 'generic';
+    genericWithoutFallback.runtime.consent_v2!.generic_fallback = false;
+    genericWithoutFallback.consent.resolved_provider = 'Unknown';
+    genericWithoutFallback.decision_summary!.find((item) => item.decision_name === 'cmp')!.status = 'Unknown';
+    const genericWithoutFallbackAudit = audit(genericWithoutFallback);
+    genericWithoutFallbackAudit.cmp_provider = 'Unknown';
+    expect(providerStatus(genericWithoutFallback, genericWithoutFallbackAudit)).toBe('mismatch');
+  });
+
   it('OBS-SURFACE-01 through OBS-SURFACE-05 flag only strong visible consent UI that disagrees with the canonical banner', () => {
     const check = (evidence: ReturnType<typeof fixture>) => buildObservabilityConsistency(audit(evidence), evidence).checks.find((item) => item.code === 'OBS_CONSENT_SURFACE_BANNER_MISMATCH');
     const didomi = fixture();

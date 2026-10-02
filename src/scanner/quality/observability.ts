@@ -8,6 +8,21 @@ function provider(value: unknown) {
   return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+const GENERIC_FALLBACK_UNKNOWN_PROVIDER = '__generic_fallback_unknown__';
+
+function providerConsistencyValues(runtimeProvider: unknown, genericFallback: unknown, compatibilityProviders: readonly unknown[]) {
+  const normalizedRuntime = provider(runtimeProvider);
+  const runtimeIdentity = runtimeProvider === 'generic' && genericFallback === true
+    ? GENERIC_FALLBACK_UNKNOWN_PROVIDER
+    : normalizedRuntime;
+  return [runtimeIdentity, ...compatibilityProviders.map((value) => {
+    const normalized = provider(value);
+    return runtimeIdentity === GENERIC_FALLBACK_UNKNOWN_PROVIDER && normalized === null
+      ? GENERIC_FALLBACK_UNKNOWN_PROVIDER
+      : normalized;
+  })];
+}
+
 function mismatch(code: string, values: Record<string, unknown>, compared: unknown[]) : Check {
   const known = compared.filter((value) => value !== null && value !== undefined && value !== 'unknown');
   return { code, status: known.length < 2 ? 'not_applicable' : new Set(known.map((value) => String(value))).size > 1 ? 'mismatch' : 'pass', values };
@@ -57,7 +72,7 @@ export function buildObservabilityConsistency(audit: Partial<StorefrontAudit>, e
   const fresh = snapshots.find((item) => item.context === 'fresh');
   const canonical = evidence.decision_summary?.find((item) => item.decision_name === 'cmp')?.status ?? audit.cmp_provider ?? null;
   const runtimeProvider = runtime?.provider ?? null;
-  const normalizedProviders = [provider(runtimeProvider), provider(evidence.consent.resolved_provider), provider(audit.cmp_provider), provider(canonical)];
+  const normalizedProviders = providerConsistencyValues(runtimeProvider, runtime?.generic_fallback, [evidence.consent.resolved_provider, audit.cmp_provider, canonical]);
   const providerCheck: Check = {
     code: 'OBS_CONSENT_PROVIDER_MISMATCH',
     status: normalizedProviders.every((value) => value === null) ? 'not_applicable' :
