@@ -251,7 +251,7 @@ describe('Consent P0.1.6 AdRoll bootstrap grace', () => {
       bootstrap_state: 'banner_visible',
       adroll_country_matches_requested_country: false
     });
-    expect(JSON.stringify(output.telemetry.adroll_bootstrap)).not.toMatch(/fixture-advertiser|discard-me|set_consent/);
+    expect(JSON.stringify(output.telemetry.adroll_bootstrap)).not.toMatch(/fixture-advertiser|discard-me|__adroll\.set_consent/);
     expect(output.result.reason_codes).not.toContain('NO_CMP_DETECTED');
     expect(output.result.interactions).toEqual([]);
     expect(counters).toEqual({ load: 0, action: 0 });
@@ -296,6 +296,43 @@ describe('Consent P0.1.6 AdRoll bootstrap grace', () => {
       bootstrap_state: 'completed_without_banner'
     });
     expect(elapsedMs).toBeLessThan(650);
+  }, 15_000);
+
+  it('J: keeps an Audit-590-shaped unrelated response diagnostic, provider-neutral, and absence-protecting', async () => {
+    const { output, counters } = await auditBootstrap({
+      consentBody: 'window.someAdrollState = true;',
+      consentRequestDelayMs: 30,
+      graceMs: 260
+    });
+    expect(selectedProvider(output)).not.toBe('adroll');
+    expect(output.telemetry.adroll_bootstrap).toMatchObject({
+      roundtrip_observed: true,
+      consent_check_observed: true,
+      consent_check_status: 200,
+      consent_check_parsed: false,
+      consent_check_parse_status: 'unrelated',
+      consent_check_body_bytes: Buffer.byteLength('window.someAdrollState = true;'),
+      consent_check_content_type: 'javascript',
+      consent_check_content_length_bytes: Buffer.byteLength('window.someAdrollState = true;'),
+      consent_check_body_read_status: 'read',
+      consent_check_response_shape: 'other_javascript',
+      consent_check_contains_adroll_exp_list: false,
+      consent_check_contains_set_consent: false,
+      grace_triggered: true,
+      grace_timed_out: true,
+      bootstrap_state: 'timed_out'
+    });
+    expect(output.diagnostic_observation?.adroll?.bootstrap).toMatchObject({
+      consent_check_body_read_status: 'read',
+      consent_check_response_shape: 'other_javascript'
+    });
+    expect(output.result.reason_codes).toContain('DETECTION_INCONCLUSIVE');
+    expect(output.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+    expect(mapConsentV2ToExisting(output.result, {
+      geo: 'EU', page_valid: true, tracking_before_interaction: false, post_reject_observation_completed: false
+    }).consent_status).toBe('inconclusive');
+    expect(output.result.interactions).toEqual([]);
+    expect(counters).toEqual({ load: 0, action: 0 });
   }, 15_000);
 
   it('H: gives non-AdRoll pages zero bootstrap delay and preserves the normal appearance window', async () => {

@@ -26,6 +26,38 @@ export type AdRollConsentCheckParseStatus =
   | 'body_unavailable'
   | 'http_error';
 
+export type AdRollConsentCheckBodyReadStatus =
+  | 'not_attempted'
+  | 'read'
+  | 'body_unavailable'
+  | 'oversized'
+  | 'http_error';
+
+export type AdRollConsentCheckContentType =
+  | 'javascript'
+  | 'html'
+  | 'json'
+  | 'text'
+  | 'other'
+  | 'unknown';
+
+export type AdRollConsentCheckResponseShape =
+  | 'not_observed'
+  | 'empty'
+  | 'set_consent'
+  | 'experiment_list_and_set_consent'
+  | 'experiment_list_only'
+  | 'html'
+  | 'json'
+  | 'other_javascript'
+  | 'unknown';
+
+export interface AdRollConsentCheckResponseClassification {
+  response_shape: Exclude<AdRollConsentCheckResponseShape, 'not_observed'>;
+  contains_adroll_exp_list: boolean;
+  contains_set_consent: boolean;
+}
+
 export interface AdRollConsentDecision {
   gdpr_applies: boolean;
   user_country: string;
@@ -47,6 +79,13 @@ export interface AdRollBootstrapTelemetry {
   consent_check_status: number | null;
   consent_check_parsed: boolean;
   consent_check_parse_status: AdRollConsentCheckParseStatus;
+  consent_check_body_bytes: number | null;
+  consent_check_content_type: AdRollConsentCheckContentType;
+  consent_check_content_length_bytes: number | null;
+  consent_check_body_read_status: AdRollConsentCheckBodyReadStatus;
+  consent_check_response_shape: AdRollConsentCheckResponseShape;
+  consent_check_contains_adroll_exp_list: boolean;
+  consent_check_contains_set_consent: boolean;
   consent_check_requested_at_ms: number | null;
   consent_check_completed_at_ms: number | null;
   gdpr_applies: boolean | null;
@@ -90,6 +129,61 @@ function boundedString(value: unknown, maximum: number, pattern?: RegExp) {
   const normalized = value.trim();
   if (!normalized || normalized.length > maximum || (pattern && !pattern.test(normalized))) return null;
   return normalized;
+}
+
+export function normalizeAdRollConsentCheckContentType(value: string | null | undefined): AdRollConsentCheckContentType {
+  if (typeof value !== 'string') return 'unknown';
+  const mediaType = value.split(';', 1)[0].trim().toLowerCase();
+  if (!mediaType) return 'unknown';
+  if (['application/javascript', 'text/javascript', 'application/x-javascript', 'application/ecmascript', 'text/ecmascript'].includes(mediaType)) return 'javascript';
+  if (mediaType === 'text/html' || mediaType === 'application/xhtml+xml') return 'html';
+  if (mediaType === 'application/json' || mediaType === 'text/json' || mediaType.endsWith('+json')) return 'json';
+  if (mediaType.startsWith('text/')) return 'text';
+  return 'other';
+}
+
+const ADROLL_EXPERIMENT_LIST_PATTERN = /(?:^|[;\s])window\s*\.\s*adroll_exp_list\s*=\s*\[\s*\]\s*;/;
+const ADROLL_SET_CONSENT_PATTERN = /(?:^|[;\s])__adroll\.set_consent\s*\(/;
+
+/** Classifies a bounded response without evaluating it or retaining any contents. */
+export function classifyAdRollConsentCheckResponse(
+  body: string,
+  contentType: AdRollConsentCheckContentType = 'unknown'
+): AdRollConsentCheckResponseClassification {
+  if (Buffer.byteLength(body, 'utf8') > ADROLL_CONSENT_RESPONSE_MAX_BYTES) {
+    return { response_shape: 'unknown', contains_adroll_exp_list: false, contains_set_consent: false };
+  }
+  const trimmed = body.trim();
+  if (!trimmed) return { response_shape: 'empty', contains_adroll_exp_list: false, contains_set_consent: false };
+  const containsExperimentList = ADROLL_EXPERIMENT_LIST_PATTERN.test(trimmed);
+  const containsSetConsent = ADROLL_SET_CONSENT_PATTERN.test(trimmed);
+  if (containsExperimentList && containsSetConsent) {
+    return { response_shape: 'experiment_list_and_set_consent', contains_adroll_exp_list: true, contains_set_consent: true };
+  }
+  if (containsSetConsent) {
+    return { response_shape: 'set_consent', contains_adroll_exp_list: false, contains_set_consent: true };
+  }
+  if (containsExperimentList) {
+    return { response_shape: 'experiment_list_only', contains_adroll_exp_list: true, contains_set_consent: false };
+  }
+  if (/^<(?:!doctype\b|html\b|head\b|body\b)/i.test(trimmed)) {
+    return { response_shape: 'html', contains_adroll_exp_list: false, contains_set_consent: false };
+  }
+  if (/^[\[{]/.test(trimmed)) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed !== null && typeof parsed === 'object') {
+        return { response_shape: 'json', contains_adroll_exp_list: false, contains_set_consent: false };
+      }
+    } catch {
+      // Invalid JSON remains eligible for a bounded JavaScript/text classification.
+    }
+  }
+  const looksLikeJavascript = /^(?:window|globalThis|self|var|let|const|function)\b/.test(trimmed);
+  if (contentType === 'javascript' || contentType === 'text' || looksLikeJavascript) {
+    return { response_shape: 'other_javascript', contains_adroll_exp_list: false, contains_set_consent: false };
+  }
+  return { response_shape: 'unknown', contains_adroll_exp_list: false, contains_set_consent: false };
 }
 
 /**
@@ -149,6 +243,13 @@ const emptyTelemetry = (): AdRollBootstrapTelemetry => ({
   consent_check_status: null,
   consent_check_parsed: false,
   consent_check_parse_status: 'not_attempted',
+  consent_check_body_bytes: null,
+  consent_check_content_type: 'unknown',
+  consent_check_content_length_bytes: null,
+  consent_check_body_read_status: 'not_attempted',
+  consent_check_response_shape: 'not_observed',
+  consent_check_contains_adroll_exp_list: false,
+  consent_check_contains_set_consent: false,
   consent_check_requested_at_ms: null,
   consent_check_completed_at_ms: null,
   gdpr_applies: null,
@@ -218,10 +319,39 @@ export class AdRollBootstrapObserver {
     if (adRollBootstrapNetworkStage(rawUrl) !== 'consent_check') return false;
     this.observeRequest(rawUrl, observedAt);
     this.telemetry.consent_check_status = Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+    this.telemetry.consent_check_response_shape = 'unknown';
     return true;
   }
 
+  observeConsentCheckHeaders(contentType: string | null | undefined, contentLength: string | null | undefined) {
+    this.telemetry.consent_check_content_type = normalizeAdRollConsentCheckContentType(contentType);
+    if (typeof contentLength !== 'string' || !/^\d+$/.test(contentLength.trim())) {
+      this.telemetry.consent_check_content_length_bytes = null;
+      return null;
+    }
+    const parsed = Number(contentLength.trim());
+    this.telemetry.consent_check_content_length_bytes = Number.isSafeInteger(parsed) ? parsed : null;
+    return parsed;
+  }
+
   observeConsentCheckBody(body: string) {
+    const bodyBytes = Buffer.byteLength(body, 'utf8');
+    this.telemetry.consent_check_body_bytes = bodyBytes;
+    if (bodyBytes > ADROLL_CONSENT_RESPONSE_MAX_BYTES) {
+      this.telemetry.consent_check_body_read_status = 'oversized';
+      this.telemetry.consent_check_response_shape = 'unknown';
+      this.telemetry.consent_check_contains_adroll_exp_list = false;
+      this.telemetry.consent_check_contains_set_consent = false;
+      const parsed = parseAdRollConsentCheckResponse(body);
+      this.telemetry.consent_check_parse_status = parsed.status;
+      this.telemetry.consent_check_parsed = parsed.parsed;
+      return parsed;
+    }
+    const classification = classifyAdRollConsentCheckResponse(body, this.telemetry.consent_check_content_type);
+    this.telemetry.consent_check_body_read_status = 'read';
+    this.telemetry.consent_check_response_shape = classification.response_shape;
+    this.telemetry.consent_check_contains_adroll_exp_list = classification.contains_adroll_exp_list;
+    this.telemetry.consent_check_contains_set_consent = classification.contains_set_consent;
     const parsed = parseAdRollConsentCheckResponse(body);
     this.telemetry.consent_check_parse_status = parsed.status;
     this.telemetry.consent_check_parsed = parsed.parsed;
@@ -238,7 +368,13 @@ export class AdRollBootstrapObserver {
   }
 
   markConsentCheckUnparsed(status: 'body_unavailable' | 'http_error' | 'oversized') {
-    if (!this.telemetry.consent_check_parsed) this.telemetry.consent_check_parse_status = status;
+    if (!this.telemetry.consent_check_parsed) {
+      this.telemetry.consent_check_parse_status = status;
+      this.telemetry.consent_check_body_read_status = status;
+      this.telemetry.consent_check_response_shape = 'unknown';
+      this.telemetry.consent_check_contains_adroll_exp_list = false;
+      this.telemetry.consent_check_contains_set_consent = false;
+    }
   }
 
   observeBannerRoot(present: boolean, visible: boolean) {
@@ -314,6 +450,14 @@ export function attachAdRollBootstrapObserver(page: Page, observationStartedAt =
     if (!observer.observeConsentCheckResponse(response.url(), response.status())) return;
     const task = (async () => {
       try {
+        let headers: Record<string, string>;
+        try {
+          headers = await response.allHeaders();
+        } catch {
+          observer.markConsentCheckUnparsed(response.status() < 200 || response.status() >= 300 ? 'http_error' : 'body_unavailable');
+          return;
+        }
+        const contentLength = observer.observeConsentCheckHeaders(headers['content-type'], headers['content-length']);
         if (response.status() < 200 || response.status() >= 300) {
           observer.markConsentCheckUnparsed('http_error');
           return;
@@ -323,13 +467,10 @@ export function attachAdRollBootstrapObserver(page: Page, observationStartedAt =
           observer.markConsentCheckUnparsed('body_unavailable');
           return;
         }
-        const headers = await response.allHeaders();
-        const rawLength = headers['content-length'];
-        if (!rawLength || !/^\d+$/.test(rawLength.trim())) {
+        if (contentLength === null) {
           observer.markConsentCheckUnparsed('body_unavailable');
           return;
         }
-        const contentLength = Number(rawLength);
         if (!Number.isSafeInteger(contentLength) || contentLength > ADROLL_CONSENT_RESPONSE_MAX_BYTES) {
           observer.markConsentCheckUnparsed('oversized');
           return;

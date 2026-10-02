@@ -1356,6 +1356,15 @@ export async function runStorefrontAudit(
     const metadata = { module: 'consent' as const, severity: 'info' as const };
     if (bootstrap.roundtrip_observed) addTrace('adroll_roundtrip_observed', { requested_at_ms: bootstrap.roundtrip_requested_at_ms, completed_at_ms: bootstrap.roundtrip_completed_at_ms }, metadata);
     if (bootstrap.consent_check_observed) addTrace('adroll_consent_check_observed', { status: bootstrap.consent_check_status, requested_at_ms: bootstrap.consent_check_requested_at_ms, completed_at_ms: bootstrap.consent_check_completed_at_ms }, metadata);
+    if (bootstrap.consent_check_body_read_status !== 'not_attempted') addTrace('adroll_consent_check_response_classified', {
+      status: bootstrap.consent_check_status,
+      body_bytes: bootstrap.consent_check_body_bytes,
+      content_type: bootstrap.consent_check_content_type,
+      body_read_status: bootstrap.consent_check_body_read_status,
+      response_shape: bootstrap.consent_check_response_shape,
+      contains_adroll_exp_list: bootstrap.consent_check_contains_adroll_exp_list,
+      contains_set_consent: bootstrap.consent_check_contains_set_consent
+    }, metadata);
     if (bootstrap.consent_check_parsed) addTrace('adroll_consent_decision_observed', { gdpr_applies: bootstrap.gdpr_applies, banner_mode: bootstrap.banner_mode }, metadata);
     if (bootstrap.adroll_banner_expected) addTrace('adroll_banner_expected', {}, metadata);
     if (bootstrap.consent_script_observed) addTrace('adroll_consent_script_observed', { requested_at_ms: bootstrap.consent_script_requested_at_ms, completed_at_ms: bootstrap.consent_script_completed_at_ms }, metadata);

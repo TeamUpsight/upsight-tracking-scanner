@@ -70,6 +70,8 @@ describe('Consent V2 canonical replay tracking consistency', () => {
       adroll_bootstrap: {
         roundtrip_observed: true, roundtrip_requested_at_ms: 10, roundtrip_completed_at_ms: 100,
         consent_check_observed: true, consent_check_status: 200, consent_check_parsed: true, consent_check_parse_status: 'parsed', consent_check_requested_at_ms: 110, consent_check_completed_at_ms: 150,
+        consent_check_body_bytes: 180, consent_check_content_type: 'javascript', consent_check_content_length_bytes: 180, consent_check_body_read_status: 'read',
+        consent_check_response_shape: 'set_consent', consent_check_contains_adroll_exp_list: false, consent_check_contains_set_consent: true,
         gdpr_applies: true, user_country: 'LV', advertiser_country: 'AE', banner_mode: 'adroll', ipgeo_country: 'LV', ipgeo_region: 'Riga',
         consent_script_observed: false, consent_script_requested_at_ms: null, consent_script_completed_at_ms: null,
         banner_root_observed: false, banner_visible: false, adroll_banner_expected: true, adroll_country_matches_requested_country: false,
@@ -99,6 +101,8 @@ describe('Consent V2 canonical replay tracking consistency', () => {
       adroll_bootstrap: {
         roundtrip_observed: true, roundtrip_requested_at_ms: 20, roundtrip_completed_at_ms: 200,
         consent_check_observed: false, consent_check_status: null, consent_check_parsed: false, consent_check_parse_status: 'not_attempted', consent_check_requested_at_ms: null, consent_check_completed_at_ms: null,
+        consent_check_body_bytes: null, consent_check_content_type: 'unknown', consent_check_content_length_bytes: null, consent_check_body_read_status: 'not_attempted',
+        consent_check_response_shape: 'not_observed', consent_check_contains_adroll_exp_list: false, consent_check_contains_set_consent: false,
         gdpr_applies: null, user_country: null, advertiser_country: null, banner_mode: null, ipgeo_country: null, ipgeo_region: null,
         consent_script_observed: false, consent_script_requested_at_ms: null, consent_script_completed_at_ms: null,
         banner_root_observed: false, banner_visible: false, adroll_banner_expected: false, adroll_country_matches_requested_country: null,
