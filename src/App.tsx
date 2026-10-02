@@ -12,11 +12,17 @@ import { apiFetch, downloadBlob } from './ui/api';
 import { AuditDetailCache } from './ui/audit-detail-cache';
 import { formatLabel, websiteUrl } from './ui/format';
 import { StatusBadge } from './ui/StatusBadge';
+import { CSV_CONFIG_LABELS, NO_CSV_OVERRIDES, useBulkCsvPreview } from './ui/bulk-csv-preview';
 
 type View = 'audits' | 'quality' | 'review' | 'proxy';
 type AuditFilter = AuditListFilter;
 const ACTIVE_STATUSES = new Set(['pending', 'scanning']);
 const QA_CATEGORIES: QaFeedback['category'][] = ['CMP', 'Consent', 'GA4', 'Meta', 'view_item', 'PDP discovery', 'server-side', 'CMS', 'bot/access', 'other'];
+const CSV_OVERRIDE_REASON = 'Configured per row by the uploaded CSV. Blank CSV values use the current fallback value.';
+
+function CsvOverrideBadge({ active }: { active: boolean }) {
+  return active ? <span title={CSV_OVERRIDE_REASON} className="rounded border border-slate-600/50 bg-[#0d1016] px-1.5 py-0.5 text-[9px] font-medium text-slate-300">CSV override</span> : null;
+}
 
 function ExplainedAction({ help, children, className = '', iconOnly = false, ...buttonProps }: {
   help: string;
@@ -155,6 +161,12 @@ export default function App() {
   const [scanMode, setScanMode] = useState<'normal' | 'diagnostic'>('normal');
   const [selectedModules, setSelectedModules] = useState<AuditModule[]>(['consent', 'tracking', 'server_side']);
   const [csv, setCsv] = useState<File | null>(null);
+  const csvPreview = useBulkCsvPreview(csv);
+  const csvOverrides = mode === 'bulk' ? csvPreview.columns : NO_CSV_OVERRIDES;
+  const csvReasonId = useId();
+  const overrideLabels = Object.entries(CSV_CONFIG_LABELS).filter(([field]) => csvOverrides[field]).map(([, label]) => label);
+  const showExactCountry = geo === 'EU' && selectedModules.includes('consent') ||
+    mode === 'bulk' && (csvOverrides.exact_country || csvOverrides.region || csvOverrides.modules);
   const [captcha, setCaptcha] = useState(false);
   const [scans, setScans] = useState<AuditSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | number | null>(null);
@@ -312,7 +324,7 @@ export default function App() {
   };
 
   const startScan = async () => {
-    if (!selectedModules.length) { setError('Select at least one audit module.'); return; }
+    if (!selectedModules.length && !csvOverrides.modules) { setError('Select at least one audit module.'); return; }
     setBusy(true);
     setError(null);
     try {
@@ -326,7 +338,7 @@ export default function App() {
         if (!csv) throw new Error('Choose a CSV file first.');
         const body = new FormData();
         body.append('file', csv); body.append('tested_geos', geo); body.append('group_label', group); body.append('mode', scanMode); body.append('selected_modules', JSON.stringify(selectedModules));
-        body.append('tested_country', geo === 'EU' && selectedModules.includes('consent') ? testedCountry : '');
+        body.append('tested_country', showExactCountry ? testedCountry : '');
         response = await request('/api/v1/scan/bulk', { method: 'POST', body });
       }
       const result = await response.json();
@@ -530,19 +542,23 @@ export default function App() {
           <section className="rounded-2xl border border-neutral-border bg-bg-card p-5 shadow-sm">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-bold text-white">New Audit</h3><p className="mt-1 text-[11px] text-slate-400">One PDP per domain. Bulk runs use bounded concurrency and one proxy retry.</p></div><div className="flex rounded-lg border border-neutral-border bg-[#0d1016] p-1 text-xs"><button type="button" onClick={() => setMode('single')} className={`rounded-md px-3 py-1.5 ${mode === 'single' ? 'bg-primary/15 text-primary' : 'text-slate-400 hover:text-white'}`}>Single</button><button type="button" onClick={() => setMode('bulk')} className={`rounded-md px-3 py-1.5 ${mode === 'bulk' ? 'bg-primary/15 text-primary' : 'text-slate-400 hover:text-white'}`}>Bulk CSV</button></div></div>
             {mode === 'bulk' && <div className="mb-3 space-y-2 text-[11px] leading-relaxed text-slate-400">
+              {csv && <p role="status">{csvPreview.status === 'reading' ? 'Reading CSV configuration headers…' : csvPreview.status === 'unavailable' ? 'CSV configuration could not be previewed. The file will be validated when submitted.' : overrideLabels.length ? `CSV overrides detected: ${overrideLabels.join(', ')}` : 'No CSV configuration overrides detected. Settings below will apply to all rows.'}</p>}
               <p>Optional CSV configuration overrides the settings below for that row. Blank or missing CSV values use the settings selected here.</p>
-              <p>Supported columns: <code>domain, region, exact_country, mode, group_label, modules</code>. A single CSV can contain mixed-region audits.</p>
-              <pre className="overflow-x-auto rounded-lg border border-neutral-border bg-[#0d1016] p-3 text-[10px]">{'domain,region,exact_country,mode,group_label,modules\nexample.com,EU,DE,diagnostic,eu-canary,"consent,tracking,serverside"'}</pre>
+              <span id={csvReasonId} className="sr-only">{CSV_OVERRIDE_REASON}</span>
+              <details><summary className="cursor-pointer text-slate-300">CSV columns and example</summary>
+                <p className="mt-2">Supported columns: <code>domain, region, exact_country, mode, group_label, modules</code>. A single CSV can contain mixed-region audits.</p>
+                <pre className="mt-2 overflow-x-auto rounded-lg border border-neutral-border bg-[#0d1016] p-3 text-[10px]">{'domain,region,exact_country,mode,group_label,modules\nexample.com,EU,DE,diagnostic,eu-canary,"consent,tracking,serverside"'}</pre>
+              </details>
             </div>}
             <div className="grid gap-3 lg:grid-cols-[2fr_110px_170px_1fr_auto]">
-              {mode === 'single' ? <div className="relative"><Globe2 className="absolute left-3 top-3 h-4 w-4 text-slate-600" /><input value={domain} onChange={(event) => setDomain(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && domain && !busy) void startScan(); }} placeholder="storefront.example" className="w-full rounded-lg border border-neutral-border bg-[#0d1016] py-2.5 pl-10 pr-3 text-sm outline-none transition focus:border-primary" /></div> : <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-neutral-border bg-[#0d1016] px-3 py-2.5 text-xs text-slate-400 hover:border-primary/50"><Upload className="h-4 w-4" />{csv?.name || 'Choose CSV with domain column'}<input type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => setCsv(event.target.files?.[0] || null)} /></label>}
-              <select aria-label="Audit geo" value={geo} onChange={(event) => setGeo(event.target.value as typeof geo)} className="rounded-lg border border-neutral-border bg-[#0d1016] px-3 text-xs"><option>USA</option><option>EU</option><option>UK</option></select>
-              <select aria-label="Scan mode" value={scanMode} onChange={(event) => setScanMode(event.target.value as typeof scanMode)} className="rounded-lg border border-neutral-border bg-[#0d1016] px-3 text-xs"><option value="normal">Normal · lean</option><option value="diagnostic">Diagnostic · more evidence</option></select>
-              <input value={group} onChange={(event) => setGroup(event.target.value)} placeholder="Optional group label" className="rounded-lg border border-neutral-border bg-[#0d1016] px-3 text-xs outline-none transition focus:border-primary" />
+              {mode === 'single' ? <div className="relative"><Globe2 className="absolute left-3 top-3 h-4 w-4 text-slate-600" /><input value={domain} onChange={(event) => setDomain(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && domain && !busy) void startScan(); }} placeholder="storefront.example" className="w-full rounded-lg border border-neutral-border bg-[#0d1016] py-2.5 pl-10 pr-3 text-sm outline-none transition focus:border-primary" /></div> : <div className="relative"><label className="flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-neutral-border bg-[#0d1016] py-2.5 pl-3 pr-9 text-xs text-slate-400 hover:border-primary/50"><Upload className="h-4 w-4" />{csv?.name || 'Choose CSV with domain column'}<input type="file" accept=".csv,text/csv" className="hidden" onChange={(event) => { setCsv(event.target.files?.[0] || null); event.target.value = ''; }} /></label>{csv && <button type="button" aria-label="Remove CSV file" onClick={() => setCsv(null)} className="absolute right-2 top-2 rounded p-1 text-slate-400 hover:text-white"><X className="h-3 w-3" /></button>}</div>}
+              <div className="relative"><select aria-label="Audit geo" disabled={csvOverrides.region} aria-describedby={csvOverrides.region ? csvReasonId : undefined} title={csvOverrides.region ? CSV_OVERRIDE_REASON : undefined} value={geo} onChange={(event) => setGeo(event.target.value as typeof geo)} className="w-full rounded-lg border border-neutral-border bg-[#0d1016] px-3 py-2.5 text-xs disabled:cursor-not-allowed disabled:opacity-50"><option>USA</option><option>EU</option><option>UK</option></select><span className="absolute -top-2 right-1"><CsvOverrideBadge active={csvOverrides.region} /></span></div>
+              <div className="relative"><select aria-label="Scan mode" disabled={csvOverrides.mode} aria-describedby={csvOverrides.mode ? csvReasonId : undefined} title={csvOverrides.mode ? CSV_OVERRIDE_REASON : undefined} value={scanMode} onChange={(event) => setScanMode(event.target.value as typeof scanMode)} className="w-full rounded-lg border border-neutral-border bg-[#0d1016] px-3 py-2.5 text-xs disabled:cursor-not-allowed disabled:opacity-50"><option value="normal">Normal · lean</option><option value="diagnostic">Diagnostic · more evidence</option></select><span className="absolute -top-2 right-1"><CsvOverrideBadge active={csvOverrides.mode} /></span></div>
+              <div className="relative"><input aria-label="Group label" disabled={csvOverrides.group_label} aria-describedby={csvOverrides.group_label ? csvReasonId : undefined} title={csvOverrides.group_label ? CSV_OVERRIDE_REASON : undefined} value={group} onChange={(event) => setGroup(event.target.value)} placeholder="Optional group label" className="w-full rounded-lg border border-neutral-border bg-[#0d1016] px-3 py-2.5 text-xs outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50" /><span className="absolute -top-2 right-1"><CsvOverrideBadge active={csvOverrides.group_label} /></span></div>
               <button type="button" disabled={busy || (mode === 'single' ? !domain : !csv)} onClick={() => void startScan()} className="flex items-center justify-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-xs font-black uppercase tracking-wider text-[#07120f] shadow-lg shadow-primary/10 transition hover:bg-primary-hover hover:shadow-primary/20 disabled:opacity-40">{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}Run audit</button>
             </div>
-            <fieldset className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-300"><legend className="mr-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Modules</legend>{([['consent', 'Consent'], ['tracking', 'Tracking'], ['server_side', 'Server-side']] as const).map(([module, label]) => <label key={module} className="flex items-center gap-1.5"><input type="checkbox" checked={selectedModules.includes(module)} onChange={(event) => setSelectedModules((current) => event.target.checked ? [...current, module] : current.filter((item) => item !== module))} />{label}</label>)}</fieldset>
-            {geo === 'EU' && selectedModules.includes('consent') && <label className="mt-3 flex items-center gap-2 text-[11px] text-slate-300">Exact country (optional)<select aria-label="Exact country" value={testedCountry} onChange={(event) => setTestedCountry(event.target.value)} className="rounded-lg border border-neutral-border bg-[#0d1016] px-3 py-2 text-xs"><option value="">Auto / regional</option><option value="DE">Germany</option><option value="NL">Netherlands</option><option value="FR">France</option><option value="IT">Italy</option><option value="ES">Spain</option></select></label>}
+            <fieldset disabled={csvOverrides.modules} aria-describedby={csvOverrides.modules ? csvReasonId : undefined} title={csvOverrides.modules ? CSV_OVERRIDE_REASON : undefined} className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"><legend className="mr-1 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Modules <CsvOverrideBadge active={csvOverrides.modules} /></legend>{([['consent', 'Consent'], ['tracking', 'Tracking'], ['server_side', 'Server-side']] as const).map(([module, label]) => <label key={module} className={`flex items-center gap-1.5 ${csvOverrides.modules ? 'cursor-not-allowed' : ''}`}><input type="checkbox" disabled={csvOverrides.modules} aria-describedby={csvOverrides.modules ? csvReasonId : undefined} checked={selectedModules.includes(module)} onChange={(event) => setSelectedModules((current) => event.target.checked ? [...current, module] : current.filter((item) => item !== module))} />{label}</label>)}</fieldset>
+            {showExactCountry && <label className="mt-3 flex items-center gap-2 text-[11px] text-slate-300">Exact country (optional)<select aria-label="Exact country" disabled={csvOverrides.exact_country} aria-describedby={csvOverrides.exact_country ? csvReasonId : undefined} title={csvOverrides.exact_country ? CSV_OVERRIDE_REASON : undefined} value={testedCountry} onChange={(event) => setTestedCountry(event.target.value)} className="rounded-lg border border-neutral-border bg-[#0d1016] px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50"><option value="">Auto / regional</option>{mode === 'bulk' && <><option value="US">United States</option><option value="GB">United Kingdom</option></>}<option value="DE">Germany</option><option value="NL">Netherlands</option><option value="FR">France</option><option value="IT">Italy</option><option value="ES">Spain</option></select><CsvOverrideBadge active={csvOverrides.exact_country} /></label>}
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-[10px] text-slate-400"><span>{scanMode === 'normal' ? 'Normal mode captures the bounded evidence needed for routine and bulk audits.' : 'Diagnostic mode keeps extra request summaries, DOM/CMP signals, timings, and screenshots.'}</span>{mode === 'single' && <label className="flex items-center gap-2"><input type="checkbox" checked={captcha} onChange={(event) => setCaptcha(event.target.checked)} />Allow one challenge-solving retry</label>}</div>
           </section>
 

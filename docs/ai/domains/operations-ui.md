@@ -22,6 +22,10 @@ There is no client router or global state store. `App` uses hooks and a local `v
 
 The Audits view combines scan creation, filtering/selection, bulk actions, audit detail, reruns/cancel/delete/debug export, evidence codes, QA correction, replay/reviewer, and trace. Quality and proxy panels are extracted into `Analytics.tsx`; replay/review display is extracted into `AuditInsights.tsx`.
 
+Bulk CSV ownership is a header-only UX aid in `src/ui/bulk-csv-preview.ts`. It reads 4 KiB slices up to 64 KiB to find the first record, then reuses the parser, normalization and alias map from the browser-safe `src/bulk-csv-format.ts`. `src/bulk-csv.ts` reexports the existing parser/error API; backend validation and precedence are unchanged. No row values are inspected or CSV contents stored/logged. An unreadable, malformed or oversized header leaves controls enabled and submission available.
+
+`App` disables only the bulk controls whose configuration columns are present, with compact CSV badges and accessible reasons. Disabled values remain in state and multipart fallbacks. File identity plus effect cleanup discard stale reads and clear ownership immediately on replacement/removal; Single mode ignores ownership while retaining the selected CSV for a return to Bulk. Bulk exact-country fallback is shown when country, region or modules are CSV-controlled, offers fixed supported country choices, and sends its preserved value whenever shown (including when disabled). Domain-only bulk requests retain the existing omission of hidden country values. Single exact-country behavior remains unchanged. Local Chromium tests render the actual React form with all API calls mocked to cover state, submission, accessibility and races.
+
 ## API dependencies
 
 The UI calls the versioned endpoints in `server.ts` for scan lifecycle, QA, replay/review, metrics, review candidates, proxy readiness, and queue state. `StorefrontAudit` is shared, but metrics/readiness/queue/reviewer response types are not yet strong contracts. When changing an endpoint, inspect its caller by searching the exact path.

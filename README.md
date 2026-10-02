@@ -80,6 +80,8 @@ Bulk CSV input accepts a `domain` column (legacy first-column imports also work)
 
 Headers are trimmed and matched case-insensitively; spaces and hyphens normalize to underscores (`Group Label`, `group-label`, `Exact Country` also work). The first matching column wins when aliases collide. Region/country/mode/module values normalize case and whitespace. Module aliases `serverside`, `server_side`, and `server-side` all become `server_side`; unknown modules reject the upload and are never silently dropped. Quote a multi-module cell, for example `"consent,tracking,serverside"`:
 
+The Bulk CSV form detects configuration headers from a bounded file prefix. A present column disables its fallback control and shows **CSV override**, with a summary of detected fields. Current fallback values are preserved and still sent for blank CSV cells. Replacing/removing the file resets ownership; Single Audit controls are unaffected. Bulk exact-country fallback stays visible when CSV owns country, region or modules and uses fixed country options. A failed header preview leaves controls enabled; the API remains authoritative for full validation. Supported-column guidance and the example remain available under **CSV columns and example**.
+
 ```csv
 domain,region,exact_country,mode,group_label,modules
 example.com,EU,DE,diagnostic,eu-canary,"consent,tracking,serverside"
