@@ -434,10 +434,28 @@ function diagnosticObservation(
   if (selection.provider && banner.visibility === 'visible' && surfaces.length < 12) surfaces.unshift({
     surface_type: banner.surface, provider_specific: true, visible: true, privacy_or_cookie_semantics: true, intent: 'consent', location
   });
-  const controls: DiagnosticConsentObservation['visible_controls'] = facts.generic.controls.filter((control) => Boolean(semanticActionForConsentLabel(control.accessible_name))).slice(0, 20).map((control) => ({
+  const selectedCandidate = selection.provider && selection.candidates.find((candidate) => candidate.provider_id === selection.provider);
+  const controls: DiagnosticConsentObservation['visible_controls'] = [];
+  // These facts already come only from the documented, visible Didomi roots.
+  // Prefer their real DOM names/state over generic or capability-only rows.
+  if (selection.provider === 'didomi' && selectedCandidate?.attribution === 'identified' && banner.visibility === 'visible') {
+    for (const control of facts.didomi_controls) {
+      const action = semanticActionForConsentLabel(control.accessible_name);
+      if (!action || !['accept_all', 'reject_all', 'only_necessary', 'open_preferences'].includes(action) ||
+        !control.visible || !control.enabled || controls.length >= 20 || controls.some((item) => item.semantic_action === action)) continue;
+      controls.push({
+        accessible_name: control.accessible_name.replace(/\s+/g, ' ').trim().slice(0, 120), semantic_action: action,
+        visible: true, enabled: true, actionable: true, provider_specific: true, location: 'main_frame'
+      });
+    }
+  }
+  controls.push(...facts.generic.controls.filter((control) => {
+    const action = semanticActionForConsentLabel(control.accessible_name);
+    return action && !controls.some((item) => item.semantic_action === action);
+  }).slice(0, 20 - controls.length).map((control) => ({
     accessible_name: control.accessible_name.slice(0, 120), semantic_action: semanticActionForConsentLabel(control.accessible_name) || 'unknown',
-    visible: control.visible, enabled: control.enabled, actionable: control.actionable, provider_specific: false, location: control.location === 'child_frame' ? 'iframe' : control.location
-  }));
+    visible: control.visible, enabled: control.enabled, actionable: control.actionable, provider_specific: false, location: control.location === 'child_frame' ? 'iframe' as const : control.location
+  })));
   if (selection.provider === 'adroll' && facts.adroll.banner_root_visible) {
     for (const control of facts.adroll.semantic_controls) {
       const action = semanticActionForConsentLabel(control.accessible_name);
@@ -452,12 +470,13 @@ function diagnosticObservation(
   for (const action of actions) {
     if (controls.length >= 20 || action.availability === 'not_present' || action.availability === 'unknown') continue;
     if (!controls.some((control) => control.semantic_action === action.action)) controls.push({
-      accessible_name: '', semantic_action: action.action, visible: action.availability !== 'api_only', enabled: true,
+      // Availability describes capability, not current DOM visibility. Real
+      // UI evidence is captured above; this fallback cannot fill a UI gap.
+      accessible_name: '', semantic_action: action.action, visible: false, enabled: true,
       actionable: action.availability === 'direct' || action.availability === 'api_only', provider_specific: Boolean(selection.provider), location
     });
   }
   const semanticDiagnostic = semanticDiscovery?.diagnostic;
-  const selectedCandidate = selection.provider && selection.candidates.find((candidate) => candidate.provider_id === selection.provider);
   const verifiedConsentSurfaceIds = new Set(facts.generic.surfaces
     .filter((surface) => surface.visible && surface.privacy_or_cookie_semantics && surface.intent === 'consent' && surface.strong_presentation)
     .map((surface) => surface.id));

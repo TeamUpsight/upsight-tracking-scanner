@@ -1,0 +1,40 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`runStorefrontAudit production browser wiring > P0.2C freezes canonical fields and normal/diagnostic equivalence for Didomi API-only 1`] = `
+{
+  "accept_action_available": true,
+  "banner_visible": true,
+  "cmp_provider": "Didomi",
+  "consent_status": "inconclusive",
+  "fixture": "Didomi API-only",
+  "overall_status": "inconclusive",
+  "preferences_action_available": true,
+  "reject_action_available": true,
+}
+`;
+
+exports[`runStorefrontAudit production browser wiring > P0.2C freezes canonical fields and normal/diagnostic equivalence for Didomi DOM 1`] = `
+{
+  "accept_action_available": true,
+  "banner_visible": true,
+  "cmp_provider": "Didomi",
+  "consent_status": "inconclusive",
+  "fixture": "Didomi DOM",
+  "overall_status": "inconclusive",
+  "preferences_action_available": true,
+  "reject_action_available": true,
+}
+`;
+
+exports[`runStorefrontAudit production browser wiring > P0.2C freezes canonical fields and normal/diagnostic equivalence for generic CMP 1`] = `
+{
+  "accept_action_available": true,
+  "banner_visible": true,
+  "cmp_provider": "Unknown",
+  "consent_status": "inconclusive",
+  "fixture": "generic CMP",
+  "overall_status": "inconclusive",
+  "preferences_action_available": true,
+  "reject_action_available": true,
+}
+`;

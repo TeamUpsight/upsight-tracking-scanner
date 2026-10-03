@@ -8,6 +8,8 @@ import { captureBrowserConsentFacts, installConsentCommandBootstrap, observeCons
 import { discoverProviderSemanticControls } from './provider-semantic-controls';
 import { discoverUsercentricsSemanticControls } from './usercentrics-semantic-controls';
 import { semanticActionForConsentLabel } from './generic-consent-detector';
+import { EvidenceCollector } from '../evidence/evidence-collector';
+import { buildObservabilityConsistency } from '../quality/observability';
 
 const rollout: ConsentV2RolloutControls = {
   enabled: true, actions_enabled: false, action_sample_percent: 0,
@@ -59,6 +61,12 @@ async function installDeterministicExternalFixtureRouting(page: Page) {
 async function audit(html: string, sessionInput = input) {
   const page = await browser.newPage();
   try { await installDeterministicExternalFixtureRouting(page); await page.setContent(html); return await runConsentV2Session(page, sessionInput); } finally { await page.close(); }
+}
+
+function controlExtractionGapStatus(result: Awaited<ReturnType<typeof audit>>) {
+  const evidence = new EvidenceCollector({ auditId: 'diagnostic-controls', domain: 'fixture.example', geo: 'EU', mode: 'diagnostic' }).bundle;
+  evidence.diagnostic_observability = { consent_observations: [result.diagnostic_observation!], diagnostic_captures: [], product_rejections: { observed_count: 0, truncated: false, candidates: [] } };
+  return buildObservabilityConsistency({}, evidence).checks.find((check) => check.code === 'OBS_CONSENT_CONTROL_EXTRACTION_GAP')?.status;
 }
 
 /** Local page navigation → prepared production capture → session evaluation. */
@@ -1482,6 +1490,10 @@ describe('Consent V2 production session wiring', () => {
       expect.objectContaining({ action: 'reject_all', availability: 'direct' }),
       expect.objectContaining({ action: 'open_preferences', availability: 'direct' })
     ]));
+    for (const [semantic_action, accessible_name] of [['accept_all', 'Tout accepter'], ['reject_all', 'Continuer sans accepter'], ['open_preferences', 'Personnaliser']]) {
+      expect(result.diagnostic_observation?.visible_controls).toContainEqual(expect.objectContaining({ semantic_action, accessible_name, visible: true, enabled: true, actionable: true }));
+    }
+    expect(controlExtractionGapStatus(result)).toBe('pass');
   }, 10_000);
 
   it('CMP-READINESS-LATE-03 / Congstar live shape waits for delayed open-shadow Usercentrics controls without UC_UI', async () => {
@@ -1612,5 +1624,100 @@ describe('Consent V2 production session wiring', () => {
     const result = await auditNavigation('<title>Checking your browser</title><body>challenge</body>', true);
     expect(result.result.reason_codes).toContain('BLOCKED_OR_CHALLENGED');
     expect(result.result.reason_codes).not.toContain('NO_CMP_DETECTED');
+  });
+
+  it.each([
+    ['English host', 'didomi-host', ['Accept', 'Reject', 'Preferences']],
+    ['English notice', 'didomi-notice', ['Accept', 'Reject', 'Preferences']],
+    ['French notice', 'didomi-notice', ['Tout accepter', 'Continuer sans accepter', 'Personnaliser']]
+  ] as const)('P0.2C projects captured Didomi controls: %s', async (_name, root, labels) => {
+    // This documented root has no generic cookie/privacy selector or fixed
+    // presentation. Its controls are captured by the existing Didomi bridge.
+    const html = `<script src="https://sdk.privacy-center.org/loader.js"></script><div id="${root}" style="width:360px;height:180px"><section>${labels.map((label) => `<button><span>${label}</span></button>`).join('')}<button>Continue shopping</button></section></div>`;
+    const result = await audit(html, { ...input, diagnostic: true });
+    expect(result.telemetry).toMatchObject({ provider: 'didomi', provider_confidence: 'high', action_execution_eligible: false, activation_occurred: false });
+    expect(result.result.banner.visibility).toBe('visible');
+    const controls = result.diagnostic_observation!.visible_controls;
+    expect(controls).toHaveLength(3);
+    for (const [index, action] of ['accept_all', 'reject_all', 'open_preferences'].entries()) {
+      expect(controls).toContainEqual({ accessible_name: labels[index], semantic_action: action, visible: true, enabled: true, actionable: true, provider_specific: true, location: 'main_frame' });
+      expect(result.result.available_actions).toContainEqual(expect.objectContaining({ action, availability: 'direct' }));
+    }
+    expect(result.result.interactions).toEqual([]);
+  });
+
+  it('P0.2C prefers real Didomi controls over hidden generic duplicates and bounds names', async () => {
+    const label = `Accept${' '.repeat(200)}`;
+    const result = await audit(`<script src="https://sdk.privacy-center.org/loader.js"></script><div role="dialog" class="cookie-consent" style="display:none">Cookie settings<button>Accept</button></div><div id="didomi-host" style="width:360px;height:180px"><div id="didomi-notice"><button aria-label="${label}">Accept</button><button>Reject</button><button>Preferences</button><button>Only necessary</button><button>Do not sell my personal information</button><button>Continue shopping</button></div></div>`, { ...input, diagnostic: true });
+    const controls = result.diagnostic_observation!.visible_controls;
+    expect(controls).toHaveLength(4);
+    expect(controls.map((control) => control.semantic_action)).toEqual(['accept_all', 'reject_all', 'open_preferences', 'only_necessary']);
+    expect(controls.every((control) => control.visible && control.enabled && control.actionable && control.provider_specific && control.accessible_name.length <= 120)).toBe(true);
+    expect(controls[0].accessible_name).toBe('Accept');
+  });
+
+  it('P0.2C hidden Didomi roots do not fabricate visible UI or change banner/actions', async () => {
+    const result = await audit('<script>window.Didomi={notice:{isVisible:()=>false}}</script><script src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-notice" style="display:none"><button>Accept</button><button>Reject</button><button>Preferences</button></div>', { ...input, diagnostic: true });
+    expect(result.telemetry.provider).toBe('didomi');
+    expect(result.result.banner.visibility).toBe('not_visible');
+    expect(result.result.available_actions.every((action) => action.availability === 'not_present')).toBe(true);
+    expect(result.diagnostic_observation!.visible_controls.some((control) => control.visible)).toBe(false);
+  });
+
+  it('P0.2C disabled and hidden Didomi controls are not projected as actionable UI', async () => {
+    const result = await audit('<script src="https://sdk.privacy-center.org/loader.js"></script><div id="didomi-host" style="width:360px;height:180px"><button style="display:none">Accept</button><button disabled>Reject</button><button>Preferences</button></div>', { ...input, diagnostic: true });
+    const controls = result.diagnostic_observation!.visible_controls;
+    expect(controls.filter((control) => control.visible && control.enabled && control.actionable)).toEqual([
+      { accessible_name: 'Preferences', semantic_action: 'open_preferences', visible: true, enabled: true, actionable: true, provider_specific: true, location: 'main_frame' }
+    ]);
+    expect(result.result.available_actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'accept_all', availability: 'not_present' }),
+      expect.objectContaining({ action: 'reject_all', availability: 'preferences_only' })
+    ]));
+    expect(controls.find((control) => control.semantic_action === 'reject_all')?.visible).toBe(false);
+  });
+
+  it('P0.2C preserves Didomi API-only capabilities without claiming visible buttons', async () => {
+    const result = await audit('<script>window.Didomi={setUserAgreeToAll(){throw Error("must stay passive")},setUserDisagreeToAll(){throw Error("must stay passive")},preferences:{show(){throw Error("must stay passive")}},notice:{isVisible:()=>true}}</script><script src="https://sdk.privacy-center.org/loader.js"></script><section id="didomi-host" role="dialog" style="width:360px;height:180px">Cookie privacy settings</section>', { ...input, diagnostic: true });
+    expect(result.result.banner.visibility).toBe('visible');
+    expect(result.result.available_actions.filter((action) => action.availability === 'api_only').map((action) => action.action)).toEqual(['accept_all', 'reject_all', 'open_preferences']);
+    expect(result.diagnostic_observation!.visible_controls).toHaveLength(3);
+    expect(result.diagnostic_observation!.visible_controls.every((control) => !control.visible && control.accessible_name === '' && control.actionable)).toBe(true);
+    expect(result.result.interactions).toEqual([]);
+    expect(controlExtractionGapStatus(result)).toBe('mismatch');
+  });
+
+  it('P0.2C real visible Didomi controls clear an actual strong-surface extraction gap', async () => {
+    const result = await audit('<script src="https://sdk.privacy-center.org/loader.js"></script><section id="didomi-host" role="dialog" style="width:360px;height:180px">Cookie privacy settings<button>Accept</button><button>Reject</button><button>Preferences</button></section>', { ...input, diagnostic: true });
+    expect(result.diagnostic_observation!.visible_controls).toHaveLength(3);
+    expect(result.diagnostic_observation!.visible_controls.every((control) => control.visible && control.enabled && control.actionable && control.provider_specific)).toBe(true);
+    expect(controlExtractionGapStatus(result)).toBe('pass');
+  });
+
+  it.each([
+    ['OneTrust', '<script>window.OneTrust={AllowAll(){},RejectAll(){},ToggleInfoDisplay(){}}</script><script src="https://cdn.cookielaw.org/scripttemplates/otSDKStub.js"></script><section id="onetrust-banner-sdk" role="dialog">Cookie settings<button id="onetrust-accept-btn-handler">Accept</button><button id="onetrust-reject-all-handler">Reject</button><button id="onetrust-pc-btn-handler">Preferences</button></section>', 'onetrust', 'main_frame'],
+    ['Cookiebot', '<script src="https://consent.cookiebot.com/uc.js"></script><section id="CybotCookiebotDialog" role="dialog">Cookie settings<button id="CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll">Accept</button><button id="CybotCookiebotDialogBodyButtonDecline">Reject</button><button id="CybotCookiebotDialogBodyLevelButtonCustomize">Preferences</button></section>', 'cookiebot', 'main_frame'],
+    ['Usercentrics open shadow', '<script src="https://app.usercentrics.eu/browser-ui/latest/loader.js"></script><div id="usercentrics-cmp-ui" style="width:360px;height:180px"></div><script>document.querySelector("#usercentrics-cmp-ui").attachShadow({mode:"open"}).innerHTML="<section role=dialog>Cookie settings<button>Alles akzeptieren</button><button>Alles ablehnen</button><button>Einstellungen verwalten</button></section>"</script>', 'usercentrics', 'shadow_dom'],
+    ['AdRoll passive', '<script>window.__adroll_consent={}</script><script src="https://s.adroll.com/j/consent.js"></script><section id="adroll_consent_banner" role="dialog">Cookie settings<button>Accept</button><button>Reject</button><button>Preferences</button></section>', 'adroll', 'main_frame']
+  ] as const)('P0.2C preserves visible DOM diagnostics for %s', async (_name, html, provider, location) => {
+    const result = await audit(html, { ...input, diagnostic: true });
+    expect(result.telemetry.provider).toBe(provider);
+    for (const semantic_action of ['accept_all', 'reject_all', 'open_preferences']) {
+      expect(result.diagnostic_observation!.visible_controls).toContainEqual(expect.objectContaining({ semantic_action, visible: true, enabled: true, actionable: true, location }));
+    }
+    expect(result.result.interactions).toEqual([]);
+    expect(result.telemetry.activation_occurred).toBe(false);
+  });
+
+  it('P0.2C keeps generic Didomi corroboration without attributing generic UI to Didomi', async () => {
+    const ui = '<section role="dialog" class="cookie-consent">Cookie privacy settings<button>Accept</button><button>Reject</button><button>Preferences</button></section>';
+    const identified = await audit(`<script src="https://sdk.privacy-center.org/loader.js"></script>${ui}`, { ...input, diagnostic: true });
+    const generic = await audit(ui, { ...input, diagnostic: true });
+    expect(identified.telemetry.provider).toBe('didomi');
+    expect(identified.result.banner).toMatchObject({ visibility: 'visible', evidence: ['didomi_generic_consent_surface'] });
+    expect(identified.diagnostic_observation!.visible_controls.every((control) => !control.provider_specific && control.visible)).toBe(true);
+    expect(generic.telemetry.provider).not.toBe('didomi');
+    expect(generic.diagnostic_observation!.visible_controls.every((control) => !control.provider_specific && control.visible)).toBe(true);
+    expect(generic.result.banner.visibility).toBe('visible');
   });
 });

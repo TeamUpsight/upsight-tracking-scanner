@@ -89,7 +89,9 @@ export function buildObservabilityConsistency(audit: Partial<StorefrontAudit>, e
   const signatureCheck = providerSignatureMismatch(snapshots, canonical);
   const actionRows = ['accept', 'reject', 'preferences'].map((name) => {
     const semantic = name === 'accept' ? 'accept_all' : name === 'reject' ? 'reject_all' : 'open_preferences';
-    const snapshotHas = (snapshot: typeof shared) => snapshot?.visible_controls.some((control) => control.semantic_action === semantic && control.actionable) || false;
+    const snapshotHas = (snapshot: typeof shared) => snapshot?.visible_controls.some((control) =>
+      control.semantic_action === semantic && control.visible === true && control.enabled === true && control.actionable === true
+    ) || false;
     const persisted = name === 'accept' ? evidence.consent.accept_action_available : name === 'reject' ? evidence.consent.reject_action_available : evidence.consent.preferences_action_available;
     return { action: name, shared: snapshotHas(shared), fresh: snapshotHas(fresh), persisted: persisted ?? false };
   });

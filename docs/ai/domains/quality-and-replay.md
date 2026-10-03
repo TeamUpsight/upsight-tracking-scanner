@@ -25,6 +25,8 @@ Consent provider projection (P0.2B, rule pack `2026.09.29.10`) keeps identity se
 
 The reviewer consumes an audit, evidence, and parsed trace, then returns violations, likely root cause, patch guidance, and regression suggestions. The sanitized chronological trace remains a separate UI concept from derived reviewer output.
 
+Consent diagnostic UI action evidence (P0.2C) requires a matching semantic action plus visible, enabled, actionable DOM controls. Capability-only synthetic rows remain non-visible, including direct and API-only availability. Identified Didomi with a visible banner projects bounded semantic controls from the existing `#didomi-host` / `#didomi-notice` facts before generic rows; the shared multilingual classifier, canonical action inventory, and control-extraction-gap requirements remain unchanged.
+
 Debug package summaries consume `EvidenceBundle.decision_summary` whenever it is available. Module-specific summaries may add descriptive counts, but they must not recalculate status, reason, confidence, or blocking uncertainty. Build metadata includes the commit and build-time dirty state so a controlled audit can be tied to a clean tested commit.
 
 ## Related endpoints and data

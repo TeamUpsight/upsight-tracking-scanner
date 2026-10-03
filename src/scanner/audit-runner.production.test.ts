@@ -193,6 +193,32 @@ async function exactCountryFixture(
 }
 
 describe('runStorefrontAudit production browser wiring', () => {
+  it.each([
+    ['Didomi DOM', '<script>window.Didomi={};window.didomiConfig={};</script><div id="didomi-host" style="width:360px;height:180px"><button>Accept</button><button>Reject</button><button>Preferences</button></div>'],
+    ['Didomi API-only', '<script>window.Didomi={setUserAgreeToAll(){},setUserDisagreeToAll(){},preferences:{show(){}},notice:{isVisible:()=>true}};window.didomiConfig={};</script>'],
+    ['generic CMP', '<section role="dialog" class="cookie-consent">Cookie privacy settings<button>Accept</button><button>Reject</button><button>Preferences</button></section>']
+  ])('P0.2C freezes canonical fields and normal/diagnostic equivalence for %s', async (name, ui) => {
+    const providerAsset = name.startsWith('Didomi') ? '<script type="application/json" src="https://sdk.privacy-center.org/loader.js"></script>' : '';
+    const html = `<title>Storefront catalog</title><main><h1>Shop eyewear</h1><p>Browse frames and our current collection.</p></main>${providerAsset}${ui}`;
+    const normal = await auditFixture(200, html, true, ['consent'], false, {}, 'normal') as unknown as StorefrontAudit;
+    const diagnostic = await auditFixture(200, html, true, ['consent'], false, {}, 'diagnostic') as unknown as StorefrontAudit;
+    const canonical = (result: Partial<StorefrontAudit>) => ({
+      cmp_provider: result.cmp_provider, consent_status: result.consent_status, overall_status: result.overall_status,
+      banner_visible: result.evidence_bundle!.consent.banner_visible,
+      accept_action_available: result.evidence_bundle!.consent.accept_action_available,
+      reject_action_available: result.evidence_bundle!.consent.reject_action_available,
+      preferences_action_available: result.evidence_bundle!.consent.preferences_action_available
+    });
+    expect(canonical(diagnostic)).toEqual(canonical(normal));
+    expect(normal.cmp_provider).toBe(name.startsWith('Didomi') ? 'Didomi' : 'Unknown');
+    // Record the pre-cleanup canonical decisions, then retain them as a golden
+    // regression through this diagnostic-only patch and subsequent replay.
+    expect({ fixture: name, ...canonical(normal) }).toMatchSnapshot();
+    expect(canonical(replayEvidence(diagnostic.evidence_bundle!))).toEqual(canonical(diagnostic));
+    expect(normal.evidence_bundle!.consent.interaction_attempted).toBe(false);
+    expect(diagnostic.evidence_bundle!.consent.interaction_attempted).toBe(false);
+  }, 120_000);
+
   it('P0.2B Audit-619-shaped earned absence survives finalization and two replays in both modes', async () => {
     const sessions: consentSession.ConsentV2SessionOutput[] = [];
     const runSession = consentSession.runConsentV2Session;

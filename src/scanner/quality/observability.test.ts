@@ -37,6 +37,44 @@ function fixture(mode: 'normal' | 'diagnostic' = 'diagnostic') {
 const audit = (evidence = fixture()): StorefrontAudit => ({ audit_id: 'obs', domain: 'example.com', group_label: null, scan_started_at: evidence.runtime.started_at, scan_completed_at: null, scan_status: 'completed', error_category: 'none', tested_geos: 'USA', cms_platform_detected: 'Unknown', overall_status: 'pass', overall_confidence: 'high', consent_status: 'pass', cmp_provider: 'OneTrust', product_payload_status: 'not_tested', pdp_url_tested: 'https://example.com/products/one', server_side_status: 'not_tested', ss_collection_type: 'not_tested', trace_steps: '[]', evidence_bundle: evidence });
 
 describe('WP10 diagnostic observability', () => {
+  it.each([
+    ['Casper hidden actionable accept', 'accept_all', false, true, true, false, 'pass'],
+    ['disabled reject', 'reject_all', true, false, true, false, 'pass'],
+    ['non-actionable preferences', 'open_preferences', true, true, false, false, 'pass'],
+    ['genuine visible accept mismatch', 'accept_all', true, true, true, false, 'mismatch'],
+    ['genuine visible accept match', 'accept_all', true, true, true, true, 'pass'],
+    ['API-only reject capability', 'reject_all', false, true, true, true, 'pass']
+  ] as const)('P0.2C action evidence: %s', (_name, semantic_action, visible, enabled, actionable, persisted, status) => {
+    for (const context of ['shared', 'fresh'] as const) {
+      const evidence = fixture();
+      evidence.consent.accept_action_available = persisted;
+      evidence.consent.reject_action_available = persisted;
+      evidence.consent.preferences_action_available = persisted;
+      const snapshot = evidence.diagnostic_observability!.consent_observations[0];
+      snapshot.context = context;
+      snapshot.visible_controls = [{ accessible_name: '', semantic_action, visible, enabled, actionable, provider_specific: true, location: 'main_frame' }];
+      const check = buildObservabilityConsistency(audit(evidence), evidence).checks.find((item) => item.code === 'OBS_CONSENT_ACTION_MISMATCH');
+      expect(check?.status).toBe(status);
+      expect((check?.values.actions as Array<{ action: string; shared: boolean; fresh: boolean }>).find((row) =>
+        row.action === (semantic_action === 'accept_all' ? 'accept' : semantic_action === 'reject_all' ? 'reject' : 'preferences'))?.[context])
+        .toBe(visible && enabled && actionable);
+    }
+  });
+
+  it.each([
+    ['visible enabled actionable control', true, true, true, 'pass'],
+    ['hidden actionable control', false, true, true, 'mismatch'],
+    ['disabled control', true, false, true, 'mismatch'],
+    ['non-actionable control', true, true, false, 'mismatch'],
+    ['no semantic controls', false, false, false, 'mismatch']
+  ] as const)('P0.2C extraction gap: %s', (_name, visible, enabled, actionable, status) => {
+    const evidence = fixture();
+    const snapshot = evidence.diagnostic_observability!.consent_observations[0];
+    snapshot.provider_selection = { selected_provider: 'didomi', provider_conflict: false, candidates: [{ provider: 'didomi', detection_status: 'identified', confidence: 'high', independent_evidence_families: ['provider_asset'], evidence_codes: ['unique_provider_script_or_config'] }] };
+    snapshot.visible_controls = _name === 'no semantic controls' ? [] : [{ accessible_name: 'Accept', semantic_action: 'accept_all', visible, enabled, actionable, provider_specific: true, location: 'main_frame' }];
+    expect(buildObservabilityConsistency(audit(evidence), evidence).checks.find((item) => item.code === 'OBS_CONSENT_CONTROL_EXTRACTION_GAP')?.status).toBe(status);
+  });
+
   it('P0.2B providerless runtime and earned canonical absence have no provider mismatch', () => {
     const evidence = fixture();
     evidence.runtime.consent_v2!.provider = null;
