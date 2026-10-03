@@ -317,7 +317,7 @@ export async function runGpcExperiment(input: {
             ...(input.browserEnvironment ? { browser_provider: input.browserEnvironment.provider, browser_route: input.browserEnvironment.route } : {}),
             ...(input.openBrowserSession ? { browser_version: activeBrowser!.version().match(/\d+(?:\.\d+){1,3}/)?.[0] } : {}),
             locale: expected.locale, timezone: expected.timezoneId, viewport: '1280x800', usa_egress_verified: egress.country === 'us', egress_fingerprint: egress.fingerprint },
-          access: { page_valid: isValidStorefrontStatus(response?.status() ?? null) && observed.host === input.targetHost,
+          access: { page_valid: isValidStorefrontStatus(response?.status() ?? null) && observed.access.category === 'none' && observed.host === input.targetHost,
             canonical_host: observed.host, category: observed.access.category, geo_verified: egress.country === 'us', observation_complete: true },
           cmp: { provider: observed.consent.provider, provider_conflict: observed.consent.provider_conflict, banner_visibility: observed.consent.banner.visibility,
             actions: observed.consent.actions.filter((action) => action.availability === 'direct').map((action) => action.action).sort().slice(0, 10) },

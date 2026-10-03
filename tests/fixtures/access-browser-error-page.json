@@ -1,0 +1,8 @@
+{
+  "description": "Sanitized Audit-632-shaped Chromium error document: HTTP-successful navigation with verified NL egress, but no storefront or CMP observation.",
+  "status": 200,
+  "url": "https://fixture.example/",
+  "title": "This page couldn't load",
+  "bodyText": "This page couldn't load\nThe webpage at https://fixture.example/ might be temporarily down or it may have moved permanently to a new web address.\nERR_HTTP2_PROTOCOL_ERROR\nReload",
+  "domSignals": ["body.neterror", "#main-frame-error"]
+}

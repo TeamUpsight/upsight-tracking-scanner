@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { EvidenceCollector } from '../evidence/evidence-collector';
 import { replayEvidence } from './replay';
 import type { EvidenceBundle } from '../../types';
+import browserError from '../../../tests/fixtures/access-browser-error-page.json';
+import { resolveAccessDecision } from '../navigation';
+import { accessEvidenceViolations } from './consistency';
 
 function consentEvidence(trackingConsistency: 'consistent' | 'contradiction' | 'insufficient_evidence' | 'not_applicable', postRejectComplete = true) {
   const evidence = new EvidenceCollector({
@@ -31,6 +34,33 @@ function consentEvidence(trackingConsistency: 'consistent' | 'contradiction' | '
 }
 
 describe('Consent V2 canonical replay tracking consistency', () => {
+  it('P0.2A preserves stored browser-error access despite ready render and completed Consent capture', () => {
+    const collector = new EvidenceCollector({ auditId: 'audit-632-shaped', domain: 'fixture.example', geo: 'EU', mode: 'diagnostic', selectedModules: ['consent'] });
+    const access = resolveAccessDecision(browserError);
+    collector.setPage({ valid: access.category === 'none', statusCode: browserError.status, finalUrl: browserError.url, accessCategory: access.category });
+    collector.setAccess({ valid_storefront: false, http_status: browserError.status, final_url: browserError.url });
+    collector.recordAccessProxyAttempt({ attempt: 1, provider: 'decodo', geo: 'EU', port: null,
+      connect_duration_ms: 0, egress_result: 'reachable', neutral_https_result: 'reachable',
+      target_result: 'blocked', failure_classification: access.reasonCode });
+    const evidence = collector.bundle;
+    evidence.runtime.requested_country = 'NL';
+    evidence.runtime.actual_egress_country = 'NL';
+    evidence.runtime.exact_country_match = true;
+    evidence.runtime.proxy_country_verified = true;
+    evidence.runtime.country_matches_requested_geo = true;
+    evidence.consent.executed = true;
+    // Completed/render-ready observations cannot overcome invalid access.
+    evidence.runtime.consent_v2 = { enabled: true, render_state: 'ready', session_status: 'completed', consent_appearance_wait_result: 'absent' } as EvidenceBundle['runtime']['consent_v2'];
+    expect(accessEvidenceViolations(evidence)).toEqual([]);
+    const stored = JSON.parse(JSON.stringify(evidence)) as EvidenceBundle;
+    const replayed = replayEvidence(stored);
+    expect(replayed).toMatchObject({ error_category: 'access_blocked', consent_status: 'inconclusive', cmp_provider: null, overall_status: 'inconclusive' });
+    expect(replayed.evidence_bundle?.page).toMatchObject({ valid: false, status_code: 200 });
+    expect(replayed.evidence_bundle?.access).toMatchObject({ valid_storefront: false, proxy_attempts: [expect.objectContaining({ failure_classification: 'BROWSER_ERROR_PAGE' })] });
+    expect(replayed.reason_codes).not.toContain('NO_CMP_DETECTED');
+    expect(replayEvidence(replayed.evidence_bundle!)).toMatchObject({ error_category: 'access_blocked', consent_status: 'inconclusive', cmp_provider: null, overall_status: 'inconclusive' });
+  });
+
   it('replays an incomplete rendered page without projecting CMP absence', () => {
     const evidence = new EvidenceCollector({ auditId: 'render-shell', domain: 'fixture.example', geo: 'EU', mode: 'diagnostic', selectedModules: ['consent'] }).bundle;
     evidence.page.valid = true;

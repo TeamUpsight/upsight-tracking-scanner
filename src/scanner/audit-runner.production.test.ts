@@ -9,6 +9,8 @@ import { compareGpcObservations } from './consent/gpc-experiment';
 import { isRequestForPdp } from './tracking/pdp-association';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { replayEvidence } from './quality/replay';
+import * as consentSession from './consent/v2-session';
+import browserError from '../../tests/fixtures/access-browser-error-page.json';
 
 // Most runner fixtures exercise compiled-production action wiring with a local
 // browser. One focused case switches to direct source provenance to prove the
@@ -41,6 +43,17 @@ vi.mock('./url-safety', async (importOriginal) => {
 });
 
 const resolvedFixtureHost = async () => ({ status: 'resolved' as const, sources: { fixture: 'resolved' as const } });
+const browserErrorHtml = `<title>${browserError.title}</title><body class="neterror"><main id="main-frame-error">${browserError.bodyText}</main></body>`;
+const browserErrorFreshContext: NonNullable<AuditRunnerDependencies['createFreshConsentContext']> = async (browser, input) => {
+  const context = await browser.newContext({ serviceWorkers: 'block' });
+  const page = await context.newPage();
+  await page.route('**/*', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: browserErrorHtml }));
+  return {
+    context, page, service_workers: 'blocked',
+    geo: { requested_geo: input.requestedGeo, proxy_region: input.proxyRegion, verified: true,
+      verification_method: 'egress_probe', confidence: 'high', reason_codes: [] }
+  };
+};
 
 type FixtureRoute = string | null | { body: string; status: number; headers?: Record<string, string> };
 type FixtureHtml = string | Record<string, FixtureRoute> | ((path: string) => FixtureRoute);
@@ -807,6 +820,77 @@ describe('runStorefrontAudit production browser wiring', () => {
     expect(result.consent_status).not.toBe('not_detected');
     expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'page_validity_failed' })]));
   }, 30_000);
+
+  it.each([
+    ['shared homepage', ['consent', 'tracking', 'server_side']],
+    ['Audit-632 Consent-only exact NL', ['consent']]
+  ] as const)('P0.2A rejects HTTP 200 browser error on %s and replays invalid access', async (_name, modules) => {
+    const freshContext = vi.fn(browserErrorFreshContext);
+    const result = await auditFixture(200, browserErrorHtml, true, [...modules], false,
+      { createFreshConsentContext: freshContext }, 'diagnostic', 'EU', 'NL') as unknown as StorefrontAudit;
+    const evidence = result.evidence_bundle!;
+    const trace = JSON.parse(String(result.trace_steps)) as Array<Record<string, unknown>>;
+    expect(evidence.runtime).toMatchObject({ requested_country: 'NL', actual_egress_country: 'NL', exact_country_match: true, proxy_country_verified: true });
+    expect(evidence.page).toMatchObject({ valid: false, status_code: 200, access_category: 'access_blocked' });
+    expect(evidence.access).toMatchObject({ valid_storefront: false, http_status: 200, challenge_detected: false, challenge_type: null });
+    expect(evidence.access.proxy_attempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ failure_classification: 'BROWSER_ERROR_PAGE' })
+    ]));
+    expect(result).toMatchObject({ error_category: 'access_blocked', terminal_reason_code: 'BROWSER_ERROR_PAGE',
+      consent_status: 'inconclusive', cmp_provider: null, overall_status: 'inconclusive' });
+    expect(evidence.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'page_validity_failed', reason_code: 'BROWSER_ERROR_PAGE' })]));
+    expect(trace.some((step) => step.step === 'cmp_not_found' || step.step === 'consent_render_readiness_observed')).toBe(false);
+    expect(freshContext).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ site_ga4_detected: null, site_meta_detected: null,
+      site_ga4_collection_hit_detected: null, site_meta_collection_hit_detected: null,
+      product_payload_status: 'not_tested', server_side_status: 'not_tested', ss_collection_type: 'not_tested' });
+    expect(evidence.runtime.consent_v2).toMatchObject({ session_status: 'unavailable', provider: null, action_attempted: false });
+    expect(evidence.runtime.consent_v2?.render_state).not.toBe('ready');
+    expect(JSON.stringify(evidence)).not.toContain("This page couldn't load");
+    expect(JSON.stringify(evidence)).not.toContain('might be temporarily down');
+    for (const replayed of [replayEvidence(evidence), replayEvidence(replayEvidence(evidence).evidence_bundle!)]) {
+      expect(replayed).toMatchObject({ error_category: 'access_blocked', consent_status: 'inconclusive', cmp_provider: null, overall_status: 'inconclusive' });
+      expect(replayed.evidence_bundle?.page.valid).toBe(false);
+      expect(replayed.evidence_bundle?.access.valid_storefront).toBe(false);
+      expect(replayed.reason_codes).not.toContain('NO_CMP_DETECTED');
+    }
+  }, 30_000);
+
+  it('P0.2A passes invalid canonical access to fresh Consent despite HTTP 200', async () => {
+    const session = vi.spyOn(consentSession, 'runConsentV2Session');
+    const result = await auditFixture(200, '<title>Fixture shop</title><main>Products ready to purchase.</main>', true, ['consent'], false,
+      { createFreshConsentContext: browserErrorFreshContext }, 'diagnostic') as unknown as StorefrontAudit;
+    expect(session).toHaveBeenCalled();
+    expect(session.mock.calls.every(([, input]) => input.page_valid === false && input.access_blocked === true)).toBe(true);
+    expect(result.evidence_bundle?.page.valid).toBe(true);
+    expect(result.evidence_bundle?.access.valid_storefront).toBe(true);
+    expect(result).toMatchObject({ consent_status: 'inconclusive', cmp_provider: null, overall_status: 'inconclusive' });
+    expect(result.evidence_bundle?.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
+    const trace = JSON.parse(String(result.trace_steps)) as Array<Record<string, unknown>>;
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'consent_fresh_navigation_blocked_or_challenged', access_reason_code: 'BROWSER_ERROR_PAGE' })]));
+    expect(trace.some((step) => step.step === 'cmp_not_found')).toBe(false);
+    expect(replayEvidence(result.evidence_bundle!)).toMatchObject({ consent_status: 'inconclusive', cmp_provider: null });
+  }, 35_000);
+
+  it.each([['consent'], ['consent', 'tracking']] as const)('P0.2A preserves shared positive CMP when fresh HTTP 200 is a browser error (%s)', async (...modules) => {
+    const session = vi.spyOn(consentSession, 'runConsentV2Session');
+    const shared = `<title>Fixture shop</title><main>Products ready to purchase. <a href="/products/widget">Widget</a></main>
+      <script>window.OneTrust={RejectAll(){},AllowAll(){}};</script><script src="/otSDKStub.js"></script>
+      <div id="onetrust-banner-sdk" role="dialog" style="position:fixed;width:450px;height:180px;background:white">We use cookies and value your privacy.
+        <button id="onetrust-accept-btn-handler">Accept All Cookies</button><button id="onetrust-reject-all-handler">Reject All Cookies</button><button id="onetrust-pc-btn-handler">Cookies Settings</button></div>`;
+    const result = await auditFixture(200, { '/': shared, '/otSDKStub.js': '', '/products/widget': '<title>Widget</title><form action="/cart/add"><button>Add to cart</button></form>', '/sitemap.xml': null },
+      true, [...modules], false, { createFreshConsentContext: browserErrorFreshContext }, 'diagnostic') as unknown as StorefrontAudit;
+    expect(session).toHaveBeenCalled();
+    expect(session.mock.calls.every(([, input]) => input.page_valid === false && input.access_blocked === true)).toBe(true);
+    expect(result).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive' });
+    expect(result.evidence_bundle?.consent).toMatchObject({ resolved_provider: 'OneTrust', banner_visible: true, accept_action_available: true, reject_action_available: true });
+    expect(result.evidence_bundle?.consent.resolved_provider_evidence || []).not.toContain('NO_CMP_DETECTED');
+    const trace = JSON.parse(String(result.trace_steps)) as Array<Record<string, unknown>>;
+    expect(trace).toEqual(expect.arrayContaining([expect.objectContaining({ access_reason_code: 'BROWSER_ERROR_PAGE' })]));
+    expect(trace.some((step) => step.step === 'cmp_not_found')).toBe(false);
+    expect(replayEvidence(result.evidence_bundle!)).toMatchObject({ cmp_provider: 'OneTrust', consent_status: 'inconclusive' });
+  }, 45_000);
 
   it('RUNNER-RENDER-582 keeps an HTTP 200 permanent app shell access-valid and Consent inconclusive', async () => {
     const shell = '<div id="root" aria-busy="true"><div class="loading-overlay" style="position:fixed;inset:0;background:white"><div class="spinner">Loading...</div></div></div>';

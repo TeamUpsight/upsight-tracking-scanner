@@ -66,4 +66,5 @@ Add `npm run build` when API response shape or UI presentation changes.
 - Feedback from an older audit must not appear on a newer site row.
 - Marking correct resolves priority without deleting evidence or historical feedback.
 - Keep observed trace facts distinct from derived diagnosis.
+- Canonical access rejects strong browser-generated error documents as `access_blocked` / `BROWSER_ERROR_PAGE`, even after HTTP 2xx/3xx. Shared and fresh page validity must consume that access decision; stored invalid page/access facts keep replay and module absence conservative.
 - Sanitization is defense in depth; debug packages still require review before sharing.

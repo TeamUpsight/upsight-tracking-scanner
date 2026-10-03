@@ -337,7 +337,8 @@ async function inspectPageAccess(
     const selectors = [
       '.cf-turnstile', '.cf-challenge', 'iframe[src*="challenges.cloudflare.com"]', '#challenge-form',
       'iframe[src*="captcha-delivery.com"]', '[class*="datadome"]', '#px-captcha', '[class*="captcha"]',
-      '[class*="akamai"]', '[class*="perimeterx"]', '[class*="human-security"]', '[class*="waf"]'
+      '[class*="akamai"]', '[class*="perimeterx"]', '[class*="human-security"]', '[class*="waf"]',
+      'body.neterror', '#main-frame-error'
     ];
     const iframeUrls = Array.from(document.querySelectorAll('iframe[src]')).map((element) => (element as HTMLIFrameElement).src);
     const scriptUrls = Array.from(document.querySelectorAll('script[src]')).map((element) => (element as HTMLScriptElement).src);
@@ -2609,6 +2610,25 @@ export async function runStorefrontAudit(
       action_taken: geoInterstitial.action_taken, resolution: geoInterstitial.resolution,
       final_host: geoInterstitial.final_url ? new URL(geoInterstitial.final_url).hostname : null
     };
+    // Geo handling may have navigated since the initial access check. Only
+    // the canonical decision for the current document can validate this page.
+    const homepageAccess = await inspectPageAccess(homepage!, response, evidence, [...accessNetworkSignals]);
+    if (homepageAccess.category !== 'none') {
+      evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, {
+        target_result: 'blocked', failure_classification: homepageAccess.reasonCode
+      });
+      evidenceCollector.setPage({
+        valid: false, statusCode: response?.status() ?? null, finalUrl: safeUrl(homepage!.url()),
+        accessCategory: homepageAccess.category, retryAfterMs: homepageAccess.retryAfterMs,
+        botProvider: homepageAccess.botProvider, botSignals: homepageAccess.botSignals
+      });
+      addTrace('page_validity_failed', {
+        status: response?.status() ?? null, error_category: homepageAccess.category,
+        reason_code: homepageAccess.reasonCode
+      });
+      throw new ScanTermination(homepageAccess.category, 'failed', `Storefront access failed (${homepageAccess.reasonCode})`, homepageAccess.reasonCode);
+    }
+    const homepageValid = isValidStorefrontStatus(response?.status() ?? null) && homepageAccess.category === 'none';
     const finalUrl = homepage!.url();
     const finalHost = new URL(finalUrl).hostname;
     const canonicalRedirect = isSafeCanonicalRedirect(normalizedDomain, finalHost);
@@ -2627,7 +2647,7 @@ export async function runStorefrontAudit(
     effectiveDomain = finalHost;
     evidenceCollector.setObservedDomain(finalHost);
     evidenceCollector.setPage({
-      valid: isValidStorefrontStatus(response?.status() || null),
+      valid: homepageValid,
       statusCode: response?.status() || null,
       finalUrl: safeUrl(finalUrl),
       observedDomain: finalHost,
@@ -2639,7 +2659,7 @@ export async function runStorefrontAudit(
     });
     evidenceCollector.updateAccessProxyAttempt(proxyAttempt + 1, { target_result: 'valid_storefront', failure_classification: null });
     evidenceCollector.setAccess({
-      valid_storefront: isValidStorefrontStatus(response?.status() || null),
+      valid_storefront: homepageValid,
       final_url: safeUrl(finalUrl),
       http_status: response?.status() || null,
       final_provider: currentProxyProvider,
@@ -2839,11 +2859,12 @@ export async function runStorefrontAudit(
         freshConsentFailureStage = 'access_validation';
         const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
         const readiness = consentNavigationReadiness(consentAccess);
+        const consentPageValid = isValidStorefrontStatus(navigation.response?.status() ?? null) && consentAccess.category === 'none';
         freshConsentFailureStage = readiness.status === 'ready' ? 'consent_observation' : 'challenge_detection';
         consentV2 = await runConsentV2Session(consentHomepage, {
           geo,
           geo_verified: requestedCountry ? evidence.runtime.proxy_country_verified : freshConsent.geo.verified,
-          page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
+          page_valid: consentPageValid,
           requested_country: requestedCountry,
           timings: consentTimings,
           rollout: consentV2Controls,
@@ -2855,7 +2876,7 @@ export async function runStorefrontAudit(
         evidence.runtime.consent_v2 = consentV2.telemetry;
         addAdRollBootstrapTrace(consentV2.telemetry.adroll_bootstrap);
         await recordFreshConsentDiagnostic(consentV2, consentHomepage);
-        const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
+        const compatibility = enrichConsentV2Evidence(consentV2, consentPageValid);
         cmp = {
           provider: compatibility.cmp_provider || (readiness.status === 'ready' && consentV2.result.reason_codes.includes('NO_CMP_DETECTED') ? 'Not Found' : 'Unknown'),
           confidence: compatibility.cmp_provider ? 'high' : 'low',
@@ -3770,9 +3791,10 @@ export async function runStorefrontAudit(
           consentCapture.markInitialObservationCompleted();
           const consentAccess = await inspectPageAccess(consentHomepage, navigation.response);
           const readiness = consentNavigationReadiness(consentAccess);
+          const consentPageValid = isValidStorefrontStatus(navigation.response?.status() ?? null) && consentAccess.category === 'none';
           consentV2 = await withinPhaseBudget('consent_pdp_reject', Math.min(available, 15_000), () => runConsentV2Session(consentHomepage!, {
             geo, geo_verified: requestedCountry ? evidence.runtime.proxy_country_verified : freshConsent.geo.verified,
-            page_valid: isValidStorefrontStatus(navigation.response?.status() || null),
+            page_valid: consentPageValid,
             requested_country: requestedCountry,
             timings: consentTimings, rollout: consentV2Controls, access_blocked: readiness.status !== 'ready', diagnostic: evidence.mode === 'diagnostic', geo_interstitial_unresolved: freshGeoIncomplete,
             geo_interstitial_target_unverified: geoTargetUnverified,
@@ -3783,9 +3805,10 @@ export async function runStorefrontAudit(
           evidence.runtime.consent_v2 = consentV2.telemetry;
           addAdRollBootstrapTrace(consentV2.telemetry.adroll_bootstrap);
           await recordFreshConsentDiagnostic(consentV2, consentHomepage!);
-          const compatibility = enrichConsentV2Evidence(consentV2, isValidStorefrontStatus(navigation.response?.status() || null));
+          const compatibility = enrichConsentV2Evidence(consentV2, consentPageValid);
           addTrace(freshConsentDetectionTraceStep(readiness.status === 'ready', compatibility.cmp_provider, evidence.consent.resolved_provider_evidence || []), {
-            provider: compatibility.cmp_provider, reason_codes: consentV2.result.reason_codes
+            provider: compatibility.cmp_provider, reason_codes: consentV2.result.reason_codes,
+            access_reason_code: readiness.status !== 'ready' ? consentAccess.reasonCode : null
           });
           addTrace('consent_v2_session_completed', { target_type: confirmedPdpUrl ? 'pdp' : 'homepage', pdp_url: safeUrl(consentTarget), provider: compatibility.cmp_provider, action_attempted: evidence.consent.interaction_attempted, rejection_verified: evidence.consent.rejection_verified, reason_codes: consentV2.result.reason_codes }, { module: 'consent', severity: 'info' });
         } catch (error) {

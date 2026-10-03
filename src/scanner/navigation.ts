@@ -126,6 +126,44 @@ function challengeReasonCode(type: AccessChallengeType) {
   } satisfies Partial<Record<AccessChallengeType, string>>)[type] || 'GENERIC_WAF_CHALLENGE';
 }
 
+const BROWSER_ERROR_HEADINGS = [
+  "this page couldn't load", "this site can't be reached", 'this webpage is not available'
+] as const;
+const CHROMIUM_NETWORK_ERROR_CODES = new Set([
+  'ERR_NAME_NOT_RESOLVED', 'ERR_CONNECTION_TIMED_OUT', 'ERR_CONNECTION_RESET',
+  'ERR_CONNECTION_REFUSED', 'ERR_CONNECTION_CLOSED', 'ERR_ADDRESS_UNREACHABLE',
+  'ERR_NETWORK_CHANGED', 'ERR_HTTP2_PROTOCOL_ERROR', 'ERR_INTERNET_DISCONNECTED',
+  'ERR_TIMED_OUT', 'ERR_EMPTY_RESPONSE', 'ERR_SSL_PROTOCOL_ERROR',
+  'ERR_QUIC_PROTOCOL_ERROR', 'ERR_NETWORK_ACCESS_DENIED', 'ERR_FAILED',
+  'ERR_TUNNEL_CONNECTION_FAILED', 'ERR_PROXY_CONNECTION_FAILED'
+]);
+
+// Classify captured browser facts only. Neither HTTP success, a sparse body,
+// nor an isolated error phrase/code establishes browser error presentation.
+export function detectBrowserErrorPage(input: AccessSignals): boolean {
+  const url = String(input.url || '').trim().toLowerCase();
+  if (/^(?:chrome-error|edge-error):\/\//.test(url) ||
+    /^(?:chrome|edge):\/\/(?:chromewebdata|network-error)(?:[/?#]|$)/.test(url) ||
+    /^about:neterror(?:[?#]|$)/.test(url)) return true;
+
+  const normalize = (value: string) => value.replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
+  const title = normalize(String(input.title || '').slice(0, 1_000));
+  const rawBody = String(input.bodyText || '').slice(0, 20_000);
+  const body = normalize(rawBody);
+  const browserHeading = BROWSER_ERROR_HEADINGS.some((heading) =>
+    body === heading || body.startsWith(`${heading} `) || body.startsWith(`${heading}.`));
+  if (!browserHeading) return false;
+
+  const networkCode = (rawBody.match(/\bERR_[A-Z0-9_]+\b/g) || [])
+    .some((code) => CHROMIUM_NETWORK_ERROR_CODES.has(code));
+  const dom = new Set(input.domSignals || []);
+  const browserStructure = dom.has('body.neterror') && dom.has('#main-frame-error');
+  const standardDetail = /\b(?:the )?webpage at .{1,500} might be temporarily down or (?:it may have )?moved permanently to a new web address\b/.test(body) ||
+    /\b(?:refused to connect|took too long to respond|server ip address could not be found|dns address could not be found|check if there is a typo in|unexpectedly closed the connection|the connection was reset|your connection was interrupted|didn't send any data|sent an invalid response)\b/.test(body);
+  const canonicalTitle = BROWSER_ERROR_HEADINGS.some((heading) => title === heading);
+  return browserStructure || (canonicalTitle && (standardDetail || networkCode)) || (networkCode && standardDetail);
+}
+
 export function resolveAccessDecision(input: AccessSignals): AccessDecision {
   const headers = normalizedHeaders(input.headers);
   const retryAfterMs = parseRetryAfterMs(headers['retry-after']);
@@ -138,6 +176,9 @@ export function resolveAccessDecision(input: AccessSignals): AccessDecision {
   const bot = detectAccessChallenge(input);
   if (bot.detected) {
     return { category: 'bot_protection', reasonCode: challengeReasonCode(bot.challengeType!), botProvider: bot.provider, botSignals: bot.signals, challengeType: bot.challengeType, retryAfterMs };
+  }
+  if (detectBrowserErrorPage(input)) {
+    return { category: 'access_blocked', reasonCode: 'BROWSER_ERROR_PAGE', botProvider: null, botSignals: [], challengeType: null, retryAfterMs };
   }
   if (input.status !== null && (INVALID_STOREFRONT_STATUSES.has(input.status) || input.status >= 500)) {
     return { category: 'access_blocked', reasonCode: `HTTP_${input.status}`, botProvider: null, botSignals: [], challengeType: null, retryAfterMs };

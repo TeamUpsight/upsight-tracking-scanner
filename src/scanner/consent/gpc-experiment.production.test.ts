@@ -3,6 +3,8 @@ import { chromium } from 'playwright-core';
 import { describe, expect, it, vi } from 'vitest';
 import { compareGpcObservations, installGpcProfile, openBrowserlessGpcExperimentSession, runGpcExperiment, type GpcObservation } from './gpc-experiment';
 import { buildBrowserlessCdpUrl, buildBrowserlessGpcExperimentUrl } from '../proxy/decodo';
+import { resolveAccessDecision } from '../navigation';
+import browserError from '../../../tests/fixtures/access-browser-error-page.json';
 
 async function localFixture(html = '<main>Fixture</main>') {
   const received: Array<string | null> = [];
@@ -23,6 +25,20 @@ async function closeServer(server: Server) {
 }
 
 describe('WP12B production-boundary GPC profile', () => {
+  it('P0.2A keeps HTTP-successful browser-error GPC arms access-invalid', async () => {
+    const fixture = await localFixture(`<title>${browserError.title}</title><main>${browserError.bodyText}</main>`);
+    const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, headless: true });
+    try {
+      const result = await runGpcExperiment({ browser, url: fixture.url, targetHost: '127.0.0.1', proxyCountry: 'us',
+        verifyEgress: async () => ({ country: 'us', fingerprint: 'same_fixture' }),
+        inspectAccess: async (page, response) => resolveAccessDecision({ status: response?.status() ?? null,
+          url: page.url(), title: await page.title(), bodyText: await page.locator('body').innerText() }) });
+      expect(result.control?.access).toMatchObject({ page_valid: false, category: 'access_blocked' });
+      expect(result.treatment?.access).toMatchObject({ page_valid: false, category: 'access_blocked' });
+      expect(result.outcome).toBe('access_inconclusive');
+    } finally { await browser.close(); await closeServer(fixture.server); }
+  }, 30_000);
+
   it('keeps canonical stealth while both diagnostic sessions use standard with matched proxy and opposite GPC flags', () => {
     const canonical = buildBrowserlessCdpUrl({ host: 'chrome.browserless.io', token: 'fixture-token', route: 'stealth',
       externalProxyServer: 'http://user:pass@proxy.example:10001', browserLocale: 'en-US', timeoutMs: 180_000 });
