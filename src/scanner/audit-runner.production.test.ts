@@ -10,6 +10,8 @@ import { isRequestForPdp } from './tracking/pdp-association';
 import { EvidenceCollector } from './evidence/evidence-collector';
 import { replayEvidence } from './quality/replay';
 import * as consentSession from './consent/v2-session';
+import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
+import { buildObservabilityConsistency } from './quality/observability';
 import browserError from '../../tests/fixtures/access-browser-error-page.json';
 
 // Most runner fixtures exercise compiled-production action wiring with a local
@@ -191,6 +193,50 @@ async function exactCountryFixture(
 }
 
 describe('runStorefrontAudit production browser wiring', () => {
+  it('P0.2B Audit-619-shaped earned absence survives finalization and two replays in both modes', async () => {
+    const sessions: consentSession.ConsentV2SessionOutput[] = [];
+    const runSession = consentSession.runConsentV2Session;
+    vi.spyOn(consentSession, 'runConsentV2Session').mockImplementation(async (...args) => {
+      const output = await runSession(...args);
+      sessions.push(output);
+      return output;
+    });
+    const merge = vi.spyOn(consentSession, 'mergeSharedConsentObservation');
+    const decisions = [];
+    for (const mode of ['normal', 'diagnostic'] as const) {
+      const result = await auditFixture(200,
+        '<title>Storefront catalog</title><main><h1>Shop eyewear</h1><p>Browse frames, sunglasses and our current collection.</p></main>',
+        true, ['consent'], false, {}, mode, 'USA', 'US') as unknown as StorefrontAudit;
+      const session = sessions.at(-1)!;
+      const compatibility = mapConsentV2ToExisting(session.result, {
+        geo: 'USA', page_valid: true, tracking_before_interaction: false
+      }, session.tracking);
+      expect(compatibility).toMatchObject({ cmp_provider: 'Not Found', consent_status: 'not_detected' });
+      expect(session.result.reason_codes).toContain('NO_CMP_DETECTED');
+      expect(session.telemetry).toMatchObject({ provider: null, provider_conflict: false, render_state: 'ready', session_status: 'completed' });
+      expect(merge.mock.results.at(-1)?.value).toMatchObject({ provider: null, provider_conflict: false });
+      const evidence = result.evidence_bundle!;
+      expect(evidence.page.valid).toBe(true);
+      expect(evidence.runtime).toMatchObject({ requested_country: 'US', actual_egress_country: 'US', exact_country_match: true, proxy_country_verified: true });
+      expect(evidence.consent.technical_blocker_reason).toBeUndefined();
+      expect(evidence.consent).toMatchObject({ resolved_provider: 'Not Found', resolved_provider_confidence: 'high' });
+      expect(evidence.consent.resolved_provider_evidence).toContain('NO_CMP_DETECTED');
+      expect(result).toMatchObject({ cmp_provider: 'Not Found', consent_status: 'not_detected', overall_status: 'warning' });
+      expect(result.reason_codes).toContain('CMP_NOT_DETECTED');
+      expect(JSON.parse(String(result.trace_steps))).toEqual(expect.arrayContaining([expect.objectContaining({ step: 'cmp_not_found' })]));
+      expect(buildObservabilityConsistency(result, evidence).checks.find((check) => check.code === 'OBS_CONSENT_PROVIDER_MISMATCH')?.status).not.toBe('mismatch');
+      const replayed = replayEvidence(JSON.parse(JSON.stringify(evidence)));
+      const again = replayEvidence(replayed.evidence_bundle!);
+      for (const replay of [replayed, again]) {
+        expect(replay).toMatchObject({ cmp_provider: result.cmp_provider, consent_status: result.consent_status, overall_status: result.overall_status });
+        expect(replay.evidence_bundle?.consent).toMatchObject({ resolved_provider: 'Not Found', resolved_provider_confidence: evidence.consent.resolved_provider_confidence });
+        expect(replay.evidence_bundle?.consent.resolved_provider_evidence).toEqual(evidence.consent.resolved_provider_evidence);
+      }
+      decisions.push([result.cmp_provider, result.consent_status, result.overall_status]);
+    }
+    expect(decisions[0]).toEqual(decisions[1]);
+  }, 120_000);
+
   it('uses the exact-country local fixture for Germany geo selection', async () => {
     const selector = '<title>Global shop</title><main>Catalog</main><div role="dialog" style="position:fixed;width:450px;height:160px">Choose your country to visit your local site. <a href="/de">Take me to Germany</a><a href="/fr">Take me to France</a></div>';
     const result = await auditFixture(200, (path) => path === '/de' ? '<title>German shop</title><main>Catalog DE</main>' : selector,

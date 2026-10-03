@@ -18,6 +18,24 @@ const fresh = (banner: 'visible' | 'not_visible' | 'unknown' = 'unknown', provid
 } as any);
 
 describe('shared CMP observation survival', () => {
+  it('P0.2B preserves shared named identity, banner and controls through providerless incomplete fresh observations', () => {
+    const incomplete = fresh('not_visible');
+    incomplete.telemetry.provider = null;
+    incomplete.telemetry.render_state = 'incomplete';
+    incomplete.telemetry.session_status = 'unavailable';
+    incomplete.telemetry.timeline.initial_observation_completed_at = null;
+    expect(mergeSharedConsentObservation(shared(), incomplete)).toMatchObject({
+      provider: 'onetrust', provider_conflict: false, banner: shared().banner, actions: shared().actions
+    });
+  });
+
+  it('P0.2B preserves shared generic/custom identity through providerless incomplete fresh observations', () => {
+    const incomplete = fresh();
+    incomplete.telemetry.provider = null;
+    incomplete.telemetry.render_state = 'incomplete';
+    expect(mergeSharedConsentObservation({ ...shared(), provider: 'generic' }, incomplete)).toMatchObject({ provider: 'generic', provider_conflict: false });
+  });
+
   it('CMP-SURVIVE-01 preserves OneTrust surface and controls when the fresh session is unavailable', () => {
     const merged = mergeSharedConsentObservation(shared(), null);
     expect(merged).toMatchObject({ provider: 'onetrust', banner: { visibility: 'visible' } });

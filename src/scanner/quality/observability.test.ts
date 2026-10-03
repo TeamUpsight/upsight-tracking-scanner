@@ -37,6 +37,18 @@ function fixture(mode: 'normal' | 'diagnostic' = 'diagnostic') {
 const audit = (evidence = fixture()): StorefrontAudit => ({ audit_id: 'obs', domain: 'example.com', group_label: null, scan_started_at: evidence.runtime.started_at, scan_completed_at: null, scan_status: 'completed', error_category: 'none', tested_geos: 'USA', cms_platform_detected: 'Unknown', overall_status: 'pass', overall_confidence: 'high', consent_status: 'pass', cmp_provider: 'OneTrust', product_payload_status: 'not_tested', pdp_url_tested: 'https://example.com/products/one', server_side_status: 'not_tested', ss_collection_type: 'not_tested', trace_steps: '[]', evidence_bundle: evidence });
 
 describe('WP10 diagnostic observability', () => {
+  it('P0.2B providerless runtime and earned canonical absence have no provider mismatch', () => {
+    const evidence = fixture();
+    evidence.runtime.consent_v2!.provider = null;
+    evidence.runtime.consent_v2!.generic_fallback = false;
+    evidence.consent.resolved_provider = 'Not Found';
+    evidence.consent.resolved_provider_evidence = ['NO_CMP_DETECTED'];
+    evidence.decision_summary!.find((item) => item.decision_name === 'cmp')!.status = 'Not Found';
+    const currentAudit = audit(evidence);
+    currentAudit.cmp_provider = 'Not Found';
+    expect(buildObservabilityConsistency(currentAudit, evidence).checks.find((check) => check.code === 'OBS_CONSENT_PROVIDER_MISMATCH')?.status).not.toBe('mismatch');
+  });
+
   it('preserves the persisted execution diagnostic in debug-package provenance', () => {
     const evidence = fixture();
     evidence.scanner_execution_mode = 'compiled_bundle';

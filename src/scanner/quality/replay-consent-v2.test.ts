@@ -34,6 +34,42 @@ function consentEvidence(trackingConsistency: 'consistent' | 'contradiction' | '
 }
 
 describe('Consent V2 canonical replay tracking consistency', () => {
+  it.each(['USA', 'EU', 'UK'] as const)('P0.2B preserves legitimately stored absence and confidence across two %s replays', (geo) => {
+    const collector = new EvidenceCollector({ auditId: 'earned-absence', domain: 'fixture.example', geo, mode: 'diagnostic', selectedModules: ['consent'] });
+    collector.setPage({ valid: true, statusCode: 200, accessCategory: 'none' });
+    const evidence = collector.bundle;
+    evidence.runtime.proxy_country_verified = true;
+    evidence.consent.executed = true;
+    evidence.consent.resolved_provider = 'Not Found';
+    evidence.consent.resolved_provider_confidence = 'medium';
+    evidence.consent.resolved_provider_evidence = ['NO_CMP_DETECTED'];
+    evidence.runtime.consent_v2 = { enabled: true, provider: null, provider_conflict: false, render_state: 'ready', session_status: 'completed' } as EvidenceBundle['runtime']['consent_v2'];
+    const first = replayEvidence(evidence);
+    const second = replayEvidence(first.evidence_bundle!);
+    for (const replay of [first, second]) {
+      expect(replay).toMatchObject({ cmp_provider: 'Not Found', consent_status: 'not_detected', overall_status: 'warning' });
+      expect(replay.evidence_bundle?.consent).toMatchObject({ resolved_provider: 'Not Found', resolved_provider_confidence: 'medium', resolved_provider_evidence: ['NO_CMP_DETECTED'] });
+    }
+  });
+
+  it.each(['incomplete observation', 'technical blocker', 'malformed absence'] as const)('P0.2B does not manufacture or protect absence for %s', (condition) => {
+    const collector = new EvidenceCollector({ auditId: 'unearned-absence', domain: 'fixture.example', geo: 'EU', mode: 'normal', selectedModules: ['consent'] });
+    collector.setPage({ valid: true, statusCode: 200, accessCategory: 'none' });
+    const evidence = collector.bundle;
+    evidence.runtime.proxy_country_verified = true;
+    evidence.consent.executed = true;
+    evidence.consent.resolved_provider = condition === 'malformed absence' ? 'Not Found' : null;
+    evidence.consent.resolved_provider_evidence = [];
+    evidence.consent.technical_blocker_reason = condition === 'technical blocker' ? 'DETECTION_INCONCLUSIVE' : undefined;
+    evidence.runtime.consent_v2 = { enabled: true, provider: null, render_state: 'ready', session_status: 'unavailable' } as EvidenceBundle['runtime']['consent_v2'];
+    const first = replayEvidence(evidence);
+    const second = replayEvidence(first.evidence_bundle!);
+    for (const replay of [first, second]) {
+      expect(replay).toMatchObject({ cmp_provider: null, consent_status: 'inconclusive', overall_status: 'inconclusive' });
+      expect(replay.reason_codes).not.toContain('NO_CMP_DETECTED');
+    }
+  });
+
   it('P0.2A preserves stored browser-error access despite ready render and completed Consent capture', () => {
     const collector = new EvidenceCollector({ auditId: 'audit-632-shaped', domain: 'fixture.example', geo: 'EU', mode: 'diagnostic', selectedModules: ['consent'] });
     const access = resolveAccessDecision(browserError);

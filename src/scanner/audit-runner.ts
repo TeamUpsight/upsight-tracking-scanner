@@ -33,6 +33,7 @@ import {
   navigateFreshConsentContext
 } from './consent/fresh-context';
 import { mapConsentV2ToExisting } from './consent/compatibility-mapper';
+import { resolveProjectedConsentProvider } from './consent/provider-projection';
 import { captureBrowserConsentFacts, installConsentCommandBootstrap } from './consent/browser-context-builders';
 import { resolveGeoInterstitial, type GeoInterstitialDecision } from './consent/geo-interstitial';
 import { certificationSafeConsentV2RolloutControls, consentV2RolloutControls, legacyAcceptActionEnabled } from './consent/rollout-controls';
@@ -1431,13 +1432,9 @@ export async function runStorefrontAudit(
     } : undefined;
     evidence.runtime.consent_v2 = telemetry;
     evidence.consent.executed = true;
-    evidence.consent.resolved_provider = legacyProviderForObservation(merged.provider);
-    evidence.consent.resolved_provider_confidence = merged.provider === 'generic' ? 'medium' : merged.provider ? 'high' : 'low';
-    if (merged.provider === 'generic') {
-      evidence.consent.resolved_provider_evidence = [...new Set([
-        ...(evidence.consent.resolved_provider_evidence || []).filter((code) => code !== 'NO_CMP_DETECTED'), 'CMP_PROVIDER_UNKNOWN'
-      ])];
-    }
+    Object.assign(evidence.consent, resolveProjectedConsentProvider(evidence.consent, {
+      provider: legacyProviderForObservation(merged.provider), provider_conflict: merged.provider_conflict
+    }));
     evidence.consent.banner_visible = merged.banner.visibility === 'visible' ? true : merged.banner.visibility === 'not_visible' ? false : null;
     evidence.consent.accept_action_available = has('accept_all');
     evidence.consent.reject_action_available = has('reject_all') || has('only_necessary');
@@ -1491,14 +1488,18 @@ export async function runStorefrontAudit(
     }, result.tracking);
     evidence.consent.executed = true;
     const merged = applyMergedConsentObservation(result);
-    const mergedProvider = legacyProviderForObservation(merged.provider);
-    if (mergedProvider) compatibility.cmp_provider = mergedProvider;
-    evidence.consent.resolved_provider = compatibility.cmp_provider;
-    evidence.consent.resolved_provider_confidence = compatibility.cmp_provider === 'Unknown' ? 'medium' : compatibility.cmp_provider ? 'high' : 'low';
-    evidence.consent.resolved_provider_evidence = [...new Set([
-      ...result.result.reason_codes.filter((code) => !merged.provider || code !== 'NO_CMP_DETECTED'),
-      ...(merged.provider === 'generic' ? ['CMP_PROVIDER_UNKNOWN'] : [])
-    ])];
+    const projected = resolveProjectedConsentProvider({
+      resolved_provider: compatibility.cmp_provider,
+      resolved_provider_confidence: compatibility.cmp_provider === 'Unknown' ? 'medium' : compatibility.cmp_provider ? 'high' : 'low',
+      resolved_provider_evidence: [...new Set(result.result.reason_codes)]
+    }, {
+      provider: legacyProviderForObservation(merged.provider) || (compatibility.cmp_provider === 'Not Found' ? null : compatibility.cmp_provider),
+      provider_conflict: merged.provider_conflict
+    });
+    // The compatibility result is authoritative for newly earned absence;
+    // shared positive/conflicting identity evidence still takes precedence.
+    Object.assign(evidence.consent, projected);
+    compatibility.cmp_provider = projected.resolved_provider ?? null;
     evidence.consent.technical_blocker_reason = compatibility.consent_status === 'inconclusive' ? compatibility.reason_code : undefined;
     evidence.consent.pre_choice_measurement = preChoice;
     evidence.consent.interaction_attempted = result.result.interactions.some((attempt) => attempt.action === 'reject_all' || attempt.action === 'only_necessary');
